@@ -9,7 +9,7 @@ use crate::ui::pages::main::MainPage;
 use crate::ui::pages::main::components::{
     self as components,
     elections_panel::elections_key,
-    repos_panel::keys::{repos_copy_path, repos_key},
+    repos_panel::keys::{repos_copy_path, repos_view_key},
     rooms_panel::rooms_key,
 };
 use crate::ui::pages::main::grant_form_text;
@@ -40,7 +40,7 @@ impl MainPage {
                 ));
                 return true;
             }
-            let action = repos_key(key, &view);
+            let action = repos_view_key(key, &view);
             let handled = action.is_some();
             if let Some(action) = action {
                 let _ = self.action_tx.send(Action::Repos(action));

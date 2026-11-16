@@ -149,24 +149,34 @@ async fn build_renew_request(
 /// credentials' contents.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RenewalError {
+    /// The reply failed the operational-document checks.
     #[error("the renewal reply {0}")]
     Document(#[from] OperationalError),
+    /// The reply is not a `vtc/members/renew/0.1` response.
     #[error("the renewal reply is not a vtc/members/renew/0.1 response")]
     Malformed,
+    /// The renewal names a member other than the persona it was sent to.
     #[error("the renewal names a member other than the persona it was sent to")]
     WrongMember,
+    /// The renewed VMC is not a conformant community grant.
     #[error("the renewed membership credential is not a conformant community grant: {0}")]
     VmcShape(String),
+    /// The renewed role credential is not a community role credential.
     #[error("the renewed role credential is not a community role credential: {0}")]
     RoleShape(String),
+    /// The renewed VMC did not verify.
     #[error("the renewed membership credential: {0}")]
     Vmc(IssuedCredentialError),
+    /// The renewed role credential did not verify.
     #[error("the renewed role credential: {0}")]
     RoleVac(IssuedCredentialError),
+    /// No Active membership with that community is held for the persona.
     #[error("we hold no Active membership with that community for this persona")]
     NoMembership,
+    /// The reply reached handling without having been checked.
     #[error("the renewal reply was not checked")]
     NotChecked,
+    /// The reply's check timed out or failed.
     #[error("the renewal reply's check did not finish (timed out or failed)")]
     CheckUnfinished,
 }
@@ -426,7 +436,12 @@ pub enum RenewalRefusal {
     /// the persona that asked.
     NotMember,
     /// Any other refusal, as the community put it.
-    Other { code: String, detail: String },
+    Other {
+        /// The refusal's code, as the community sent it; empty when it named none.
+        code: String,
+        /// The community's own words; empty when it gave none.
+        detail: String,
+    },
 }
 
 impl RenewalRefusal {
@@ -459,7 +474,9 @@ impl RenewalRefusal {
 pub enum RenewalOutcome {
     /// Renewed. `acknowledged` is whether the fresh acknowledgement went out.
     Renewed {
+        /// What the renewal changed.
         summary: RenewalSummary,
+        /// Whether the fresh acknowledgement went out; `Err` says why not.
         acknowledged: Result<(), String>,
     },
     /// The community refused it.

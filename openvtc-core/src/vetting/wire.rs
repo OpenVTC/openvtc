@@ -360,8 +360,11 @@ pub mod pcs {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct RootRequest {
+        /// The class label asked for, `vetter/<YYYY-MM>`.
         pub label: String,
+        /// The vetter's PCS identifier, multibase base58btc.
         pub id: String,
+        /// The blinded root request, as the suite serialises it.
         pub request: Value,
     }
 
@@ -369,8 +372,11 @@ pub mod pcs {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct RootResponse {
+        /// The label signed under: the one asked for.
         pub label: String,
+        /// The pre-credential, multibase base58btc; useless without the request's blinding state.
         pub pre_credential: String,
+        /// Vendor-namespaced extensions, kept opaque.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub ext: Option<Value>,
     }
@@ -379,8 +385,11 @@ pub mod pcs {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct TokensRequest {
+        /// The token label to draw under: the current monthly label or an approved event label.
         pub label: String,
+        /// Which tick of the label is being drawn.
         pub tick: u32,
+        /// One blinded serial per token asked for; no more than the community's `dripPerTick`.
         pub requests: Vec<TokenRequest>,
     }
 
@@ -388,7 +397,10 @@ pub mod pcs {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct TokenRequest {
+        /// A commitment to a serial only the vetter knows.
         pub commitment: String,
+        /// Proof that the commitment opens to a serial the vetter holds, bound to this label,
+        /// member and tick.
         pub opening_proof: String,
     }
 
@@ -396,9 +408,13 @@ pub mod pcs {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct TokensResponse {
+        /// The label served.
         pub label: String,
+        /// The tick served.
         pub tick: u32,
+        /// The blind signatures, positionally matching the request's `requests`.
         pub pre_credentials: Vec<String>,
+        /// Vendor-namespaced extensions, kept opaque.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub ext: Option<Value>,
     }
@@ -407,8 +423,11 @@ pub mod pcs {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct EventModeRequest {
+        /// The event, as the community names it.
         pub event_id: String,
+        /// One of the tiers the community publishes for the event.
         pub tier: String,
+        /// The days this vetter expects to be vetting at the event.
         pub window: EventWindow,
     }
 
@@ -417,7 +436,9 @@ pub mod pcs {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct EventWindow {
+        /// First day of the event, inclusive.
         pub start_date: chrono::NaiveDate,
+        /// Last day of the event, inclusive; not before `start_date`.
         pub end_date: chrono::NaiveDate,
     }
 
@@ -430,21 +451,29 @@ pub mod pcs {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct EventModeResponse {
+        /// The event the request names.
         pub event_id: String,
+        /// `pending` (recorded, awaiting approval) or [`EVENT_APPROVED`].
         pub state: String,
+        /// The tier recorded for this vetter at the event.
         pub tier: String,
+        /// The days recorded for this vetter at the event.
         pub window: EventWindow,
         /// How many vetters have asked, including us. A count and never a list: who else is at
         /// the event is the anonymity set.
         pub group_size: usize,
         /// How many this community needs before the event may be approved at all.
         pub group_floor: usize,
+        /// When approved: the token label to draw under with `pcs-tokens`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub label: Option<String>,
+        /// When approved: how many tokens a tick under the label yields.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub drip_per_tick: Option<usize>,
+        /// When approved: the last day the label is accepted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub closes_after: Option<chrono::NaiveDate>,
+        /// Vendor-namespaced extensions, kept opaque.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub ext: Option<Value>,
     }
@@ -457,6 +486,7 @@ pub mod pcs {
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct ChallengeRequest {
+        /// The admission criterion the coming submission answers, as a hint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub criterion_id: Option<String>,
     }
@@ -465,8 +495,11 @@ pub mod pcs {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     pub struct ChallengeResponse {
+        /// The challenge, lowercase hex: compared for equality, never parsed.
         pub challenge: String,
+        /// After this instant the challenge is refused.
         pub expires_at: chrono::DateTime<chrono::Utc>,
+        /// Vendor-namespaced extensions, kept opaque.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub ext: Option<Value>,
     }
@@ -1082,8 +1115,8 @@ pub(crate) mod tests {
 
     /// The statement's delivery is a Trust Task document signed by the vetter
     /// persona for `authentication`, addressed to the applicant and threaded on
-    /// the session, and it opens for the vetter only. An unsigned one — the
-    /// bare body this used to send — is still claimed, and refused.
+    /// the session, and it opens for the vetter only. An unsigned one — a
+    /// bare body — is still claimed, and refused.
     #[tokio::test]
     async fn a_statement_delivery_is_signed_for_authentication_and_refused_unsigned() {
         let (vetter, applicant, other) = (secret(1), secret(2), secret(3));

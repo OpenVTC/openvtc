@@ -5,7 +5,7 @@
 //! [`plan_relationship_did`] is the only step that touches [`Config`] (it
 //! reserves BIP32 paths), so it runs where `Config` lives;
 //! [`RDidPlan::create_io`] does the I/O and returns the `key_info` entries for
-//! the caller to record. Moved from the CLI (issue #530).
+//! the caller to record.
 
 use affinidi_tdk::{
     TDK,
@@ -47,15 +47,21 @@ pub enum RDidPlan {
     /// task derives the keys from a clone of the root. The root is boxed to keep
     /// the enum compact (it is the largest field by far).
     Bip32 {
+        /// The BIP32 root the keys derive from.
         root: Box<ed25519_dalek_bip32::ExtendedSigningKey>,
+        /// Reserved derivation path for the verification (signing) key.
         v_path: String,
+        /// Reserved derivation path for the encryption (key-agreement) key.
         e_path: String,
+        /// The mediator DID the relationship DID routes through.
         mediator: String,
     },
     /// VTA: the task creates the keys on the always-on admin session (cloned —
     /// cheap, shares the connection pool).
     Vta {
+        /// The admin VTA session the keys are created on.
         admin_vta: vta_sdk::client::VtaClient,
+        /// The mediator DID the relationship DID routes through.
         mediator: String,
     },
 }
@@ -65,7 +71,9 @@ pub enum RDidPlan {
 /// the (shared, `Arc`-based) TDK resolver inside the task, so they are visible to
 /// the loop's TDK; only the `Config` bookkeeping is left for `apply`.
 pub struct CreatedRDid {
+    /// The new relationship DID (a did:peer).
     pub r_did: String,
+    /// `key_info` entries keyed by the did:peer verification-method secret id.
     pub key_info: Vec<(String, KeyInfoConfig)>,
 }
 
@@ -136,7 +144,7 @@ impl RDidPlan {
     /// to record. Never touches `Config`.
     ///
     /// `service` + `remote_p_did` are only used to register the post-establishment
-    /// R-DID listener, exactly as the old inline path did right after key creation.
+    /// R-DID listener, right after key creation.
     pub async fn create_io(
         self,
         tdk: &TDK,

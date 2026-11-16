@@ -11,7 +11,7 @@
 //! `<config>` is `OPENVTC_CONFIG_PATH`, else `~/.config/openvtc` (the
 //! platform's config directory on Windows). The choice is kept per profile —
 //! `<config>/tui.toml` for `default`, `<config>/tui-{profile}.toml` otherwise —
-//! so running two instances under different profiles no longer makes a theme
+//! so running two instances under different profiles does not make a theme
 //! change in one repaint the others. The theme *library* (`<config>/themes/`)
 //! stays shared: it is content the person authored, not a per-profile setting.
 //!
@@ -130,8 +130,8 @@ pub struct Roots {
     pub system_omarchy: Option<PathBuf>,
     /// The active config profile. It scopes the remembered theme *choice*
     /// (`tui.toml` for `default`, `tui-{profile}.toml` otherwise), so two
-    /// instances running under different profiles no longer share a look — the
-    /// theme leaked across profiles because the choice file was fixed-named. The
+    /// instances running under different profiles do not share a look, as a
+    /// fixed-named choice file would make them. The
     /// theme *library* (`themes/`) stays shared: it is content the person
     /// authored, not a per-profile setting. Empty or `"default"` ⇒ `tui.toml`.
     pub profile: String,

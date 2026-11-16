@@ -12,11 +12,10 @@ use openvtc_core::vetting::wire;
 
 use super::dispatch::{back, page, persist, status};
 use super::jobs::Sent;
-use super::send::{abandon, begin, persona_did, sign_and_send};
+use super::send::{Claim, abandon, begin, persona_did, sign_and_send};
 use super::words::{
     clause, community_display, get_tokens_words, pcs_tokens_line, tokens_obtainable_now,
 };
-use crate::state_handler::background_dispatch::DispatchDomain;
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
 use crate::state_handler::main_page::content::{
     DeskView, PendingTicket, VETTING_TICKET_USES, VettingMembership, VettingMode, VettingTab,
@@ -211,7 +210,7 @@ pub(super) async fn issue_ticket(
     let sent = Sent::Manifest {
         community: community.clone(),
     };
-    if let Err(e) = sign_and_send(ctx, membership.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, membership.persona, document, sent, Claim::Held).await {
         let failure = ModeFailure::Unsent(e);
         ctx.config
             .private
@@ -219,7 +218,6 @@ pub(super) async fn issue_ticket(
             .mode_failed(&community, failure.clone(), now);
         let reading = ctx.config.private.vetting.vetter_mode(&community);
         let words = ticket_unconfirmed(&membership.name, &failure, &reading, now);
-        ctx.in_flight.finish(DispatchDomain::Vetting);
         ctx.state.main_page.log(words.clone());
         return status(ctx, Status::error(words));
     }

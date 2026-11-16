@@ -1,13 +1,12 @@
 //! The join flow, driven by the loop that owns it (#529).
 //!
-//! The join used to be a nested `tokio::select!` loop the runtime awaited
-//! inline, so while the join screen was up every other arm — saves, VTA
-//! supervision, inbound messages, timers — was parked. It is now a state
-//! machine: [`JoinDriver`] holds the open join (a [`JoinSession`]) and each of
-//! its methods does one step and returns.
+//! The join is a state machine: [`JoinDriver`] holds the open join (a
+//! [`JoinSession`]) and each of its methods does one step and returns, so
+//! while the join screen is up every other arm of the runtime — saves, VTA
+//! supervision, inbound messages, timers — keeps running.
 //!
 //! - **Actions** reach [`JoinDriver::on_action`] from the owning loop's action
-//!   arm. The pure page logic runs there, on the loop, unchanged.
+//!   arm. The pure page logic runs there, on the loop.
 //! - **Long network work** runs as an off-loop job on
 //!   [`DispatchDomain::Join`], one at a time. Its result comes back as
 //!   [`DispatchOutcome::Join`] carrying the job's generation, which
@@ -15,12 +14,12 @@
 //!   aborted or superseded job's result is ignored), and its progress lines as
 //!   [`ProgressUpdate::Join`], applied by [`JoinDriver::on_progress`].
 //! - **While a job is in flight** the join actions are queued and replayed, in
-//!   order, once it has finished — what the old loop's channel did — except
-//!   the ways out: `JoinCancel`, `Exit` and `UXError` abort the job at once.
+//!   order, once it has finished — except the ways out: `JoinCancel`,
+//!   `Exit` and `UXError` abort the job at once.
 //! - **A launch** is a saga ([`JoinSaga`]): off-loop stages with on-loop
 //!   applies between them, each recording what it did. Every way a launch can
 //!   stop short — a failed stage, a cancel, an interrupt — undoes it from
-//!   [`JoinSaga::compensations`], so what is rolled back no longer depends on
+//!   [`JoinSaga::compensations`], so what is rolled back does not depend on
 //!   where an `.await` happened to be when a future was dropped.
 //!
 //! Short, bounded sends (a manifest or challenge question, a wallet-session
@@ -1165,8 +1164,7 @@ impl JoinDriver {
         }
         if session.job.is_some() {
             // The ways out take effect now, whatever the job is waiting on;
-            // everything else waits its turn, as it did in the old loop's
-            // channel.
+            // everything else waits its turn.
             let step = match action {
                 Action::Exit => JoinStep::Exit(Interrupted::UserInt),
                 Action::UXError(interrupted) => JoinStep::Exit(interrupted),
@@ -1445,7 +1443,7 @@ impl JoinDriver {
 
     // ---- the pages ----
 
-    /// One action on an idle join: the old loop's `match`, arm for arm.
+    /// One action on an idle join.
     async fn act(&mut self, ctx: &mut JoinCtx<'_>, action: Action) -> JoinStep {
         match action {
             Action::Exit => return JoinStep::Exit(Interrupted::UserInt),

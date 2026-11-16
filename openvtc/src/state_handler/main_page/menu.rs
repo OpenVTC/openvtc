@@ -35,11 +35,8 @@ pub enum MainMenu {
     /// The holder's own identity — personas, the attribute pool behind them, the
     /// profiles over that pool, and what each persona presents in each community.
     ///
-    /// Sits beside the other "my …" panels rather than under the VTA service,
-    /// which is where its parts used to live: minting a persona DID was a menu
-    /// action, the list of them was a section of the VTA panel, and everything
-    /// above them was reachable only from `pnm`. Identity is not a property of
-    /// the agent that hosts its keys.
+    /// Sits beside the other "my …" panels rather than under the VTA service:
+    /// identity is not a property of the agent that hosts its keys.
     Identity,
     Settings,
     Vta,

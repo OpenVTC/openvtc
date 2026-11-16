@@ -32,8 +32,11 @@ use crate::errors::OpenVTCError;
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asked {
+    /// Vocabulary token of the attribute asked for.
     pub claim_type: String,
+    /// The community requires it: a submit without it is refused.
     pub required: bool,
+    /// The community's stated reason for asking, if it gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
 }

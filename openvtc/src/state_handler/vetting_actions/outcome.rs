@@ -652,8 +652,8 @@ mod tests {
         ));
     }
 
-    /// `f` on the card page opens the picker — the read used to land and be
-    /// dropped because the page was not the list — and wearing a face goes
+    /// `f` on the card page opens the picker — its read is not dropped for the
+    /// page not being the list — and wearing a face goes
     /// back to the card that asked for it, not to the list.
     #[test]
     fn a_face_chosen_from_the_card_returns_to_the_card() {

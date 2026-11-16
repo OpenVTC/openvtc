@@ -350,9 +350,9 @@ impl LoadingScreen {
     ///
     /// Says three things in order, because they are three different questions
     /// the user has: what is missing, what still works, and what to do about it.
-    /// The "what still works" half is not padding — the whole change this
-    /// belongs to exists so that one broken persona no longer means nothing
-    /// loads, and a report that only lists damage would hide that.
+    /// The "what still works" half is not padding — one broken persona does not
+    /// stop the rest loading, and a report that only lists damage would hide
+    /// that.
     fn integrity_lines(
         integrity: &openvtc_core::config::integrity::LoadIntegrity,
         width: usize,
@@ -636,11 +636,10 @@ impl ComponentRender<()> for LoadingScreen {
         // On failure, show the full error + a recovery suggestion. The error is
         // intentionally NOT truncated here — this screen is where the full
         // message lives (the main status bar truncates elsewhere).
-        // On failure the screen becomes a troubleshooting report. It used to
-        // print one fixed line — "check your network and that your VTA/mediator
-        // are reachable" — for every failure including the many with no network
-        // in them, which is the practice dev-guide R6.4 exists to forbid. What
-        // is shown now is derived from the typed error.
+        // On failure the screen becomes a troubleshooting report, derived from
+        // the typed error — not one fixed "check your network" line for every
+        // failure, including the many with no network in them, which is the
+        // practice dev-guide R6.4 exists to forbid.
         if let Some(diagnosis) = &self.props.diagnosis {
             // Padding is 1 either side, inside the already-centred column.
             let text_width = usize::from(content_width.saturating_sub(2));
@@ -1043,9 +1042,9 @@ mod tests {
     }
 
     /// A VTA that answered and refused the key is neither a network blip nor
-    /// an interrupted save. The report used to call it "temporary" and say
-    /// restart once connectivity is back — advice that can never work, for a
-    /// persona whose VTA context had been deleted and recreated.
+    /// an interrupted save. Calling it "temporary" and saying restart once
+    /// connectivity is back would be advice that can never work, for a persona
+    /// whose VTA context has been deleted and recreated.
     #[test]
     fn a_refused_key_is_not_described_as_a_network_fault() {
         use openvtc_core::config::{

@@ -83,8 +83,11 @@ pub enum DiscoverError {
     /// It answered and declined. `code` is the Trust Task error code, when the
     /// refusal was one.
     Refused {
+        /// The HTTP status it answered with.
         status: u16,
+        /// The Trust Task error code, when the refusal was one.
         code: Option<String>,
+        /// What it said, for display.
         detail: String,
     },
     /// It answered something that is not a manifest this client can read.
@@ -92,7 +95,10 @@ pub enum DiscoverError {
     /// The answer carries no usable proof, or one that does not verify.
     Unproven(String),
     /// The answer verifies, but against a DID that is not the community asked.
-    WrongSigner { proven: String },
+    WrongSigner {
+        /// The DID the proof verifies against.
+        proven: String,
+    },
 }
 
 impl DiscoverError {
@@ -190,7 +196,7 @@ fn trust_tasks_url(base: &str, policy: ProbePolicy) -> Result<reqwest::Url, Disc
 /// A community publishes its `VTCRest` endpoint in one of two forms: the API
 /// base including its `/v1` mount (what VTI's `vtc-host` template advertises
 /// since VTI #1615), or the bare host (communities minted before it). Appending
-/// `v1/trust-tasks` to the first gave `/v1/v1/trust-tasks`, which a VTC answers
+/// `v1/trust-tasks` to the first gives `/v1/v1/trust-tasks`, which a VTC answers
 /// with 405 (VTI-55), so the mount is added only when `base` does not already
 /// end with it.
 fn trust_tasks_url_string(base: &str) -> String {
@@ -237,9 +243,13 @@ fn anonymous_request(community_did: &str, protocol: JoinProtocol) -> Value {
 /// version the community answered in, and what that version says per
 /// criterion.
 pub struct FetchedManifest {
+    /// The manifest, parsed.
     pub manifest: Manifest,
+    /// The payload exactly as received.
     pub raw: Value,
+    /// The version of the join protocol the community answered in.
     pub protocol: JoinProtocol,
+    /// What that version says per criterion.
     pub meta: Vec<CriterionMeta>,
 }
 

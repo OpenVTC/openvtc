@@ -15,9 +15,9 @@
 //!
 //! [`claim_types`] is the table the other three resolve against — how a value
 //! is shown, and what it takes to let it leave. It is **read from the agent**
-//! like everything else here (`persona/claim-types/list`, VTI #1315); the
-//! compiled copy it used to be survives only as the answer for an agent too old
-//! to serve one. Its header says what that is worth and what it is not.
+//! like everything else here (`persona/claim-types/list`, VTI #1315); a
+//! compiled copy serves only as the answer for an agent too old to serve one.
+//! Its header says what that is worth and what it is not.
 //!
 //! This crate holds the persona; the agent holds what the persona says. They join on
 //! the `(context_id, persona_did)` pair every community membership already

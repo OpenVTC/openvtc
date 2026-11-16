@@ -1,20 +1,15 @@
 //! Building a Trust Task document — once, for every verb that sends one.
 //!
-//! # Why this exists
+//! # Why this is the one place
 //!
-//! Three copies of this had accumulated: `join::build_trust_task_document`,
-//! `personhood::build_document` and `vetting::wire::document`. They differed
-//! only in whether they returned a `Value` or a `TrustTask<Value>`; the logic —
-//! parse the type URI, set `issuer`, `recipient`, `issuedAt` — was identical in
-//! all three.
-//!
-//! `join.rs`'s own comment named the hazard while the second copy was being
-//! written: *"a second verb writing its own copy is how one of them ends up
-//! subtly different."* By the time this module was added there were three, and
-//! the difference they were guarding against is not theoretical — a document
-//! missing `issuedAt` is refused by a peer enforcing framework §7.3 item 17, and
-//! a document missing `recipient` is refused by one enforcing §7.2 item 5b.
-//! Neither failure names the missing field on the sender's side.
+//! Every verb that sends a Trust Task builds its document here, whether it
+//! wants a `Value` or a `TrustTask<Value>`: the logic — parse the type URI, set
+//! `issuer`, `recipient`, `issuedAt` — is the same for all of them, and a verb
+//! writing its own copy is how one of them ends up subtly different. The
+//! difference is not theoretical — a document missing `issuedAt` is refused by
+//! a peer enforcing framework §7.3 item 17, and a document missing `recipient`
+//! is refused by one enforcing §7.2 item 5b. Neither failure names the missing
+//! field on the sender's side.
 //!
 //! # What belongs here and what does not
 //!
@@ -71,10 +66,9 @@ pub fn build<P: Serialize>(
 /// behind `issuer_did`, which is what a consumer enforcing SPEC §7.2 item 7
 /// requires of a task whose specification declares `proof` REQUIRED. Five of
 /// this client's verbs declare exactly that — `join-requests/{submit, status}`,
-/// `members/{self-remove, vmc}` and `members/personhood/assert` — and until
-/// they signed, a VTC could only accept them by relaxing that rule for every
-/// task and every sender (VTI #1641, and the `require_declared_proof` escape
-/// hatch VTI #1659 had to add).
+/// `members/{self-remove, vmc}` and `members/personhood/assert` — and unsigned,
+/// a VTC could accept them only by relaxing that rule for every task and every
+/// sender (VTI #1641; the `require_declared_proof` escape hatch, VTI #1659).
 ///
 /// Transport attribution is not a substitute: an authcrypt sender or a TSP
 /// sender VID says who handed the document over, and the proof says who wrote
@@ -118,7 +112,7 @@ mod tests {
     /// A signed document carries a proof by the key behind its own `issuer`.
     ///
     /// Five of this client's verbs send tasks whose specification declares
-    /// `proof` REQUIRED, and until they signed, a VTC could accept them only by
+    /// `proof` REQUIRED, and unsigned, a VTC could accept them only by
     /// relaxing that rule for every task and every sender (VTI #1641). The
     /// verification method must name the issuer's own key: a proof by some
     /// other party establishes that somebody signed something, which is not

@@ -8,7 +8,7 @@
 ## 1. The core data-flow loop
 
 OpenVTC is a **single-mutator, unidirectional** design built on two tokio tasks
-joined in [`openvtc/src/main.rs:246`](../../openvtc/src/main.rs):
+joined in [`openvtc/src/main.rs`](../../openvtc/src/main.rs):
 
 ```text
         Action (mpsc::unbounded)                State (watch)
@@ -16,22 +16,22 @@ joined in [`openvtc/src/main.rs:246`](../../openvtc/src/main.rs):
   (renders State, emits Actions)    (the ONLY mutator of State)   (re-renders on change)
 ```
 
-- **`Action`** ([`state_handler/actions/mod.rs:176`](../../openvtc/src/state_handler/actions/mod.rs))
+- **`Action`** ([`state_handler/actions/mod.rs`](../../openvtc/src/state_handler/actions/mod.rs))
   flows UI → StateHandler over a `tokio::sync::mpsc::unbounded_channel`. The
   sender (`action_tx`) lives in `UiManager` / every UI page; the receiver
   (`action_rx`) is owned by the StateHandler loop.
 - **`State`** ([`state_handler/state.rs`](../../openvtc/src/state_handler/state.rs))
   flows StateHandler → UI over a `tokio::sync::watch` channel created in
   [`StateHandler::new`](../../openvtc/src/state_handler/mod.rs) (`state_tx` /
-  `state_rx`). After handling each event the loop sends a fresh clone:
-  `self.state_tx.send(state.clone())` (e.g.
-  [`mod.rs:1173`](../../openvtc/src/state_handler/mod.rs)).
-- The **StateHandler loop** is the single `tokio::select!` in
-  [`StateHandler::main_loop`](../../openvtc/src/state_handler/mod.rs) (~line 594).
+  `state_rx`). After handling each event the loop publishes the new state as
+  an `Arc<State>` (`PublishState::publish`).
+- The **StateHandler loop** is the `tokio::select!` in
+  [`Runtime::run`](../../openvtc/src/state_handler/runtime/mod.rs), one method
+  per arm (`runtime/arms.rs`, `runtime/inbound_arm.rs`, `runtime/timers.rs`).
   It is the *only* place `State` and `Config` are mutated. Every other producer
   (background tasks, the token-touch notifier, the DIDComm router) hands data
   back over a channel and the loop applies it.
-- The **UI loop** is [`UiManager::main_loop`](../../openvtc/src/ui/mod.rs:34): it
+- The **UI loop** is [`UiManager::main_loop`](../../openvtc/src/ui/mod.rs): it
   draws the current `State` via `AppRouter::render`, then `select!`s on crossterm
   events (→ `handle_key_event`) and `state_rx.changed()` (→ rebuild the router
   from the new `State` with `move_with_state`). The UI **never mutates `State`**;
@@ -48,25 +48,30 @@ The split is strict:
   state* (scroll offset, input buffers, cursor). Every page implements the
   [`Component`](../../openvtc/src/ui/component.rs) trait
   (`handle_key_event`, `move_with_state`, `render`). The
-  [`AppRouter`](../../openvtc/src/ui/pages/mod.rs:38) dispatches the key to the
+  [`AppRouter`](../../openvtc/src/ui/pages/mod.rs) dispatches the key to the
   page for the current `ActivePage` (`Loading` / `Main` / `Setup` / `Join`).
-  Example handlers live in
-  [`ui/pages/main/mod.rs`](../../openvtc/src/ui/pages/main/mod.rs) — e.g. `'j'`
-  → `action_tx.send(Action::StartJoin)` (line ~398). Pages have **no access to
+  The main page's handlers live in
+  [`ui/pages/main/mod.rs`](../../openvtc/src/ui/pages/main/mod.rs) and, per
+  panel, in `components/*/keys.rs` — e.g. `n` on Communities →
+  `action_tx.send(Action::StartJoin)`. Pages have **no access to
   `Config`, the VTA client, or the DIDComm service**.
-- **The StateHandler owns mutation and business logic.** Each `Action` arm in
-  `main_loop` either runs a pure-state nav update (`handle_nav_action`, the
-  shared reducer at [`mod.rs:1544`](../../openvtc/src/state_handler/mod.rs)) or
-  delegates to a **dispatch module** that takes `&mut Config`, the `TDK`, the
-  `DIDCommService`, `&mut State`, and the save scheduler.
+- **The StateHandler owns mutation and business logic.** Each `Action` is
+  handled in [`runtime_actions::handle_action`](../../openvtc/src/state_handler/runtime_actions.rs):
+  it either runs a pure-state nav update (`handle_nav_action` in
+  [`state_handler/mod.rs`](../../openvtc/src/state_handler/mod.rs), shared
+  with the degraded loop) or delegates to a **dispatch module** through an
+  `ActionCtx` holding `&mut Config`, the `TDK`, the messaging service,
+  `&mut State` and the save scheduler.
 
 So: "what does pressing X do?" is answered in `ui/pages/…`; "what happens to the
 data?" is answered in `state_handler/…`.
 
 ## 3. `state_handler/` module layout
 
-The loop in [`mod.rs`](../../openvtc/src/state_handler/mod.rs) is a thin router;
-the real work is decomposed into focused modules (declared at `mod.rs:50`):
+[`mod.rs`](../../openvtc/src/state_handler/mod.rs) holds the start-up and
+degraded (no-messaging) loops, the shared nav reducer and helpers; the runtime
+loop is [`runtime/`](../../openvtc/src/state_handler/runtime/mod.rs) and its
+action handling `runtime_actions.rs`. The feature work is in focused modules:
 
 | Module | Owns |
 |--------|------|
@@ -77,7 +82,8 @@ the real work is decomposed into focused modules (declared at `mod.rs:50`):
 | `agent_name_refresh.rs` | Off-loop batch resolution of agent names (DID→name), applied via background-dispatch (see §4). |
 | `inbox_actions.rs`, `relationship_actions.rs`, `credential_actions.rs`, `settings_actions.rs` | Per-panel business logic — each exposes a `dispatch(...)` entry point the matching `Action` arm calls. |
 | `persona_actions.rs` | The identity pane. `apply(&mut State, &PersonaAction)` is pure and returns a `PersonaEffect` naming any network work; the loop spawns it and folds the result back through `PersonaOutcome::apply`. Reads and writes share one `DispatchDomain`. |
-| `didcomm.rs` | `DIDCommService` integration: service start, listener config/ids, the `DIDCommEvent` enum, lifecycle logging. |
+| `didcomm` | A re-export of `openvtc_core::didcomm`: the messaging service, listener config/ids and lifecycle events. |
+| `runtime/`, `runtime_actions.rs` | The runtime loop (`Runtime`, one method per `select!` arm) and its action handler. |
 | `main_page/` | Maps `Config` → display state (`sync_from_config`), menu/content models. |
 | `setup_wizard.rs`, `setup_sequence/`, `setup_*_actions.rs` | The setup sub-flow (runs its own scoped `select!` loop, then returns control to `main_loop`). |
 | `join.rs`, `join_flow.rs`, `join_flow/driver.rs` | The join flow. `join.rs` is its page state; `join_flow.rs` its pure page logic and the bounded sends it makes while waiting on a community; `driver.rs` the `JoinDriver` state machine the runtime loop (and the State-A loop) drives — no loop of its own (see §4). |
@@ -92,7 +98,7 @@ testable without the TUI crate. Inbound dispatch itself (`process_inbound_messag
 [`openvtc-core/src/inbound/`](../../openvtc-core/src/inbound/mod.rs); the runtime
 loop calls it and applies the returned `InboundEffects` to `State`.
 The `MessageType` protocol enum lives in
-[`openvtc-core/src/lib.rs:171`](../../openvtc-core/src/lib.rs).
+[`openvtc-core/src/lib.rs`](../../openvtc-core/src/lib.rs).
 
 ## 4. Off-loop work (the loop must never block)
 
@@ -112,7 +118,15 @@ inbox accept/reject, context-DID delete):
    `on_busy` gets the busy message, to show or to remember as a deferred
    retry — a second action is rejected or deferred, never run alongside. Work
    due only once the claim succeeded (locking an overlay, arming a view on a
-   thread id) is done by the caller when `dispatch` returns `true`.
+   thread id) is done by the caller when `dispatch` returns `true`. Where
+   building the job itself changes state (inbox and relationship sends,
+   identity removal, a VRC request, a witnessing, a mediator reconnect, the
+   vetting sends), the caller first checks `InFlight::is_busy` and prepares
+   only when the domain is free; the loop runs one arm at a time, so the
+   claim `dispatch` then makes cannot be lost in between.
+   `background_dispatch::spawn_unclaimed` runs a job without claiming: for
+   work the client starts on its own (a revocation check, a step of hidden
+   vetting) that must never be refused or block a person's job.
 3. The job returns a `DispatchOutcome` over an mpsc the loop owns. The dedicated
    `Some(outcome) = dispatch_rx.recv()` arm calls `apply_outcome`, which mutates
    `State`/`Config` **on the loop thread** and clears the busy-flag. Mutation
@@ -137,10 +151,9 @@ concurrency (a sliding window of 4). The job does I/O only; `apply_outcome` fold
 the verified `(did, name)` results into `Config::agent_names` on the loop thread.
 
 **The join flow** ([`join_flow/driver.rs`](../../openvtc/src/state_handler/join_flow/driver.rs)) —
-the largest user of the pattern, and the one that used to break the rule: it
-ran its own nested `select!` loop that the runtime loop awaited inline, so
-saves, VTA supervision, inbound messages and timers all stopped while the join
-screen was up (#529). It is now a `JoinDriver` state machine the loop drives:
+the largest user of the pattern. It has no loop of its own — saves, VTA
+supervision, inbound messages and timers carry on while the join screen is up
+— and is a `JoinDriver` state machine the loop drives:
 
 1. While a join is open the loop's action arm hands every action to
    `JoinDriver::on_action`; page logic runs there, on the loop.
@@ -185,10 +198,11 @@ at each stage.
 1. Add the variant to the `Action` enum (or the right domain sub-enum) in
    [`state_handler/actions/mod.rs`](../../openvtc/src/state_handler/actions/mod.rs).
 2. Emit it from the relevant UI page (see "Add a keybinding").
-3. Handle it in [`StateHandler::main_loop`](../../openvtc/src/state_handler/mod.rs):
+3. Handle it in [`runtime_actions::handle_action`](../../openvtc/src/state_handler/runtime_actions.rs)
+   (its `match` is exhaustive, so the compiler points there):
    - **Pure nav / view change** → add an arm to `handle_nav_action`
-     ([`mod.rs:1544`](../../openvtc/src/state_handler/mod.rs)) so it is shared by
-     the runtime and degraded loops.
+     ([`state_handler/mod.rs`](../../openvtc/src/state_handler/mod.rs)) so it is
+     shared by the runtime and degraded loops.
    - **Local business logic** → add an arm that calls into the matching
      `*_actions::dispatch`.
    - **Network/blocking work** → follow the background-dispatch pattern (§4):
@@ -203,7 +217,7 @@ at each stage.
 
 1. Add the variant to `MessageType` and wire its protocol-URL string into the
    `From`/`TryFrom` impls in
-   [`openvtc-core/src/lib.rs:171`](../../openvtc-core/src/lib.rs).
+   [`openvtc-core/src/lib.rs`](../../openvtc-core/src/lib.rs).
 2. Put the **pure** handling logic (validation, body parsing, state derivation)
    in [`openvtc-core/src/messaging.rs`](../../openvtc-core/src/messaging.rs) so it
    is unit-testable without the TUI.

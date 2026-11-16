@@ -579,3 +579,615 @@ fn the_mediator_row_reconnects() {
         ))
     ));
 }
+
+// ----- Vetting, repos, rooms, elections and the overlays -----------------
+
+/// [`keys_match`] for a view whose handler is `taken` rather than the
+/// content panel's.
+#[track_caller]
+fn keys_match_with(
+    what: &str,
+    menu: MainMenu,
+    arm: impl Fn(&mut State) + Clone,
+    taken: fn(&mut MainPage, KeyEvent) -> bool,
+) {
+    let (page, _rx) = page_for(menu.clone(), arm.clone());
+    let listed = advertised(&page);
+    assert!(!listed.is_empty(), "{what}: the view advertises no keys");
+    let mut problems = Vec::new();
+    for key in universe() {
+        let (mut page, _rx) = page_for(menu.clone(), arm.clone());
+        let _ = advertised(&page);
+        let took = taken(&mut page, key);
+        let shown = listed.iter().any(|b| b.matches(&key));
+        if took != shown {
+            problems.push(format!(
+                "{} {}",
+                keymap::describe(&key),
+                if took {
+                    "is taken but not listed"
+                } else {
+                    "is listed but not taken"
+                }
+            ));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{what}: footer and handler disagree:\n  {}\n listed: {:?}",
+        problems.join("\n  "),
+        listed.iter().map(|b| b.key).collect::<Vec<_>>()
+    );
+}
+
+/// A view that takes every key — a confirmation, or a result any key
+/// dismisses — and says so: every plain key in [`universe`] is taken. A Ctrl
+/// chord reaches a view only where it lists it, so chords are left out.
+#[track_caller]
+fn takes_every_key(
+    what: &str,
+    menu: MainMenu,
+    arm: impl Fn(&mut State) + Clone,
+    taken: fn(&mut MainPage, KeyEvent) -> bool,
+) {
+    let (page, _rx) = page_for(menu.clone(), arm.clone());
+    let listed = advertised(&page);
+    assert!(!listed.is_empty(), "{what}: the view advertises no keys");
+    for key in universe()
+        .into_iter()
+        .filter(|key| !key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        let (mut page, _rx) = page_for(menu.clone(), arm.clone());
+        let _ = advertised(&page);
+        assert!(
+            taken(&mut page, key),
+            "{what}: {} is not taken",
+            keymap::describe(&key)
+        );
+    }
+}
+
+fn content(page: &mut MainPage, key: KeyEvent) -> bool {
+    page.handle_content_key_event(key)
+}
+
+fn overlay(page: &mut MainPage, key: KeyEvent) -> bool {
+    page.handle_overlay_key(key).expect("an overlay is open")
+}
+
+fn vetting_mode(
+    mode: impl Fn() -> crate::state_handler::main_page::content::VettingMode + Copy,
+) -> impl Fn(&mut State) + Copy {
+    move |s: &mut State| s.main_page.content_panel.vetting.mode = mode()
+}
+
+fn desk_row() -> crate::state_handler::main_page::content::DeskRow {
+    use crate::state_handler::main_page::content::{DeskRow, DeskStage};
+    DeskRow {
+        request_id: "r1".into(),
+        applicant: "did:example:applicant".into(),
+        applicant_name: None,
+        community: "did:example:community".into(),
+        pcs_zkp: false,
+        pcs_tokens: None,
+        pcs_events: false,
+        state: "accepted".into(),
+        stage: DeskStage::Accepted,
+        method: None,
+        match_code: None,
+        claims: Vec::new(),
+        required_claims: Vec::new(),
+        message: None,
+    }
+}
+
+#[test]
+fn vetting_lists_and_desk_keys_are_exactly_their_footers() {
+    use crate::state_handler::main_page::content::{DeskView, VettingTab};
+    keys_match(
+        "vetting applications, no persona",
+        MainMenu::Vetting,
+        |_| {},
+    );
+    keys_match(
+        "vetting applications, one",
+        MainMenu::Vetting,
+        super::key_handler_tests::vetting_rows,
+    );
+    for view in DeskView::ALL {
+        keys_match(
+            &format!("vetting desk, {view:?}, a row in every list"),
+            MainMenu::Vetting,
+            move |s| {
+                super::key_handler_tests::vetting_rows(s);
+                s.main_page.content_panel.vetting.tab = VettingTab::Desk;
+                s.main_page.content_panel.vetting.desk_view = view;
+            },
+        );
+    }
+    for view in DeskView::ALL {
+        for rows in [0, 2] {
+            keys_match(
+                &format!("vetting desk, {view:?}, {rows} rows"),
+                MainMenu::Vetting,
+                move |s| {
+                    let v = &mut s.main_page.content_panel.vetting;
+                    v.tab = VettingTab::Desk;
+                    v.desk_view = view;
+                    if rows > 0 {
+                        v.desk = vec![desk_row(), desk_row()].into();
+                    }
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn vetting_form_keys_are_exactly_their_footers() {
+    use crate::state_handler::main_page::content::{
+        AttestForm, DirectoryView, FaceChoice, VettingMode, VettingPersona,
+    };
+    let face = |name: &str| FaceChoice {
+        profile_id: name.into(),
+        name: name.into(),
+        entries: 1,
+        worn: false,
+        claim_types: Vec::new(),
+    };
+    keys_match(
+        "new application, community",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::NewApplication {
+            community: String::new(),
+            persona_index: 0,
+            context_options: Vec::new(),
+            context_index: 0,
+            field: 0,
+        }),
+    );
+    for personas in [1, 2] {
+        keys_match(
+            &format!("new application, persona of {personas}"),
+            MainMenu::Vetting,
+            move |s| {
+                s.main_page.content_panel.vetting.personas = (0..personas)
+                    .map(|i| VettingPersona {
+                        persona: openvtc_core::config::account::PersonaId::new(),
+                        did: format!("did:key:z{i}"),
+                        label: format!("p{i}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+                s.main_page.content_panel.vetting.mode = VettingMode::NewApplication {
+                    community: String::new(),
+                    persona_index: 0,
+                    context_options: Vec::new(),
+                    context_index: 0,
+                    field: 1,
+                };
+            },
+        );
+    }
+    keys_match(
+        "holder grant",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::HolderGrant {
+            credential_did: None,
+        }),
+    );
+    keys_match(
+        "choose a face, none made",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::ChooseFace {
+            application_id: "a1".into(),
+            faces: Vec::new(),
+            index: 0,
+            required: Vec::new(),
+        }),
+    );
+    keys_match("choose a face, two made", MainMenu::Vetting, move |s| {
+        s.main_page.content_panel.vetting.mode = VettingMode::ChooseFace {
+            application_id: "a1".into(),
+            faces: vec![face("work"), face("home")],
+            index: 0,
+            required: Vec::new(),
+        };
+    });
+    keys_match(
+        "ask a vetter",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::RequestVetter {
+            application_id: "a1".into(),
+            entry: String::new(),
+            vetter: String::new(),
+            ticket: None,
+            note: None,
+        }),
+    );
+    keys_match(
+        "vetter directory",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::Directory(Box::default())),
+    );
+    keys_match(
+        "vetter directory, results",
+        MainMenu::Vetting,
+        vetting_mode(|| {
+            let mut view = DirectoryView {
+                searched: true,
+                ..DirectoryView::default()
+            };
+            view.field = crate::state_handler::main_page::content::DIRECTORY_FIELDS;
+            VettingMode::Directory(Box::new(view))
+        }),
+    );
+    {
+        use crate::state_handler::main_page::content::{
+            EventForm, PROFILE_FIELDS, VetterProfileForm,
+        };
+        use openvtc_core::vetting::book::VetterPolicy;
+        use openvtc_core::vetting::registry::{EventDraft, ProfileDraft};
+        let form = |field: usize, event: bool| {
+            let mut draft = ProfileDraft::new(&VetterPolicy::default());
+            draft.events.push(EventDraft::default());
+            VetterProfileForm {
+                membership_index: 0,
+                draft,
+                field,
+                event: event.then(EventForm::default),
+                error: None,
+                state_line: None,
+            }
+        };
+        for field in 0..=PROFILE_FIELDS + 1 {
+            keys_match(
+                &format!("profile, field {field}"),
+                MainMenu::Vetting,
+                move |s| {
+                    s.main_page.content_panel.vetting.mode =
+                        VettingMode::Profile(Box::new(form(field, false)));
+                },
+            );
+        }
+        keys_match("profile, an event", MainMenu::Vetting, move |s| {
+            s.main_page.content_panel.vetting.mode = VettingMode::Profile(Box::new(form(0, true)));
+        });
+    }
+    keys_match(
+        "resend",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::Resend { index: 0 }),
+    );
+    keys_match(
+        "event mode",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::EventMode { index: 0 }),
+    );
+    keys_match(
+        "hidden vetting",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::HiddenVetting { index: 0 }),
+    );
+    keys_match(
+        "send a card",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::SendCard {
+            application_id: "a1".into(),
+            session_id: "s1".into(),
+            preview: None,
+        }),
+    );
+    for field in [0, 1] {
+        keys_match(
+            &format!("new ticket, field {field}"),
+            MainMenu::Vetting,
+            move |s| {
+                s.main_page.content_panel.vetting.mode = VettingMode::NewTicket {
+                    membership_index: 0,
+                    uses_index: 0,
+                    field,
+                };
+            },
+        );
+    }
+    keys_match(
+        "open a session",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::OpenSession {
+            request_id: "r1".into(),
+            method_index: 0,
+        }),
+    );
+    for field in 0..AttestForm::FIELDS {
+        keys_match(
+            &format!("attest, field {field}"),
+            MainMenu::Vetting,
+            move |s| {
+                s.main_page.content_panel.vetting.desk = vec![desk_row()].into();
+                s.main_page.content_panel.vetting.mode = VettingMode::Attest {
+                    request_id: "r1".into(),
+                    form: AttestForm {
+                        field,
+                        ..AttestForm::default()
+                    },
+                };
+            },
+        );
+    }
+    for field in [0, 1] {
+        keys_match(
+            &format!("decline, field {field}"),
+            MainMenu::Vetting,
+            move |s| {
+                s.main_page.content_panel.vetting.mode = VettingMode::ConfirmDecline {
+                    request_id: "r1".into(),
+                    reason_index: 0,
+                    message: String::new(),
+                    field,
+                };
+            },
+        );
+    }
+    keys_match(
+        "withdraw",
+        MainMenu::Vetting,
+        vetting_mode(|| VettingMode::Withdraw {
+            statement_id: "st1".into(),
+            reason_index: 0,
+        }),
+    );
+    for (what, mode) in [
+        (
+            "abandon",
+            (|| VettingMode::ConfirmAbandon {
+                application_id: "a1".into(),
+            }) as fn() -> VettingMode,
+        ),
+        ("delete a ticket", || VettingMode::ConfirmDeleteTicket {
+            ticket_id: "t1".into(),
+        }),
+    ] {
+        takes_every_key(what, MainMenu::Vetting, vetting_mode(mode), content);
+    }
+}
+
+fn room(state: &str) -> openvtc_core::community_rooms::RoomMembership {
+    serde_json::from_value(serde_json::json!({
+        "roomId": format!("did:webvh:example.com:rooms:{state}"),
+        "host": "did:example:community",
+        "label": "Board pack",
+        "visibility": "private",
+        "actions": ["read"],
+        "validUntil": "2027-10-01T00:00:00Z",
+        "state": state,
+        "offeredAt": "2026-10-14T10:00:00Z",
+        "roomState": "active",
+    }))
+    .unwrap()
+}
+
+fn rooms(
+    phase: crate::state_handler::main_page::rooms::RoomsPhase,
+    states: &'static [&'static str],
+) -> impl Fn(&mut State) + Clone {
+    move |s: &mut State| {
+        let mut view = crate::state_handler::main_page::rooms::RoomsView::new(
+            "did:key:zVtc".into(),
+            Default::default(),
+            "did:key:zAlice".into(),
+            "Acme".into(),
+        );
+        view.phase = phase.clone();
+        view.rooms = states.iter().map(|st| room(st)).collect();
+        view.held = Some(Vec::new());
+        s.main_page.content_panel.rooms.view = Some(view);
+    }
+}
+
+#[test]
+fn rooms_keys_are_exactly_their_footers() {
+    use crate::state_handler::main_page::rooms::RoomsPhase;
+    let cases: [(&str, RoomsPhase, &'static [&'static str]); 4] = [
+        ("rooms, loading", RoomsPhase::Loading, &[]),
+        ("rooms, failed", RoomsPhase::Failed("x".into()), &[]),
+        ("rooms, none offered", RoomsPhase::Loaded, &[]),
+        (
+            "rooms, offered",
+            RoomsPhase::Loaded,
+            &["offered", "admitted"],
+        ),
+    ];
+    for (what, phase, states) in cases {
+        let arm = rooms(phase, states);
+        let (page, _rx) = page_for(MainMenu::Communities, arm.clone());
+        let listed = advertised(&page);
+        let mut problems = Vec::new();
+        for key in universe() {
+            let (mut page, _rx) = page_for(MainMenu::Communities, arm.clone());
+            let _ = advertised(&page);
+            let took = page.handle_content_key_event(key);
+            if took != listed.iter().any(|b| b.matches(&key)) {
+                problems.push(keymap::describe(&key));
+            }
+        }
+        assert!(problems.is_empty(), "{what}: disagree on {problems:?}");
+    }
+}
+
+#[test]
+fn elections_keys_are_exactly_their_footers() {
+    use super::key_handler_tests::with_elections;
+    use crate::state_handler::main_page::elections::Screen;
+    for screen in [Screen::List, Screen::Detail, Screen::Ballot, Screen::Result] {
+        let arm = move |s: &mut State| with_elections(screen)(s);
+        keys_match(
+            &format!("elections, {screen:?}"),
+            MainMenu::Communities,
+            arm,
+        );
+    }
+    takes_every_key(
+        "elections, confirm the cast",
+        MainMenu::Communities,
+        |s| with_elections(Screen::Confirm)(s),
+        content,
+    );
+    takes_every_key(
+        "elections, disclose the membership",
+        MainMenu::Communities,
+        |s| with_elections(Screen::Disclose)(s),
+        content,
+    );
+}
+
+#[test]
+fn repos_keys_are_exactly_their_footers() {
+    use super::key_handler_tests::repos_view;
+    use crate::state_handler::main_page::repos::ReposPhase;
+    keys_match("repos, loading", MainMenu::Communities, |s| {
+        s.main_page.content_panel.repos.view = Some(repos_view());
+    });
+    keys_match("repos, failed", MainMenu::Communities, |s| {
+        let mut view = repos_view();
+        view.phase = ReposPhase::Failed("x".into());
+        s.main_page.content_panel.repos.view = Some(view);
+    });
+    keys_match("repos, none", MainMenu::Communities, |s| {
+        let mut view = repos_view();
+        view.phase = ReposPhase::Loaded;
+        s.main_page.content_panel.repos.view = Some(view);
+    });
+    // One repository, not checked out here: clone and use-existing apply,
+    // signing a checkout does not.
+    let with_repo = |screen: crate::state_handler::main_page::repos::ReposScreen| {
+        move |s: &mut State| {
+            let mut view = repos_view();
+            view.data = Some(Arc::new(
+                serde_json::from_value(serde_json::json!({
+                    "accounts": [],
+                    "namespaces": [{"id": "ns_1", "forge": "github.com", "owner": "acme",
+                                    "kind": "organization", "mode": "bridge", "state": "bound"}],
+                    "repos": [{"resource": "github.com/acme/gadgets", "visibility": "public",
+                               "state": "active", "owners": ["did:webvh:me"],
+                               "bootstrap": {"workflow": true, "keyring": true, "variables": true, "requiredCheck": true},
+                               "sync": {"state": "inSync", "drift": []}}],
+                    "rights": []
+                }))
+                .unwrap(),
+            ));
+            view.phase = ReposPhase::Loaded;
+            view.screen = screen.clone();
+            s.main_page.content_panel.repos.view = Some(view);
+        }
+    };
+    use crate::state_handler::main_page::repos::ReposScreen;
+    keys_match_with(
+        "repos, one repository",
+        MainMenu::Communities,
+        with_repo(ReposScreen::List),
+        content,
+    );
+    keys_match_with(
+        "repos, the repository",
+        MainMenu::Communities,
+        with_repo(ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        }),
+        content,
+    );
+}
+
+#[test]
+fn overlay_keys_are_exactly_their_footers() {
+    use crate::state_handler::main_page::content::{
+        AddVicPhase, AddVicState, AgentNameManagerPhase, AgentNameManagerState, AgentNameRow,
+        CommunitySwitcherState, CreatePersonaPhase, CreatePersonaState, PersonaPathChoice,
+    };
+    let create = |phase: CreatePersonaPhase, path_choice: PersonaPathChoice| {
+        move |s: &mut State| {
+            s.main_page.create_persona = Some(CreatePersonaState {
+                phase: phase.clone(),
+                path_choice,
+                ..CreatePersonaState::default()
+            });
+        }
+    };
+    keys_match_with(
+        "create persona, label",
+        MainMenu::Identity,
+        create(CreatePersonaPhase::Label, PersonaPathChoice::Auto),
+        overlay,
+    );
+    for choice in [PersonaPathChoice::Auto, PersonaPathChoice::Custom] {
+        keys_match_with(
+            &format!("create persona, path {choice:?}"),
+            MainMenu::Identity,
+            create(CreatePersonaPhase::Path, choice),
+            overlay,
+        );
+    }
+    for phase in [CreatePersonaPhase::Done, CreatePersonaPhase::Failed] {
+        takes_every_key(
+            &format!("create persona, {phase:?}"),
+            MainMenu::Identity,
+            create(phase, PersonaPathChoice::Auto),
+            overlay,
+        );
+    }
+
+    for names in [0, 2] {
+        keys_match_with(
+            &format!("agent names, {names} held"),
+            MainMenu::Identity,
+            move |s| {
+                s.main_page.agent_names = Some(AgentNameManagerState {
+                    phase: AgentNameManagerPhase::Ready,
+                    names: (0..names)
+                        .map(|i| AgentNameRow {
+                            name: format!("n{i}"),
+                            enabled: true,
+                        })
+                        .collect(),
+                    ..AgentNameManagerState::default()
+                });
+            },
+            overlay,
+        );
+    }
+
+    keys_match_with(
+        "add a VIC",
+        MainMenu::Vta,
+        |s| s.main_page.add_vic = Some(AddVicState::default()),
+        overlay,
+    );
+    for phase in [AddVicPhase::Done, AddVicPhase::Failed] {
+        takes_every_key(
+            &format!("add a VIC, {phase:?}"),
+            MainMenu::Vta,
+            move |s| {
+                s.main_page.add_vic = Some(AddVicState {
+                    phase: phase.clone(),
+                    ..AddVicState::default()
+                });
+            },
+            overlay,
+        );
+    }
+
+    keys_match_with(
+        "community switcher",
+        MainMenu::Communities,
+        |s| {
+            s.main_page.switcher = Some(CommunitySwitcherState {
+                items: vec![
+                    super::key_handler_tests::switcher_item("a", true),
+                    super::key_handler_tests::switcher_item("b", false),
+                ],
+                selected: 0,
+            });
+        },
+        overlay,
+    );
+}

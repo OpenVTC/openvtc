@@ -28,7 +28,9 @@ use crate::persona::profile::ProfileSummary;
 /// One value typed while composing a face.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComposeValue {
+    /// Vocabulary token of the claim.
     pub claim_type: String,
+    /// The value as typed.
     pub value: String,
     /// Make it reusable across the holder's faces. Off, it stays in this face.
     pub share: bool,
@@ -37,6 +39,7 @@ pub struct ComposeValue {
 /// What a compose made.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Composed {
+    /// The id of the face made.
     pub profile_id: String,
     /// True when the face lives in the community's context alone.
     pub local: bool,
@@ -130,19 +133,28 @@ pub async fn list_retired(client: &VtaClient) -> Result<Vec<ProfileSummary>, Ope
 /// One place a face is worn now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FaceUsage {
+    /// The context it is worn in.
     pub context_id: String,
+    /// The persona DID wearing it there.
     pub persona_did: String,
+    /// When it comes off by itself, RFC 3339; `None` while worn without end.
     pub until: Option<String>,
 }
 
 /// One thing that happened to a face. No value, no private label.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FaceEvent {
+    /// When it happened, as the VTA wrote it.
     pub at: String,
+    /// What happened: `composed`, `worn`, `disclosed`, `valueChanged`, and so on.
     pub kind: String,
+    /// The context it happened in, if any.
     pub context_id: Option<String>,
+    /// For a disclosure, who was told.
     pub verifier_did: Option<String>,
+    /// The claim types it concerned.
     pub claim_types: Vec<String>,
+    /// The face's version after a value change.
     pub version: Option<u64>,
 }
 
@@ -192,7 +204,9 @@ impl FaceEvent {
 /// Where a face is worn and what it has done.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FaceHistory {
+    /// Where it is worn now.
     pub usage: Vec<FaceUsage>,
+    /// What has happened to it, as the timeline lists it.
     pub events: Vec<FaceEvent>,
 }
 
@@ -275,16 +289,20 @@ pub async fn history(client: &VtaClient, profile_id: &str) -> Result<FaceHistory
 pub struct LocalEntry {
     /// Its position in the face — what promotion addresses.
     pub position: u64,
+    /// Vocabulary token of the value.
     pub claim_type: String,
 }
 
 /// A face made inside one community: its values live there alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalFace {
+    /// The id of the face.
     pub profile_id: String,
+    /// Its name; `unnamed face` when it has none.
     pub name: String,
     /// The version read — promotion is addressed against it.
     pub version: u64,
+    /// Its values, in position order.
     pub entries: Vec<LocalEntry>,
 }
 
@@ -368,9 +386,9 @@ pub async fn local_face_put(
             // construction and saying so would be this client asserting what
             // nobody checked.
             //
-            // It used to send one, through the SDK's own type, and every write
-            // was refused (VTI #1676): `LocalInlineValue` is that type without
-            // the member, so this no longer compiles the wrong way round.
+            // The SDK's own type carries the member, and the VTA refuses every
+            // write that sends it (VTI #1676): `LocalInlineValue` is that type
+            // without the member, so this cannot compile the wrong way round.
             inline: LocalInlineValue {
                 claim_type: v.claim_type,
                 value: Value::String(v.value),

@@ -208,8 +208,7 @@ impl Component for SetupFlow {
     fn handle_paste_event(&mut self, text: &str) {
         // Handle paste as a single operation instead of per-character key events.
         // This makes pasting large strings (DIDs) instant. The paste is
-        // inserted at the cursor, as on the main page (#578) — it used to
-        // replace the whole field here and append there.
+        // inserted at the cursor, as on the main page (#578).
         let trimmed = text.trim();
         let insert = |target: &mut tui_input::Input| {
             for c in trimmed.chars().filter(|c| !c.is_control()) {

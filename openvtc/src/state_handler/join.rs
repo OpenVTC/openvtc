@@ -1002,10 +1002,10 @@ mod tests {
         assert_eq!(known.row_of(JoinRoute::OpenRequest), Some(2));
     }
 
-    /// A ready application counts only for the persona it was made for. The
-    /// join used to fall back to *any* persona's ready application, so
-    /// choosing a new persona — or one with nothing ready — joined as the
-    /// persona that had been vetted, presenting its statements.
+    /// A ready application counts only for the persona it was made for. A join
+    /// that fell back to *any* persona's ready application would, for a new
+    /// persona — or one with nothing ready — join as the persona that had been
+    /// vetted, presenting its statements.
     #[test]
     fn a_ready_application_counts_only_for_its_own_persona() {
         let vetted = PersonaId::new();
@@ -1095,8 +1095,8 @@ mod tests {
     #[test]
     fn the_paste_row_precedes_join_without_it() {
         let mut js = JoinState::default();
-        // The empty case is the one the flow used to skip entirely: there is
-        // still a paste row to answer with, and it must not be the "without" row.
+        // The empty case is not skipped: there is still a paste row to answer
+        // with, and it must not be the "without" row.
         assert_eq!(js.invitation_paste_row(), 0);
         assert_eq!(js.invitation_without_row(), 1);
 

@@ -65,6 +65,23 @@ cargo clippy --workspace --all-targets -- -D warnings
   are declared as a `keymap::Binding` list, never typed into a footer
   string (`openvtc/src/ui/pages/main/keymap.rs`).
 
+### Comments
+
+- **A comment states what the code does now and why** — the invariant, the
+  constraint, the failure it prevents. It does not narrate how the code came
+  to be ("used to", "no longer", "previously", "before this", "was changed
+  to"): that history belongs in the commit message and CHANGELOG, and it goes
+  stale silently in a comment.
+- **An issue or PR reference is a trailing `(#NNN)`** on a sentence that
+  stands without it, never the explanation itself. Keep it when the issue
+  holds context worth following.
+- **Requirement and decision ids** (`R-C-6`, `D9`, `R1.2`) are kept only
+  where they resolve to a document in this repository or the design docs it
+  links (`docs/design/multi-community-support.md`,
+  `../design-docs/vti-stack-development-guide.md`).
+- A `//!` module header opens with what the module owns; what it must not
+  do and where to start reading come next.
+
 ### Commit Messages
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/) style: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
@@ -95,6 +112,9 @@ cargo clippy --workspace --all-targets -- -D warnings
    A test is `#[ignore]`d only because it is slow or boots an in-process
    service, never because it is flaky or broken, and its `ignore = "…"` reason
    says which. CI's `test-ignored` job runs every one of them and gates the PR.
+   The `coverage` job fails a PR whose workspace line coverage drops under its
+   floor (`--fail-under-lines` in `ci.yml`); raise the floor as coverage
+   rises, never lower it to make a PR pass.
 4. **Open the PR** with a clear title and description summarizing the change
 5. **Link related issues** using `Closes #123` or `Fixes #123` in the PR body
 6. **Respond to review feedback** promptly

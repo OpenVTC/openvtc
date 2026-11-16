@@ -277,13 +277,16 @@ pub async fn get_or_unknown(
 /// One persona of the holder's that a context knows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KnownHere {
+    /// The persona DID.
     pub persona_did: String,
     /// The name the holder gave this context for the face, if any.
     pub label: Option<String>,
+    /// Whether the persona presents anything in this context.
     pub bound: bool,
     /// The bound face was composed inside the context rather than pushed down
     /// from the pool.
     pub local: bool,
+    /// How many claims the binding carries.
     pub claim_count: u64,
 }
 

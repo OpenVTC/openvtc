@@ -227,9 +227,9 @@ fn render_detail(state: &CredentialsState, index: usize) -> Vec<Line<'static>> {
     ]));
     lines.push(Line::from(""));
 
-    // Who issued it and who it is about. `Contact`/`Agent name`/`Remote DID`
-    // used to sit alongside these naming the *same* party three more ways; the
-    // full DIDs are in the raw credential below, so the summary keeps names.
+    // Who issued it and who it is about — once each, not the *same* party three
+    // more ways (`Contact`/`Agent name`/`Remote DID`). The full DIDs are in the
+    // raw credential below, so the summary keeps names.
     let party = |alias: Option<&str>, name: Option<&str>, did: &str| -> String {
         let resolved = display_identifier(name, did, 256).into_owned();
         match alias {

@@ -875,9 +875,9 @@ async fn a_bad_scanned_ticket_is_refused_and_the_applicant_hears_why() {
         reply.document.payload["code"],
         VETTING_REQUEST_ERR_INVALID_TICKET
     );
-    // The vetter hears about it too. A refusal used to leave nothing at all on
-    // their side, so the one person who can issue a fresh ticket saw an empty
-    // desk and no way to find out that anybody had tried.
+    // The vetter hears about it too. A refusal that left nothing on their side
+    // would show the one person who can issue a fresh ticket an empty desk and
+    // no way to find out that anybody had tried.
     let Some(Notice::RequestRefused {
         applicant: who,
         code,
@@ -3073,7 +3073,7 @@ async fn a_refused_binding_question_is_said_and_not_asked_every_pass() {
 }
 
 /// No credential and no token are states a vetter waits out — not "parameters could not be
-/// read", which is what both used to say. The VTA refuses with `notEnrolled` / `noToken`, and the
+/// read". The VTA refuses with `notEnrolled` / `noToken`, and the
 /// desk says them in these words.
 #[test]
 fn attesting_without_a_credential_or_a_token_says_which() {

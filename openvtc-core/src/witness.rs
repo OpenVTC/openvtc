@@ -96,22 +96,30 @@ pub enum WitnessError {
     /// The member's VTA refused a step. `code` is the rejection's code as sent.
     #[error("{}", vta_refusal_text(.step, .code, .message))]
     VtaRefused {
+        /// The step the VTA refused, worded to follow "refused to".
         step: &'static str,
+        /// The rejection's code, as the VTA sent it.
         code: String,
+        /// The VTA's own words for the rejection.
         message: String,
     },
     /// The VTA could not be reached, or answered with something that is not the task's answer.
     #[error("your VTA could not {step}: {source}")]
     Vta {
+        /// The step that failed, worded to follow "could not".
         step: &'static str,
+        /// The VTA call's failure.
         #[source]
         source: VtaError,
     },
     /// The witness answered with a declared refusal.
     #[error("{}", witness_refusal_text(.refusal, .code, .message))]
     Refused {
+        /// Which declared refusal it was.
         refusal: WitnessRefusal,
+        /// The refusal's code, as the witness sent it.
         code: String,
+        /// The witness's own words, when it gave any.
         message: Option<String>,
     },
     /// The witness did not answer in time.
@@ -121,13 +129,17 @@ pub enum WitnessError {
         .waited.as_secs()
     )]
     NoAnswer {
+        /// Which document went unanswered.
         document: &'static str,
+        /// How long this client waited.
         waited: Duration,
     },
     /// The document could not be handed to the transport.
     #[error("could not send the {document} to the witness: {reason}")]
     Send {
+        /// Which document could not be sent.
         document: &'static str,
+        /// Why the transport did not take it.
         reason: String,
     },
     /// The relationship DID and the witness share no transport a witness can answer on.
@@ -372,8 +384,11 @@ pub enum WitnessReply {
     Answered(Value),
     /// A `trust-task-error`: the session ends here. Never handed to the VTA.
     Refused {
+        /// Which declared refusal it was.
         refusal: WitnessRefusal,
+        /// The refusal's code, as the witness sent it.
         code: String,
+        /// The witness's own words, when it gave any.
         message: Option<String>,
     },
 }
@@ -577,6 +592,7 @@ impl Waiting {
 /// arrived, and [`run`] waits for that.
 #[async_trait]
 pub trait Carrier: Send + Sync {
+    /// Hand `document` to the transport, addressed to the witness.
     async fn send(&self, document: &Value) -> Result<(), String>;
 }
 
@@ -586,7 +602,10 @@ pub trait Carrier: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WitnessRoute {
     /// TSP, through the witness's advertised mediator.
-    Tsp { witness_mediator: String },
+    Tsp {
+        /// The witness's TSP mediator, as its DID document advertises it.
+        witness_mediator: String,
+    },
     /// DIDComm, in the Trust Task binding envelope.
     Didcomm,
 }
@@ -637,10 +656,13 @@ pub async fn resolve_document(
 /// Carries documents over DIDComm on the relationship DID's own listener, in the Trust Task
 /// binding envelope, through the durable outbox (`didcomm::send_message_via`).
 pub struct DidcommCarrier {
+    /// The DIDComm messaging service that carries the document.
     pub service: crate::didcomm::Messaging,
     /// The relationship DID's listener — the one websocket the mediator allows it.
     pub listener_id: String,
+    /// Our DID in the relationship: the sender.
     pub relationship_did: String,
+    /// The witness's DID: the recipient.
     pub witness_did: String,
 }
 
@@ -671,9 +693,13 @@ impl Carrier for DidcommCarrier {
 
 /// Carries documents over TSP from a persona DID, through the witness's advertised mediator.
 pub struct TspCarrier {
+    /// The messaging client the document is sent through.
     pub atm: affinidi_tdk::messaging::ATM,
+    /// The sending DID's messaging profile.
     pub profile: Arc<affinidi_tdk::messaging::profiles::ATMProfile>,
+    /// The witness's DID: the recipient.
     pub witness_did: String,
+    /// The witness's TSP mediator, the hop the document is sealed to.
     pub witness_mediator: String,
 }
 
@@ -759,6 +785,7 @@ pub struct MembershipEvidence {
 /// One relationship to have witnessed.
 #[derive(Debug, Clone)]
 pub struct WitnessRequest {
+    /// The witness's DID.
     pub witness_did: String,
     /// Our DID in the relationship — the party, and the sender of every document.
     pub relationship_did: String,
@@ -779,15 +806,22 @@ pub struct WitnessRequest {
 /// A step of the round, for a progress line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
+    /// Making sure the VTA's vault holds the credentials to present.
     StoringCredentials,
+    /// Asking the VTA to open a session.
     Opening,
+    /// Waiting for the witness to answer the session document.
     AwaitingSession,
+    /// Asking the VTA to present the credentials.
     Presenting,
+    /// Waiting for the witness to answer the submission with its VWC.
     AwaitingOutcome,
+    /// Asking the VTA to verify and store the witness's VWC.
     Accepting,
 }
 
 impl Step {
+    /// The step as a progress line for the member.
     pub fn describe(self) -> &'static str {
         match self {
             Step::StoringCredentials => "Making sure your VTA holds the credentials to present…",
@@ -804,10 +838,13 @@ impl Step {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Witnessed {
+    /// The witnessed session's id.
     pub session_id: String,
     /// The VWC's handle in the VTA's credential vault.
     pub credential_id: String,
+    /// The witness's DID, as the VTA reports it.
     pub witness: String,
+    /// The VWC's digest, multibase, as the VTA reports it.
     pub vwc_digest_multibase: String,
     /// `{ session, outcome }`: the session document and the witness's submit `#response`, which
     /// carries the VWC. What a community needs beside the VWC to count it.
@@ -823,10 +860,15 @@ impl Witnessed {
 
 /// Everything [`run`] needs that is not the request.
 pub struct Round<'a> {
+    /// The member's VTA, which opens, presents and accepts.
     pub vta: &'a VtaClient,
+    /// The transport that carries documents to the witness.
     pub carrier: &'a dyn Carrier,
+    /// Where the witness's answers arrive.
     pub router: &'a ReplyRouter,
+    /// Resolves the witness's verification methods to check its proofs.
     pub resolver: &'a TrustTaskVmResolver,
+    /// How long to wait for each of the witness's answers.
     pub answer_timeout: Duration,
 }
 
@@ -996,7 +1038,9 @@ pub struct WitnessRecord {
     pub remote_p_did: String,
     /// Our DID in the relationship.
     pub relationship_did: String,
+    /// When the VTA accepted the witness's credential.
     pub witnessed_at: DateTime<Utc>,
+    /// What the witnessing produced.
     #[serde(flatten)]
     pub witnessed: Witnessed,
 }
@@ -1008,6 +1052,7 @@ pub struct WitnessRecord {
 pub struct Witnessings(pub Vec<WitnessRecord>);
 
 impl Witnessings {
+    /// Whether no witnessing has been kept.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

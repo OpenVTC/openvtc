@@ -189,8 +189,8 @@ mod tests {
     }
 
     /// Height is a budget like width, and for a harder reason: a code taller
-    /// than the panel used to be drawn anyway and run off the bottom, which is
-    /// not a smaller code but a picture of nothing.
+    /// than the panel, drawn anyway, runs off the bottom, which is not a
+    /// smaller code but a picture of nothing.
     #[test]
     fn a_short_window_gets_a_shorter_code_or_is_told_how_tall_to_be() {
         let full = qr_lines(LINK, ROOMY, ROOMY).unwrap();

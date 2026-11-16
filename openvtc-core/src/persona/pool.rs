@@ -132,6 +132,7 @@ pub struct PoolAttribute {
     /// The value, present only when the read asked for values **and** the store
     /// could produce one.
     pub value: Option<Value>,
+    /// Where the value comes from, which decides whether the holder may retype it.
     pub provenance: ProvenanceKind,
     /// A credential-backed value that could not be re-derived. Distinct from an
     /// absent [`value`](Self::value), which usually just means the read did not
@@ -144,6 +145,7 @@ pub struct PoolAttribute {
     /// Optimistic-concurrency token, passed back on edit so two editors cannot
     /// silently overwrite each other.
     pub version: u64,
+    /// When the attribute was last written, as the VTA wrote it.
     pub updated_at: String,
     /// Vault ids of credentials in which someone endorses this value.
     /// Inventory, not evidence: it never changes the provenance. Carried so an
@@ -294,9 +296,13 @@ pub struct AttributeDraft {
     /// The version the editor was opened against, so a concurrent edit is
     /// refused rather than silently overwritten. `None` when creating.
     pub expected_version: Option<u64>,
+    /// Vocabulary token: `name.legal`, `phone.mobile`.
     pub claim_type: String,
+    /// The holder's own words for their own picker. Never disclosed.
     pub label: Option<String>,
+    /// The value to store.
     pub value: Value,
+    /// The type of `value`.
     pub value_type: ValueType,
     /// The endorsements the attribute already has, sent back unchanged. This
     /// editor has no control for them; dropping them would lose a vouch by
@@ -404,12 +410,11 @@ pub async fn list(
 /// reveal (`s`) — so the holder gets the one value they asked for without the
 /// bulk [`list`] having carried every sensitive value into memory.
 ///
-/// One task, one attribute. This used to be a `typePrefix`-scoped listing
-/// filtered here to `attribute_id`, because the family had no by-id read: to
-/// show one email address the agent decrypted every email address the holder
-/// has and sent them all, and its audit trail recorded a listing of the pool
-/// rather than a decision about one value. `persona/attribute/get` is that
-/// read, and the claim type is no longer a parameter because nothing needs it.
+/// One task, one attribute: `persona/attribute/get`, not a `typePrefix`-scoped
+/// listing filtered here to `attribute_id`. A listing would have the agent
+/// decrypt and send every email address the holder has to show one, and its
+/// audit trail would record a listing of the pool rather than a decision about
+/// one value. The claim type is not a parameter because nothing needs it.
 ///
 /// Returns `Ok(None)` when the store no longer has it — deleted, or renamed
 /// out from under the pane.

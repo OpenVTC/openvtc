@@ -845,10 +845,10 @@ async fn take_request(
                         document,
                         eligibility: None,
                     }),
-                // A refusal used to leave nothing behind at all, so a vetter
-                // whose applicant was turned away saw an empty desk and had no
-                // way to find out why — the one end that can fix a stale
-                // ticket learned nothing. Only refusals are noticed, never the
+                // A refusal leaves a notice: without one, a vetter whose
+                // applicant was turned away sees an empty desk and has no way
+                // to find out why — the one end that can fix a stale ticket
+                // learns nothing. Only refusals are noticed, never the
                 // silent branch: that one exists so a guesser cannot discover
                 // the vetter, and a log line they could provoke would hand
                 // them the same discovery from the other side.
@@ -1663,10 +1663,10 @@ fn refused(
 /// A community refuses at the DIDComm layer — before the Trust Task pipeline,
 /// so with no `trust-task-error` — when it cannot take the message at all: a
 /// document typed as its task URI rather than carried in the binding envelope
-/// is the case VTI #1687 made universal. The report threads on the message id,
+/// is the common case (VTI #1687). The report threads on the message id,
 /// which is the document id the question is filed under, so it answers the
 /// question exactly as a `trust-task-error` would. Without this the person
-/// asking waited out the timeout and was told nobody answered.
+/// asking would wait out the timeout and be told nobody answered.
 ///
 /// `None` when it threads on nothing of vetting's, so the join handler after
 /// this still sees the reports that are its own.

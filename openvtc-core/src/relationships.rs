@@ -1019,16 +1019,22 @@ pub async fn did_binding_proofs(
 /// Why a relationship DID was not accepted. Names what failed, never a DID.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DidBindingError {
+    /// No check result was found for these proofs before the message was handled.
     #[error("its proofs were not checked")]
     NotChecked,
+    /// The check timed out, or its task failed.
     #[error("its proofs' check did not finish (timed out or failed)")]
     CheckUnfinished,
+    /// The relationship DID's proof of control is missing.
     #[error("it carries no proof of control of the relationship DID")]
     MissingDidProof,
+    /// The persona's proof naming a distinct relationship DID is missing.
     #[error("it carries no proof from the persona naming the relationship DID")]
     MissingPersonaProof,
+    /// The relationship DID's proof did not verify.
     #[error("the relationship DID's proof: {0}")]
     DidProof(crate::proof_check::ProofError),
+    /// The persona's proof did not verify.
     #[error("the persona's proof: {0}")]
     PersonaProof(crate::proof_check::ProofError),
 }

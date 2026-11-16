@@ -1,5 +1,6 @@
-//! Shared sending helpers: claiming the vetting domain, signing a message
-//! on the loop and handing its send to a background job.
+//! Shared sending helpers: checking the vetting domain is free, signing a
+//! message on the loop and handing its send to a background job, which claims
+//! the domain when it is dispatched.
 
 use crate::state_handler::main_page::status::Status;
 use affinidi_tdk::didcomm::Message;
@@ -11,16 +12,19 @@ use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 
 use super::dispatch::status;
 use super::jobs::{SendJob, Sent};
-use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
+use crate::state_handler::background_dispatch::{self, DispatchDomain, InFlight};
 use crate::state_handler::runtime_actions::ActionCtx;
 
 // ============================================================================
 // Sending
 // ============================================================================
 
-/// Claim the vetting domain, or say why not.
+/// Whether the vetting domain is free for a job a person starts, or say why
+/// not. Checked before any preparation, so nothing is prepared for a job that
+/// would be refused; the job claims the domain when it is dispatched
+/// ([`Claim::Held`]).
 pub(super) fn begin(ctx: &mut ActionCtx<'_>) -> bool {
-    if ctx.in_flight.try_begin(DispatchDomain::Vetting) {
+    if !ctx.in_flight.is_busy(DispatchDomain::Vetting) {
         return true;
     }
     status(
@@ -30,10 +34,34 @@ pub(super) fn begin(ctx: &mut ActionCtx<'_>) -> bool {
     false
 }
 
-/// Give up on a send before it started: release the domain, say why, and show
-/// whatever the book now holds.
+/// Whether a vetting job holds the vetting domain while it runs.
+#[derive(Clone, Copy)]
+pub(super) enum Claim {
+    /// A job a person started, after [`begin`]: it holds the domain, so a
+    /// second one is refused until it finishes.
+    Held,
+    /// A send the client makes on its own — a refresh, a step of hidden
+    /// vetting the VTA finished — which is never refused and holds nothing.
+    Unheld,
+}
+
+/// Hand `job` to the background, claiming the vetting domain if it is a
+/// person's ([`Claim::Held`]).
+pub(super) fn spawn<J: background_dispatch::Job>(ctx: &mut ActionCtx<'_>, job: J, claim: Claim) {
+    match claim {
+        Claim::Held => {
+            background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |busy| {
+                ctx.state.main_page.content_panel.vetting.status_message =
+                    Some(Status::warning(busy));
+            });
+        }
+        Claim::Unheld => background_dispatch::spawn_unclaimed(job, ctx.dispatch_tx),
+    }
+}
+
+/// Give up on a send before it started: say why, and show whatever the book
+/// now holds. Nothing was dispatched, so nothing holds the domain.
 pub(super) fn abandon(ctx: &mut ActionCtx<'_>, what: &str, error: impl std::fmt::Display) {
-    ctx.in_flight.finish(DispatchDomain::Vetting);
     let message = format!("{what}: {error}");
     ctx.state.main_page.log(message.clone());
     ctx.state.main_page.sync_from_config(ctx.config);
@@ -53,13 +81,13 @@ pub(super) fn resolver(ctx: &ActionCtx<'_>) -> TrustTaskVmResolver {
 
 /// Sign `document` as `persona` — with its authentication key, under
 /// `proofPurpose: authentication`, like every request — then hand the send
-/// to a background job. The caller has claimed the domain; on error it is
-/// still claimed.
+/// to a background job, held as `claim` says. On error nothing was sent.
 pub(super) async fn sign_and_send(
     ctx: &mut ActionCtx<'_>,
     persona: PersonaId,
     mut document: Document,
     sent: Sent,
+    claim: Claim,
 ) -> Result<(), String> {
     let keys = ctx
         .config
@@ -86,7 +114,7 @@ pub(super) async fn sign_and_send(
             sent_at: chrono::Utc::now(),
         });
     }
-    spawn_send(ctx, message, &from, &to, sent);
+    spawn_send(ctx, message, &from, &to, sent, claim);
     Ok(())
 }
 
@@ -96,6 +124,7 @@ pub(super) fn spawn_send(
     from: &str,
     to: &str,
     sent: Sent,
+    claim: Claim,
 ) {
     let job = SendJob {
         service: ctx.didcomm_service.clone(),
@@ -104,9 +133,5 @@ pub(super) fn spawn_send(
         message: Box::new(message),
         sent,
     };
-    background_dispatch::spawn_dispatch(
-        ctx.dispatch_tx.clone(),
-        DispatchDomain::Vetting,
-        async move { DispatchOutcome::Vetting(job.run().await) },
-    );
+    spawn(ctx, job, claim);
 }

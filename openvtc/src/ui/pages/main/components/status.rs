@@ -29,9 +29,9 @@ thread_local! {
     /// Visible width of the content panel, recorded by [`set_wrap_width`] at the
     /// top of each frame.
     ///
-    /// The `Panel` trait renders to `Vec<Line>` without being told its area, so
-    /// wrapping used to be hardcoded to 76 columns — on a wide terminal every
-    /// status message wrapped at less than half the available width. Threading
+    /// The `Panel` trait renders to `Vec<Line>` without being told its area; a
+    /// hardcoded width would wrap every status message at less than half the
+    /// available width on a wide terminal. Threading
     /// the width through every panel signature would touch all of them for one
     /// consumer; the render path is single-threaded and strictly
     /// set-then-render within a frame, so a thread-local carries it instead.
@@ -180,8 +180,8 @@ mod tests {
     }
 
     /// The colour follows the severity the producer set, not the wording:
-    /// the failures from #577 that were drawn green are red because they are
-    /// errors, and a success worded with "failed" in it is still a success.
+    /// a failure worded without "failed" is red because it is an error (#577),
+    /// and a success worded with "failed" in it is still a success.
     #[test]
     fn colour_follows_severity_not_wording() {
         for msg in [

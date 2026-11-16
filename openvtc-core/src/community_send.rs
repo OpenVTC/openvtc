@@ -25,7 +25,9 @@ use crate::errors::OpenVTCError;
 /// Where a member's request is going and who is sending it, resolved by the
 /// caller.
 pub struct Delivery<'a> {
+    /// The messaging client the request is sent through.
     pub atm: &'a ATM,
+    /// The member's messaging profile.
     pub profile: &'a Arc<ATMProfile>,
     /// The member acting — the authcrypt sender / TSP sender VID, and so the
     /// identity the community proves the request came from.

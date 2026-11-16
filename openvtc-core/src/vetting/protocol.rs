@@ -82,7 +82,9 @@ impl JoinProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Admission {
+    /// Meeting the criterion admits the applicant.
     Automatic,
+    /// Meeting the criterion submits the request for an administrator to decide.
     Review,
 }
 
@@ -92,6 +94,7 @@ pub enum Admission {
 pub struct CriterionMeta {
     /// The criterion this describes.
     pub id: String,
+    /// Whether meeting the criterion admits or submits for review, if the manifest says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<Admission>,
     /// Whether the criterion requires an invitation credential.

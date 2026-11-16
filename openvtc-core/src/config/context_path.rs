@@ -1,35 +1,32 @@
-/*!
- * Context-path hierarchy convention (D2 / D9).
- *
- * The single source of truth for the `<top>/<slug>` sub-context naming scheme.
- * A community's VTA sub-context id is derived from the account's top context and
- * the community's display name (slugged), with a collision-suffix rule and a
- * stable DID-derived fallback when no usable name is available.
- *
- * The hierarchy is **real and VTA-enforced** (VTI #257): a context id *is* its
- * `/`-separated path, the VTA validates depth/segments and enforces
- * ancestry-aware ACL server-side. This module mirrors the path **construction
- * and validation** rules from `vti-common::context_path` /
- * `vti-common::identifier` so the CLI builds only paths the VTA will accept;
- * the VTA remains the enforcement source of truth (it re-validates). The rules
- * are mirrored rather than imported because `vti-common` is not consumable from
- * this workspace (it is not a `vta-sdk` dependency and `vta-sdk` does not
- * re-export it). The mirrored definitions are kept byte-for-byte faithful to
- * their `vti-common` originals to avoid drift on these security-relevant rules.
- *
- * TODO(VTI#392): the pure validators are being lifted into `vta-sdk` (the
- * lowest common dependency of server and clients). Once that lands and this
- * workspace bumps `vta-sdk`, delete this mirror and re-export from `vta-sdk`
- * instead — see OpenVTC/verifiable-trust-infrastructure#392.
- *
- * The ancestry/ACL helper (`is_ancestor_or_self`) is deliberately **not**
- * mirrored: this client never makes authorization decisions — the VTA owns the
- * "admin of a parent covers the subtree" gate — so a local copy would be unused
- * dead code and a drift hazard.
- *
- * Per `CLAUDE.md`, the no-name fallback derives its token from the VTC
- * `did:webvh` via `didwebvh-rs` rather than hand-rolled string surgery.
- */
+//! Context-path hierarchy convention (D2 / D9).
+//!
+//! The single source of truth for the `<top>/<slug>` sub-context naming scheme.
+//! A community's VTA sub-context id is derived from the account's top context and
+//! the community's display name (slugged), with a collision-suffix rule and a
+//! stable DID-derived fallback when no usable name is available.
+//!
+//! The hierarchy is **real and VTA-enforced** (VTI #257): a context id *is* its
+//! `/`-separated path, the VTA validates depth/segments and enforces
+//! ancestry-aware ACL server-side. This module mirrors the path **construction
+//! and validation** rules from `vti-common::context_path` /
+//! `vti-common::identifier` so the CLI builds only paths the VTA will accept;
+//! the VTA remains the enforcement source of truth (it re-validates). The rules
+//! are mirrored rather than imported because `vti-common` is not consumable from
+//! this workspace (it is not a `vta-sdk` dependency and `vta-sdk` does not
+//! re-export it). The mirrored definitions are kept byte-for-byte faithful to
+//! their `vti-common` originals to avoid drift on these security-relevant rules.
+//!
+//! TODO(VTI#392): the pure validators now ship in `vta-sdk` (the pinned 0.80
+//! has `context_path` and `identifier`). Diff this mirror against them, then
+//! delete it and re-export from `vta-sdk` instead.
+//!
+//! The ancestry/ACL helper (`is_ancestor_or_self`) is deliberately **not**
+//! mirrored: this client never makes authorization decisions — the VTA owns the
+//! "admin of a parent covers the subtree" gate — so a local copy would be unused
+//! dead code and a drift hazard.
+//!
+//! Per `CLAUDE.md`, the no-name fallback derives its token from the VTC
+//! `did:webvh` via `didwebvh-rs` rather than hand-rolled string surgery.
 
 use crate::errors::OpenVTCError;
 use didwebvh_rs::url::WebVHURL;

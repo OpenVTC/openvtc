@@ -209,12 +209,11 @@ impl CreateJob {
         } = self;
 
         // 0. Validate the respondent DID resolves (the create path's only
-        //    non-send network call). Today this happened inside `add_contact`
-        //    *before* the send; on resolve failure no contact was added and the
-        //    create bailed — reproduce that by failing here before any mutation
-        //    is applied (the contact is only inserted in `apply` on a non-failed
-        //    resolve). Only when we'd add a brand-new contact (the user supplied
-        //    an alias / it didn't exist) does the old path resolve.
+        //    non-send network call), *before* the send: on resolve failure no
+        //    contact is added and the create bails, by failing here before any
+        //    mutation is applied (the contact is only inserted in `apply` on a
+        //    non-failed resolve). Resolution only runs when we'd add a brand-new
+        //    contact (the user supplied an alias / it didn't exist).
         let contact_to_add = if let Some(alias) = add_contact_alias {
             if let Err(e) = tdk.did_resolver().resolve(&respondent_did).await {
                 return RelationshipOutcome {
@@ -314,6 +313,16 @@ impl CreateJob {
     }
 }
 
+impl crate::state_handler::background_dispatch::Job for RelationshipJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Relationship
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Relationship(self.run().await)
+    }
+}
+
 impl RelationshipJob {
     /// Run the network I/O (send, or listener teardown) and package the result
     /// for the loop. Called inside the spawned task; never touches `Config`/`TDK`.
@@ -371,13 +380,13 @@ pub(crate) enum RelationshipEffect {
         used_r_did: bool,
         /// `key_info` entries minted for a new R-DID (empty when the persona DID
         /// was used). Recorded into `config.key_info` on the loop thread — on
-        /// success *and* failure, matching the pre-R14 in-memory state where key
-        /// creation happened before the send (only success persists, via save).
+        /// success *and* failure, since key creation happens before the send
+        /// (only success persists, via save).
         key_info: Vec<(String, KeyInfoConfig)>,
         /// A brand-new contact to insert for the respondent (the alias the user
         /// entered). `Some` only when the DID resolved and no contact existed;
-        /// inserted on success *and* send-failure (the old path added it before
-        /// the send). `None` when a contact already existed.
+        /// inserted on success *and* send-failure (it is decided before the
+        /// send). `None` when a contact already existed.
         contact_to_add: Option<Option<String>>,
     },
     /// `Ping`: on success, log + create the TrustPing task and save.
@@ -408,11 +417,10 @@ pub(crate) struct RelationshipOutcome {
 }
 
 impl RelationshipOutcome {
-    /// Apply the post-send mutation on the loop thread. On send success this
-    /// performs exactly the config mutation + save + status/log the old inline
-    /// handler did *after* the await; on failure it records the same error
-    /// status, leaving config untouched (so a failed send records no
-    /// relationship/task — matching the pre-R14 ordering and durability).
+    /// Apply the post-send mutation on the loop thread (R14). On send success
+    /// this performs the config mutation + save + status/log that follow the
+    /// send; on failure it records the error status, leaving config untouched
+    /// (so a failed send records no relationship/task).
     pub(crate) fn apply(
         self,
         state: &mut State,
@@ -737,9 +745,19 @@ pub(crate) struct DidDeleteJob {
     pub(crate) key_ids: Vec<String>,
 }
 
+impl crate::state_handler::background_dispatch::Job for DidDeleteJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Did
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Did(self.run().await)
+    }
+}
+
 impl DidDeleteJob {
     /// I/O-only: best-effort VTA delete + listener teardown (failures logged, not
-    /// fatal — matching the old inline path), then hand the local cleanup back.
+    /// fatal), then hand the local cleanup back.
     pub(crate) async fn run(self) -> DidDeleteOutcome {
         let DidDeleteJob {
             admin_vta,
@@ -774,10 +792,9 @@ pub(crate) struct DidDeleteOutcome {
 }
 
 impl DidDeleteOutcome {
-    /// Apply the local cleanup (persona/identity/key removal + save + log),
-    /// mirroring the tail of the old inline `delete_context_did`. The VTA delete
-    /// and listener teardown already happened in the task (best-effort, as before
-    /// — failures there were logged and did not block local cleanup).
+    /// Apply the local cleanup (persona/identity/key removal + save + log).
+    /// The VTA delete and listener teardown already happened in the task
+    /// (best-effort — failures there are logged and do not block local cleanup).
     pub(crate) fn apply(
         self,
         state: &mut State,
@@ -946,7 +963,7 @@ async fn prepare_submit(
     // Decide whether a brand-new contact must be added. The DID *resolution*
     // (the create path's only non-send network call) is deferred to the task so
     // it doesn't park the loop; the duplicate-alias check is local, so do it here
-    // up front (it must reject *before* the send, as the old inline path did).
+    // up front (it must reject *before* the send).
     let alias_opt = if alias.trim().is_empty() {
         None
     } else {
@@ -1131,7 +1148,7 @@ fn prepare_remove(
 
 /// Loop-thread preparation for `RequestVrc`. Builds the VRC-request message +
 /// resolves the listener; the task sends it and `apply` records the task on
-/// success. Mirrors the pre-R14 `credential_actions::send_vrc_request` split.
+/// success. The same split as `credential_actions::prepare_vrc_request`.
 fn prepare_request_vrc(
     config: &mut Box<Config>,
     service: &Messaging,
@@ -1251,8 +1268,8 @@ pub(crate) enum RelationshipDispatch {
 }
 
 /// Whether a `RelationshipAction` is a network-bound action that the loop should
-/// run off-thread (claiming the `Relationship` busy-domain first). Lets the loop
-/// reject a busy domain *before* `dispatch` does any pre-send config mutation.
+/// run off-thread on the `Relationship` busy-domain. Lets the loop reject a
+/// busy domain *before* `dispatch` does any pre-send config mutation.
 /// Open the witness prompt. Membership off every time it opens: a member's identity goes to a
 /// witness only when chosen for that one witnessing, and the choice is never carried over.
 fn handle_start_witness(state: &mut State, index: usize) {
@@ -1293,8 +1310,8 @@ pub(crate) fn is_network(action: &RelationshipAction) -> bool {
 /// add, R-DID path reservation, message build) and return
 /// [`RelationshipDispatch::Spawn`] for the loop to run off-thread; the post-send
 /// config mutation is applied later by [`RelationshipOutcome::apply`]. A pre-send
-/// failure is recorded as a status here and returns `Handled` (no job spawned, so
-/// the loop releases the busy-domain immediately).
+/// failure is recorded as a status here and returns `Handled` (no job, so
+/// nothing claims the busy-domain).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch(
     action: RelationshipAction,
@@ -1504,7 +1521,7 @@ mod tests {
 
     /// Register an *established* relationship whose `our_did` is a pairwise
     /// R-DID (distinct from the persona DID), i.e. the post-handshake steady
-    /// state that #241's "no silent revert" rule is about.
+    /// state the "no silent revert" rule protects (#241).
     fn register_pairwise_relationship(config: &mut Config, remote_p_did: &str, our_r_did: &str) {
         let key = Arc::new(remote_p_did.to_string());
         let rel = RelRecord {
@@ -1521,8 +1538,8 @@ mod tests {
         config.private.relationships.relationships.insert(key, rel);
     }
 
-    /// #241 criterion 3 — once a relationship holds an R-DID, a subsequent
-    /// message must not revert to the persona DID. Guards the property on the
+    /// Once a relationship holds an R-DID, a subsequent message must not
+    /// revert to the persona DID (#241 criterion 3). Guards the property on the
     /// ping path: the message `from`, the recipient, and the listener the send
     /// is routed through all come from the relationship record, never from the
     /// persona. A fallback here would re-expose the persona DID mid-relationship
@@ -1571,10 +1588,10 @@ mod tests {
         );
     }
 
-    /// #241 — the new-relationship mint default follows the working community's
+    /// The new-relationship mint default follows the working community's
     /// declared `relationshipIdentifierDefault`: `attributed` opts into the
     /// persona DID, everything else (pairwise, undeclared, or no working
-    /// community at all) keeps the pairwise default.
+    /// community at all) keeps the pairwise default (#241).
     #[test]
     fn mint_default_follows_the_working_communitys_declaration() {
         use openvtc_core::config::account::{
@@ -1647,8 +1664,7 @@ mod tests {
     }
 
     /// A successful Ping outcome creates the TrustPing task + activity log and
-    /// sets the panel status to "Ping sent" — the same final state the old inline
-    /// `handle_ping` success arm produced.
+    /// sets the panel status to "Ping sent".
     #[test]
     fn ping_success_applies_task_and_status() {
         let mut config = test_config();
@@ -1690,8 +1706,8 @@ mod tests {
         );
     }
 
-    /// A failed Ping outcome sets the "Ping failed" status and creates NO task —
-    /// matching the old inline error arm (no config mutation on a failed send).
+    /// A failed Ping outcome sets the "Ping failed" status and creates NO task
+    /// (no config mutation on a failed send).
     #[test]
     fn ping_failure_sets_status_and_creates_no_task() {
         let mut config = test_config();
@@ -1992,7 +2008,7 @@ mod tests {
     }
 
     /// `DidDeleteOutcome::apply` removes the persona / identity / key_info and
-    /// logs — the local-cleanup tail of the old inline `delete_context_did`.
+    /// logs — the local cleanup of a context-DID delete.
     #[test]
     fn did_delete_applies_local_cleanup() {
         use openvtc_core::config::account::PersonaId;

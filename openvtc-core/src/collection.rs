@@ -68,7 +68,9 @@ pub struct CollectionTarget {
 pub enum ClaimAnswer {
     /// Granted (or renewed): this client is the collector until `ends_at`.
     Granted {
+        /// When the claim ends unless renewed.
         ends_at: DateTime<Utc>,
+        /// Whether the VTA renewed a claim this client already held.
         renewed: bool,
     },
     /// `notCollectable`: the VTA never collects for this identifier (VTI-NTF-080's exceptions),

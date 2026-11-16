@@ -22,11 +22,17 @@ use crate::{config::account::PersonaId, relationships::RelationshipRequestBody, 
 #[non_exhaustive]
 pub enum TaskType {
     /// We sent a relationship request to a remote party.
-    RelationshipRequestOutbound { to: Arc<String> },
+    RelationshipRequestOutbound {
+        /// The remote DID the request was sent to.
+        to: Arc<String>,
+    },
     /// A remote party sent us a relationship request awaiting our response.
     RelationshipRequestInbound {
+        /// The DID the request came from.
         from: Arc<String>,
+        /// Our DID it was addressed to.
         to: Arc<String>,
+        /// The request as received.
         request: RelationshipRequestBody,
     },
     /// Our relationship request was rejected by the remote party.
@@ -49,8 +55,11 @@ pub enum TaskType {
     /// `remote_p_did`, so its remote display falls back to blank until the task
     /// is replaced; the relationship itself still exists in `Relationships`.
     TrustPing {
+        /// Our DID the ping was sent from.
         from: Arc<String>,
+        /// The remote DID the ping was sent to.
         to: Arc<String>,
+        /// The relationship's remote persona DID; empty for a pre-R20 task.
         #[serde(default)]
         remote_p_did: Arc<String>,
     },
@@ -61,6 +70,7 @@ pub enum TaskType {
     /// `remote_p_did` is the relationship key into `Relationships`. See
     /// [`TaskType::TrustPing`] for the pre-R20 on-disk compatibility note.
     VRCRequestOutbound {
+        /// The relationship's remote persona DID; empty for a pre-R20 task.
         #[serde(default)]
         remote_p_did: Arc<String>,
     },
@@ -69,14 +79,19 @@ pub enum TaskType {
     /// `remote_p_did` is the relationship key into `Relationships`. See
     /// [`TaskType::TrustPing`] for the pre-R20 on-disk compatibility note.
     VRCRequestInbound {
+        /// The request as received.
         request: VrcRequest,
+        /// The relationship's remote persona DID; empty for a pre-R20 task.
         #[serde(default)]
         remote_p_did: Arc<String>,
     },
     /// Our VRC request was rejected by the remote party.
     VRCRequestRejected,
     /// A VRC has been issued (either by us or received from a remote party).
-    VRCIssued { vrc: Box<DTGCredential> },
+    VRCIssued {
+        /// The issued VRC.
+        vrc: Box<DTGCredential>,
+    },
     /// Vetter: an applicant redeemed one of our tickets. Open a session when
     /// the two of you are together.
     VettingRequestInbound {

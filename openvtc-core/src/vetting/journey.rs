@@ -136,7 +136,9 @@ impl ApplicantStep {
 /// One step of a journey, with where it stands and a few words about progress.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JourneyStep<S> {
+    /// Which step this is.
     pub step: S,
+    /// Where the step stands.
     pub state: StepState,
     /// Progress in a few words — "1 of 2", "Work" — when there is any.
     pub detail: Option<String>,

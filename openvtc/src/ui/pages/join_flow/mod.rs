@@ -107,9 +107,9 @@ impl JoinFlow {
     /// Fill the community-DID input from a pasted invitation's issuer.
     ///
     /// A VIC's issuer *is* the community that will receive the join, so once one
-    /// is loaded the DID is already in hand — asking the operator to go and find
-    /// the same DID a second time is the "pressing Enter does nothing" report in
-    /// issue #29. Prefilling (rather than submitting) keeps the community on
+    /// is loaded the DID is already in hand, and asking the operator to go and
+    /// find the same DID a second time leaves Enter apparently doing nothing
+    /// (#29). Prefilling (rather than submitting) keeps the community on
     /// screen and editable: an invitation is handed to you by someone else, so
     /// the DID it points at is worth a look before Enter commits to joining it.
     ///

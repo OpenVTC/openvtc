@@ -41,7 +41,7 @@ pub fn command() -> Command {
         .long("community")
         .value_name("DID-OR-NAME")
         .help(
-            "The community, by VTC DID or name. Optional when the account holds \
+            "The community, by DID or name. Optional when the account holds \
              exactly one active membership.",
         );
     Command::new("repo")

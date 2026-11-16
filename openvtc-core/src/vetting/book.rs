@@ -242,7 +242,10 @@ pub fn is_hidden_attestation(statement_id: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum VettedOutcome {
     /// We signed a statement — its id, to find it in [`VettingBook::issued`].
-    Signed { statement_id: String },
+    Signed {
+        /// The signed statement's id.
+        statement_id: String,
+    },
     /// We declined.
     Declined,
 }
@@ -965,14 +968,18 @@ pub struct HiddenEventState {
     pub tier: String,
     /// `pending` or `approved`, in the community's own words.
     pub state: String,
+    /// How many vetters have asked for the event so far, as the community counts them.
     pub group_size: usize,
+    /// How many vetters the community needs before it opens the event's label.
     pub group_floor: usize,
     /// The token label, once the event is live. Absent while pending — reading one as
     /// permission to draw is the mistake this shape makes awkward.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// How many tokens a tick under the asked-for tier yields, once known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drip_per_tick: Option<usize>,
+    /// The last day the event's label is issued or accepted, once known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closes_after: Option<chrono::NaiveDate>,
     /// When we last heard about it.
@@ -991,27 +998,38 @@ pub enum PcsInbound {
     /// The community's answer to our enrolment: a blinded class credential, which only the VTA
     /// that asked can open.
     Enrolled {
+        /// The community's DID.
         community: String,
+        /// The persona the enrolment was for.
         persona: PersonaId,
+        /// The community's answer, as received.
         answer: super::wire::pcs::RootResponse,
     },
     /// The community served a draw of the drip.
     TokensServed {
+        /// The community's DID.
         community: String,
+        /// The persona the draw was for.
         persona: PersonaId,
+        /// The community's answer, as received.
         answer: super::wire::pcs::TokensResponse,
     },
     /// The community refused a draw: the VTA forgets its serials.
     DrawRefused {
+        /// The community's DID.
         community: String,
+        /// The persona the draw was for.
         persona: PersonaId,
+        /// The token label the refused draw was under.
         label: String,
+        /// The tick the refused draw was for.
         tick: u32,
     },
     /// A vetter's attestation for one of our applications (`vetting/attestation/0.1`).
     Attestation {
         /// Our application's id ([`super::applicant::Application::id`]).
         application: String,
+        /// The attestation document's body, as received.
         attestation: serde_json::Value,
     },
     /// An application we abandoned or finished: its key and attestations at the VTA go.
@@ -1229,6 +1247,7 @@ pub struct KnownCommunity {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommunityCriterion {
+    /// The criterion's id, as the manifest gives it.
     pub id: String,
     /// What a submit names to be decided under it (`submit/0.3` `criterion`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1906,8 +1925,6 @@ impl VettingBook {
         new
     }
 
-    /// Remember `community`'s vetting criteria from its manifest, replacing
-    /// what was known. Returns whether anything changed.
     /// What `community` asks an applicant to tell it about themselves, as of
     /// its last manifest read. Empty when it asks nothing or has not been read.
     #[must_use]
@@ -1922,6 +1939,8 @@ impl VettingBook {
             .unwrap_or_default()
     }
 
+    /// Remember `community`'s vetting criteria from `manifest`, replacing what was known,
+    /// with no protocol version or per-criterion meta. Returns whether anything changed.
     pub fn learn_manifest(
         &mut self,
         community: &str,
@@ -2126,6 +2145,7 @@ impl VettingBook {
             .any(|k| k.community == community && k.hidden_vetting())
     }
 
+    /// `community`'s first criterion a wallet can meet, with a requirements digest to submit.
     #[must_use]
     pub fn wallet_criterion(&self, community: &str) -> Option<&CommunityCriterion> {
         self.routes(community)
@@ -2133,6 +2153,7 @@ impl VettingBook {
             .find(|c| c.wallet && c.requirements_digest.is_some())
     }
 
+    /// Every criterion `community` publishes, in published order; empty when unknown.
     pub fn routes(&self, community: &str) -> &[CommunityCriterion] {
         self.communities
             .iter()
@@ -2156,11 +2177,11 @@ impl VettingBook {
     /// application shows them before its own manifest request is answered.
     ///
     /// The path is decided here exactly as a manifest just read decides it
-    /// ([`Application::adopt_criterion`]): this route used to copy the
-    /// requirements and leave the hidden-vetting parameters behind, so an
-    /// application started from the join page stayed on named vetting under a
-    /// criterion that hides its vetters, and its requests carried no
-    /// identifier a vetter could attest to.
+    /// ([`Application::adopt_criterion`]). Copying only the requirements would
+    /// leave the hidden-vetting parameters behind, so an application started
+    /// from the join page would stay on named vetting under a criterion that
+    /// hides its vetters, and its requests would carry no identifier a vetter
+    /// could attest to.
     ///
     /// Returns whether anything changed; `Ok(false)` when nothing is known
     /// yet.

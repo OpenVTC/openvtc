@@ -99,7 +99,7 @@ pub struct State {
     /// Separate from [`MediatorStatus::Failed`], which carries only a display
     /// string: the failure screen needs the store/profile/path context and the
     /// per-cause checks and remedies, and stringifying the error at the failure
-    /// site is exactly what used to make every failure look like a network one.
+    /// site would make every failure look like a network one.
     pub startup_diagnosis: Option<Arc<openvtc_core::diagnostics::Diagnosis>>,
 
     /// Hardware Token Admin Pin (Arc-wrapped so clones share one allocation)

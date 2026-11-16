@@ -73,14 +73,22 @@ const MAX_PEER_TEXT: usize = 512;
 pub enum Request {
     /// `vtc/rooms/memberships/list/0.2`: the community's record of every room it offered
     /// the member, where each admission stands, and where each room does.
-    Memberships { cursor: Option<String> },
+    Memberships {
+        /// Where a previous page left off (wire `cursor`); `None` for the first page.
+        cursor: Option<String>,
+    },
     /// `vtc/rooms/offers/list/0.4`: the open offers, with the credentials an acceptance
     /// stores with the key holder.
-    Offers { cursor: Option<String> },
+    Offers {
+        /// Where a previous page left off (wire `cursor`); `None` for the first page.
+        cursor: Option<String>,
+    },
     /// `vtc/rooms/offers/accept/0.1`: take up an offer — with the KeyPackage the member's
     /// VTA gave for it, on a sealed room.
     Accept {
+        /// The room offered.
         room_id: String,
+        /// The member's KeyPackage for a sealed room; `None` for an open one.
         key_package: Option<String>,
     },
 }
@@ -162,15 +170,20 @@ pub fn build(
 /// The community's answer to one request.
 #[derive(Clone, Debug)]
 pub enum Reply {
+    /// The answer to [`Request::Memberships`].
     Memberships(Box<memberships::Response>),
+    /// The answer to [`Request::Offers`].
     Offers(Box<offers::Response>),
+    /// The answer to [`Request::Accept`].
     Accepted(Box<accept::Response>),
     /// A `trust-task-error`.
     Refused(Refusal),
     /// A response whose payload does not match the schema this client was built
     /// against — a contract mismatch, neither a refusal nor a lost message (R6.4).
     Unreadable {
+        /// The task whose response it was, as `vtc/rooms/…`.
         task: String,
+        /// Why it did not parse, sanitised for display.
         detail: String,
     },
 }
@@ -225,7 +238,9 @@ pub fn parse_reply(doc: &TrustTask<Value>) -> Option<(String, Reply)> {
 /// A `trust-task-error` from the community.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
+    /// The refusal's code, sanitised; `unknown` when it named none.
     pub code: String,
+    /// The community's own words, sanitised, when it gave any.
     pub message: Option<String>,
 }
 
@@ -348,6 +363,7 @@ impl Standing {
         matches!(self, Standing::Offered | Standing::Unfinished)
     }
 
+    /// The standing in a few words, for display.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -379,6 +395,7 @@ pub enum RoomCondition {
 }
 
 impl RoomCondition {
+    /// Where `room` stands, from its owner-set state and access.
     #[must_use]
     pub fn of(room: &RoomMembership) -> Self {
         use memberships::{ArchiveAccess as A, RoomState as R};
@@ -481,7 +498,9 @@ pub enum Prepared {
     /// A sealed room: accept with this KeyPackage. `already_minted` says another surface
     /// may already have sent it (key-package 0.2).
     KeyPackage {
+        /// The KeyPackage the member's VTA gave for the room.
         key_package: String,
+        /// Whether another surface may already have sent it.
         already_minted: bool,
     },
 }

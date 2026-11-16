@@ -78,14 +78,22 @@ const MAX_PAGES: usize = 32;
 /// something is wrong.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Colour {
+    /// Slate.
     #[default]
     Slate,
+    /// Indigo.
     Indigo,
+    /// Teal.
     Teal,
+    /// Moss.
     Moss,
+    /// Sand.
     Sand,
+    /// Clay.
     Clay,
+    /// Rose.
     Rose,
+    /// Plum.
     Plum,
 }
 
@@ -139,6 +147,7 @@ impl Colour {
 /// One world, as the agent holds it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct World {
+    /// The store's id for the world.
     pub world_id: String,
     /// The holder's name for this part of their life.
     ///
@@ -146,6 +155,7 @@ pub struct World {
     /// agent stores it without interpreting it: it is not a scope, not a policy
     /// input, and not a name a counterparty ever sees.
     pub name: String,
+    /// The colour the world wears.
     pub colour: Colour,
     /// One or two emoji, kept opaque.
     ///
@@ -163,6 +173,7 @@ pub struct World {
     pub attribute_ids: Vec<String>,
     /// The store's write counter, for the conditional write that follows.
     pub version: u64,
+    /// When the world was last written, as the store sent it (`updatedAt`).
     pub updated_at: String,
 }
 
@@ -250,10 +261,15 @@ impl World {
 pub struct WorldDraft {
     /// Absent to create; present to replace.
     pub world_id: Option<String>,
+    /// The holder's name for the world.
     pub name: String,
+    /// The colour the world wears.
     pub colour: Colour,
+    /// One or two emoji, kept opaque; `None` for no icon.
     pub icon: Option<String>,
+    /// The faces belonging to the world, by `profile_id`. Replaces the stored list.
     pub face_ids: Vec<String>,
+    /// The attributes belonging to the world, by `attribute_id`. Replaces the stored list.
     pub attribute_ids: Vec<String>,
     /// The version a prior read returned, making the write conditional.
     ///
@@ -282,7 +298,9 @@ impl WorldDraft {
 /// What a write did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorldWrite {
+    /// The written world's id.
     pub world_id: String,
+    /// The store's write counter after the write.
     pub version: u64,
     /// True when the write created the world, false when it replaced one.
     pub created: bool,

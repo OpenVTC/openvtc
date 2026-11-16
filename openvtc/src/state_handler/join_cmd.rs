@@ -64,7 +64,7 @@ pub fn command() -> Command {
             Arg::new("vtc")
                 .required(true)
                 .value_name("COMMUNITY_DID")
-                .help("The community's VTC DID"),
+                .help("The community's DID"),
             Arg::new("persona")
                 .long("persona")
                 .value_name("NAME")

@@ -12,7 +12,7 @@ use openvtc_core::vetting::wire;
 
 use super::dispatch::{page, persist, status};
 use super::jobs::Sent;
-use super::send::{abandon, begin, persona_did, sign_and_send};
+use super::send::{Claim, abandon, begin, persona_did, sign_and_send};
 use crate::state_handler::main_page::content::{
     EVENT_LABELS, EventForm, LineTone, PROFILE_FIELDS, PROFILE_LABELS, VetterProfileForm,
     VettingMode, VettingState, VettingTab, row_of,
@@ -214,7 +214,7 @@ async fn publish_profile(ctx: &mut ActionCtx<'_>, form: &VetterProfileForm) {
         persona: membership.persona,
         previous: previous.clone().map(Box::new),
     };
-    if let Err(e) = sign_and_send(ctx, membership.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, membership.persona, document, sent, Claim::Held).await {
         let book = &mut ctx.config.private.vetting;
         book.restore_profile(&membership.community, membership.persona, previous);
         book.forget_query(&document_id);
@@ -276,7 +276,7 @@ pub(super) async fn ask_event_mode(ctx: &mut ActionCtx<'_>, index: usize) {
         community: offer.community.clone(),
         kind: QueryKind::PcsEventMode,
     };
-    if let Err(e) = sign_and_send(ctx, offer.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, offer.persona, document, sent, Claim::Held).await {
         ctx.config.private.vetting.forget_query(&document_id);
         abandon(ctx, "Could not ask to vet at the event", e);
     }
@@ -320,7 +320,7 @@ pub(super) async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
         community: target.community.clone(),
         kind: QueryKind::VetterResend,
     };
-    if let Err(e) = sign_and_send(ctx, target.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, target.persona, document, sent, Claim::Held).await {
         ctx.config.private.vetting.forget_query(&document_id);
         abandon(ctx, "Could not ask for your vetter credential", e);
     }

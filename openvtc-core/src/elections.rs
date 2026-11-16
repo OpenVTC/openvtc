@@ -112,7 +112,9 @@ pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// which the VTA signs whole ([`Registered::Document`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TicketRequest {
+    /// The election the ticket is for (`electionId`).
     pub election_id: String,
+    /// The digest of the manifest the ticket is bound to (`manifestDigest`).
     pub manifest_digest: String,
     /// The blinded request, exactly as the VTA answered it.
     pub request: Value,
@@ -123,10 +125,16 @@ pub struct TicketRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
     /// `vtc/elections/list/0.5`: the elections the member may take part in.
-    List { cursor: Option<String> },
+    List {
+        /// Continues a previous page; `None` asks for the first.
+        cursor: Option<String>,
+    },
     /// `vtc/elections/show/0.6`: one election — its manifest, parameters and disclosure. Carries
     /// no presentation: one that must is signed by the VTA ([`read_presenting`]).
-    Show { election_id: String },
+    Show {
+        /// The election to show.
+        election_id: String,
+    },
     /// `vtc/elections/tickets/issue/0.3`: the blinded ticket request, for the community to sign.
     /// Carries no presentation: a claim under a credential roll is signed by the VTA
     /// ([`Registered::Document`]).
@@ -210,7 +218,9 @@ pub fn build(
 /// generated type rewrites what it parses (timestamps, an optional member it keeps as `null`).
 #[derive(Clone, Debug)]
 pub struct ShownElection {
+    /// The response, parsed through the generated type.
     pub typed: show::Response,
+    /// The payload exactly as the community sent it.
     pub raw: Value,
 }
 
@@ -226,16 +236,19 @@ impl ShownElection {
         Ok(Self { typed, raw })
     }
 
+    /// The election's id, from its manifest.
     #[must_use]
     pub fn election_id(&self) -> &str {
         self.typed.manifest.election_id.as_str()
     }
 
+    /// The digest the community gives for the manifest (`manifestDigest`).
     #[must_use]
     pub fn manifest_digest(&self) -> &str {
         self.typed.manifest_digest.as_str()
     }
 
+    /// The manifest, as parsed through the generated type.
     #[must_use]
     pub fn manifest(&self) -> &Manifest {
         &self.typed.manifest
@@ -401,12 +414,16 @@ pub fn text_release_warning(threshold: u64) -> Option<String> {
 /// The community's answer to one request.
 #[derive(Clone, Debug)]
 pub enum Reply {
+    /// The `vtc/elections/list/0.5` answer: one page of elections.
     List(Box<list::Response>),
+    /// The `vtc/elections/show/0.6` answer: one election.
     Show(Box<ShownElection>),
     /// The community's blind signature, to hand to the VTA ([`accept`]): the generated response
     /// and the payload as received.
     TicketIssued {
+        /// The response, parsed through the generated type.
         typed: Box<issue::Response>,
+        /// The payload exactly as the community sent it.
         raw: Value,
     },
     /// A `trust-task-error`.
@@ -414,7 +431,9 @@ pub enum Reply {
     /// A response whose payload does not match the schema this client was built against — a
     /// contract mismatch, neither a refusal nor a lost message (R6.4).
     Unreadable {
+        /// The task whose answer could not be read.
         task: String,
+        /// Why the payload was refused, sanitised for display.
         detail: String,
     },
 }
@@ -481,7 +500,9 @@ pub fn local_code(code: &str) -> &str {
 /// A `trust-task-error` from the community.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
+    /// The error code, sanitised; `unknown` when the refusal carried none.
     pub code: String,
+    /// The refusal's message, sanitised; `None` when absent or blank.
     pub message: Option<String>,
 }
 
@@ -582,6 +603,7 @@ pub enum Standing {
 }
 
 impl Standing {
+    /// The standing of an election in registrar state `state`.
     #[must_use]
     pub fn of(state: &RegistrarState) -> Self {
         match state {
@@ -592,6 +614,7 @@ impl Standing {
         }
     }
 
+    /// The standing, in words.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -702,39 +725,70 @@ pub fn option_label(o: &QuestionOption) -> String {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum BallotError {
+    /// The ballot names another election, or another version of its manifest.
     #[error("this ballot is for another election, or another version of it — read it again")]
     ManifestMismatch,
+    /// The ballot does not have the shape the schema asks for.
     #[error("the ballot does not have the shape the election asks for ({0})")]
     Schema(String),
+    /// The ballot answers a question the election does not ask.
     #[error("the election asks no question {0}")]
     NoQuestion(String),
+    /// The ballot answers the same question twice.
     #[error("question {0} is answered twice")]
     AnsweredTwice(String),
+    /// An answer carries no kind of answer, or more than one.
     #[error("question {0} needs exactly one kind of answer")]
     OneAnswer(String),
+    /// A question that may not be abstained on was abstained on.
     #[error("question {0} must be answered: it cannot be left blank")]
     NotOptional(String),
+    /// An answer is of a kind the question does not take; the second field names it.
     #[error("question {0} takes {1}")]
     WrongKind(String, &'static str),
+    /// A choice question was given too few or too many options.
     #[error("question {key}: choose between {min} and {max} (you chose {chosen})")]
     SelectionCount {
+        /// The question's key.
         key: String,
+        /// The fewest options that may be chosen.
         min: u64,
+        /// The most options that may be chosen.
         max: u64,
+        /// How many options were chosen.
         chosen: u64,
     },
+    /// An answer names an option not on the ballot, or one option twice.
     #[error("question {0}: an option that is not on the ballot, or chosen twice")]
     UnknownOption(String),
+    /// A ranking that must rank every option leaves one out.
     #[error("question {0}: rank every option")]
     RankEvery(String),
+    /// A ranking ranks no option, or one option more than once.
     #[error("question {0}: rank at least one option, each once")]
     RankSome(String),
+    /// A score question was not given a score for every option.
     #[error("question {0}: give every option a score")]
     ScoreEvery(String),
+    /// A score falls outside the question's range.
     #[error("question {key}: each score must be between {min} and {max}")]
-    ScoreBounds { key: String, min: i64, max: i64 },
+    ScoreBounds {
+        /// The question's key.
+        key: String,
+        /// The lowest score allowed.
+        min: i64,
+        /// The highest score allowed.
+        max: i64,
+    },
+    /// A written answer is longer than the question allows.
     #[error("question {key}: at most {max} characters")]
-    TextTooLong { key: String, max: u64 },
+    TextTooLong {
+        /// The question's key.
+        key: String,
+        /// The most characters allowed.
+        max: u64,
+    },
+    /// A question the election asks has no answer and no abstention.
     #[error("question {0} is not answered (an optional question may be left blank)")]
     Unanswered(String),
 }
@@ -879,6 +933,7 @@ pub enum AnswerDraft {
     Ranking(Vec<String>),
     /// A score per option, in the question's order; `None` until given one.
     Scores(Vec<(String, Option<i64>)>),
+    /// The written answer.
     Text(String),
 }
 
@@ -985,7 +1040,12 @@ impl BallotDraft {
 pub enum VtaCallError {
     /// The VTA answered and refused, with the code its specification declares.
     #[error("{}", vta_refusal_words(code, message))]
-    Refused { code: String, message: String },
+    Refused {
+        /// The error code the VTA answered with; empty when it gave none.
+        code: String,
+        /// The VTA's message; empty when it gave none.
+        message: String,
+    },
     /// No answer: the VTA could not be reached, or did not reply in time.
     #[error("could not reach your VTA: {0}")]
     Unreachable(String),
@@ -1110,9 +1170,11 @@ fn read_vta_reply<R: DeserializeOwned>(
 /// Which VTA, which context the voter keys are derived in, which community.
 #[derive(Clone, Copy)]
 pub struct Voter<'a> {
+    /// The member's VTA.
     pub vta: &'a VtaClient,
     /// The persona's own context (`community_context::persona_context`).
     pub context_id: &'a str,
+    /// The community's DID.
     pub community: &'a str,
 }
 
@@ -1132,7 +1194,9 @@ pub enum Registered {
 /// credential it presents (its vault handle, [`membership_credential_for`]).
 #[derive(Clone, Copy, Debug)]
 pub struct Claim<'a> {
+    /// The persona's DID, which the VTA signs the claim as.
     pub member: &'a str,
+    /// The vault handle of the membership credential to present.
     pub credential: &'a str,
 }
 
@@ -1348,13 +1412,16 @@ pub async fn accept(
 /// Why a vote could not be built.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VoteError {
+    /// The ballot breaks a rule of the election.
     #[error("{0}")]
     Ballot(#[from] BallotError),
+    /// The election is encrypted and the trustees have not formed its key yet.
     #[error(
         "the trustees have not formed this election's key yet, so a ballot cannot be encrypted \
          to it — try again once voting opens"
     )]
     NoCeremony,
+    /// The member's VTA did not build the cast.
     #[error("{0}")]
     Vta(#[from] VtaCallError),
 }
@@ -1388,6 +1455,7 @@ pub fn vote_payload(
 /// ballot box unchanged, and to resend unchanged if its answer is lost.
 #[derive(Clone)]
 pub struct Cast {
+    /// The signed cast document, as the VTA built it.
     pub document: Value,
 }
 
@@ -1398,6 +1466,7 @@ impl std::fmt::Debug for Cast {
 }
 
 impl Cast {
+    /// The cast document's `id`; empty when it has none.
     #[must_use]
     pub fn id(&self) -> &str {
         self.document
@@ -1415,6 +1484,7 @@ impl Cast {
             .unwrap_or_default()
     }
 
+    /// The cast document's `type`; empty when it has none.
     #[must_use]
     pub fn type_uri(&self) -> &str {
         self.document
@@ -1505,10 +1575,13 @@ pub async fn keep_receipt(
 /// for this cast.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CastError {
+    /// The ballot box's DID (first field) could not be resolved (second field).
     #[error("the ballot box {0} could not be resolved: {1}")]
     Resolve(String, String),
+    /// The ballot box's DID document advertises no https cast endpoint.
     #[error("the ballot box {0} advertises no https TrustTaskHTTPS endpoint to cast on")]
     NoEndpoint(String),
+    /// The endpoint URL is one this client may not dial (a private or unsafe host).
     #[error("the ballot box's endpoint cannot be used ({0})")]
     Blocked(String),
     /// Nothing came back: the same cast can be sent again.
@@ -1517,20 +1590,32 @@ pub enum CastError {
          sending the same cast again is safe, and is answered with its receipt"
     )]
     Unreachable(String),
+    /// The ballot box refused the cast, or answered with a status other than 2xx.
     #[error("{}", cast_refusal_words(code.as_deref(), message))]
     Refused {
+        /// The HTTP status of the answer.
         status: u16,
+        /// The refusal's error code, when it carried one.
         code: Option<String>,
+        /// The refusal's message, or the HTTP status and body when none was given.
         message: String,
     },
+    /// The cast or the answer could not be read: not JSON, too large, or not a receipt.
     #[error("the ballot box's answer could not be read ({0})")]
     Unreadable(String),
+    /// The answer's proof is missing or does not verify.
     #[error("the ballot box's answer could not be shown to be genuine ({0})")]
     Unproven(String),
+    /// The answer's proof verifies, but under a DID that is not the ballot box's.
     #[error("the answer was signed by {proven}, which is not this election's ballot box")]
-    WrongSigner { proven: String },
+    WrongSigner {
+        /// The DID the proof was made under.
+        proven: String,
+    },
+    /// The answer does not thread on this cast.
     #[error("the ballot box's answer does not answer this cast")]
     WrongThread,
+    /// The answer is not addressed to this cast's one-time key.
     #[error("the ballot box's answer is addressed to someone other than this cast's key")]
     WrongRecipient,
 }
@@ -1732,6 +1817,7 @@ impl VerifiedReceipt {
 /// What the ballot box did with the cast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptOutcome {
+    /// Counted as a first vote.
     Counted,
     /// Replaced an earlier vote (an election whose revote is `replace`).
     Replaced,
@@ -1740,6 +1826,7 @@ pub enum ReceiptOutcome {
 }
 
 impl ReceiptOutcome {
+    /// The outcome, in words.
     #[must_use]
     pub fn words(self) -> &'static str {
         match self {

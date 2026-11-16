@@ -5,7 +5,7 @@ use super::*;
 use crate::state_handler::*;
 
 /// The most messages held for a join being submitted; past this they are
-/// processed as they arrive, as before.
+/// processed as they arrive, as they are when no join is being submitted.
 const MAX_HELD_INBOUND: usize = 64;
 
 impl Runtime {

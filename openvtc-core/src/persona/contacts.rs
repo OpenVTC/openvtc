@@ -19,7 +19,9 @@ use crate::errors::OpenVTCError;
 /// One row of [`list`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactSummary {
+    /// The contact's id in the holder's store.
     pub contact_id: String,
+    /// The DID of the person who told the holder.
     pub subject_did: String,
     /// Which of the holder's personas knows them.
     pub known_by_persona: String,
@@ -29,8 +31,11 @@ pub struct ContactSummary {
     /// specification is explicit that a producer must not substitute one
     /// silently, and a DID rendered where a name goes reads as a name.
     pub display_name: Option<String>,
+    /// How many claims the current revision carries.
     pub claim_count: u64,
+    /// The current revision number.
     pub rev: u64,
+    /// When the current revision arrived, as the VTA wrote it.
     pub received_at: String,
     /// The current revision superseded another the holder has not yet looked at.
     pub unseen_change: bool,
@@ -75,15 +80,20 @@ impl ContactSummary {
 /// One claim inside a contact's card.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactFact {
+    /// Vocabulary token of the claim: `name.legal`, `phone.mobile`.
     pub claim_type: String,
+    /// The value they gave, as text.
     pub value: String,
 }
 
 /// A contact read in full, optionally with what they said before.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactDetail {
+    /// The contact as [`list`] shows it.
     pub summary: ContactSummary,
+    /// The claims of the current revision.
     pub facts: Vec<ContactFact>,
+    /// Notes stored with the contact, if any.
     pub notes: Option<String>,
     /// Earlier revisions, newest first. Empty unless asked for.
     pub earlier: Vec<ContactRevision>,
@@ -92,8 +102,11 @@ pub struct ContactDetail {
 /// One superseded revision of a contact.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactRevision {
+    /// The revision number.
     pub rev: u64,
+    /// When it arrived, as the VTA wrote it.
     pub received_at: String,
+    /// The claims it carried.
     pub facts: Vec<ContactFact>,
 }
 

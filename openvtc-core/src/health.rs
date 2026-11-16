@@ -72,8 +72,11 @@ impl Role {
 /// `TSPTransport` and something else on one entry is worth seeing as-is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServiceEntry {
+    /// The entry's `id`, or `<no id>` when it has none.
     pub id: String,
+    /// The entry's `type` values.
     pub types: Vec<String>,
+    /// The `serviceEndpoint` URI, or `<unreadable>` when none could be read.
     pub endpoint: String,
 }
 
@@ -92,9 +95,19 @@ pub enum Probe {
     /// and the number said otherwise, and a reader cannot be expected to know
     /// which one to believe. A 5xx *is* worth flagging — the host is up and its
     /// application is broken, which is a different thing from both.
-    Reachable { url: String, http_status: u16 },
+    Reachable {
+        /// The URL probed.
+        url: String,
+        /// The HTTP status the host answered with.
+        http_status: u16,
+    },
     /// No answer: DNS, TLS, connection or timeout.
-    Unreachable { url: String, error: String },
+    Unreachable {
+        /// The URL probed.
+        url: String,
+        /// Why the probe got no answer.
+        error: String,
+    },
     /// Not dialled: under the run's [`ProbePolicy`] this is a URL a probe must
     /// not follow — plaintext, carrying credentials, or naming a loopback,
     /// private or link-local host (literally, or through what its name
@@ -104,7 +117,12 @@ pub enum Probe {
     /// as written would let that document aim this machine at services on its
     /// own network and read back whether they answer. An endpoint like that is
     /// also no route a real peer could take, so it is reported, not hidden.
-    Blocked { url: String, reason: String },
+    Blocked {
+        /// The URL not dialled.
+        url: String,
+        /// Why the policy refused it.
+        reason: String,
+    },
 }
 
 /// Which transport URLs [`build_report_with_progress`] is willing to dial.
@@ -161,7 +179,9 @@ pub struct Resolved {
     pub services: Vec<ServiceEntry>,
     /// The transports we recognise, by service `type`.
     pub tsp_endpoint: Option<String>,
+    /// The DIDComm endpoint, if the document advertises one.
     pub didcomm_endpoint: Option<String>,
+    /// The REST endpoint, if the document advertises one.
     pub rest_endpoint: Option<String>,
     /// Probes of any `http(s)` endpoints above. Mediator DIDs are not probed
     /// here — they are separate parties in the report and probed as themselves.
@@ -171,13 +191,16 @@ pub struct Resolved {
 /// A party in the chain, resolved or not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Party {
+    /// What the party is in the chain.
     pub role: Role,
     /// Where this DID came from — "persona", "VTC (--vtc)", "mediator of
     /// persona joy-ahead". Carries the provenance a bare DID cannot.
     pub label: String,
+    /// The party's DID.
     pub did: String,
     /// `None` when resolution failed; `error` then says why.
     pub resolved: Option<Resolved>,
+    /// Why resolution failed, when it did.
     pub error: Option<String>,
 }
 
@@ -201,6 +224,7 @@ impl Party {
 pub enum LinkOutcome {
     /// Both sides advertise it; this is what a send would pick.
     Selected {
+        /// The protocol a send would use.
         protocol: Protocol,
         /// The peer endpoint for that protocol — a mediator DID for TSP and
         /// DIDComm, a URL for REST.
@@ -209,18 +233,26 @@ pub enum LinkOutcome {
     /// The advertised sets do not intersect. Both are named so the operator can
     /// see which side to change.
     NoCommonProtocol {
+        /// What our side advertises.
         ours: Vec<Protocol>,
+        /// What their side advertises.
         theirs: Vec<Protocol>,
     },
     /// One side did not resolve, so there is nothing to negotiate over.
-    Unknown { reason: String },
+    Unknown {
+        /// Which side did not resolve.
+        reason: String,
+    },
 }
 
 /// A directed pair whose transport we negotiated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Link {
+    /// The label of the persona the link starts at.
     pub from: String,
+    /// The label of the VTA or VTC the link ends at.
     pub to: String,
+    /// What negotiation over the pair came to.
     #[serde(flatten)]
     pub outcome: LinkOutcome,
 }
@@ -228,7 +260,9 @@ pub struct Link {
 /// The whole map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HealthReport {
+    /// Every party in the chain, subjects first, then the mediators they use.
     pub parties: Vec<Party>,
+    /// Every persona-to-VTA/VTC pair, with its negotiated transport.
     pub links: Vec<Link>,
     /// Findings worth an operator's attention — split mediators, dead ends,
     /// unresolvable parties. Empty is the healthy case.
@@ -277,33 +311,60 @@ pub enum Step {
     ResolverStarting,
     /// About to resolve a party.
     Resolving {
+        /// What the party is in the chain.
         role: Role,
+        /// Where the DID came from.
         label: String,
+        /// The DID being resolved.
         did: String,
     },
     /// A party resolved.
     Resolved {
+        /// Where the DID came from.
         label: String,
+        /// How many `service` entries the document publishes.
         services: usize,
+        /// The transports it advertises.
         transports: Vec<Protocol>,
+        /// How long resolution took.
         elapsed: Duration,
     },
     /// A party did not resolve. Not fatal — the report records the dead end.
     ResolveFailed {
+        /// Where the DID came from.
         label: String,
+        /// Why it did not resolve.
         error: String,
+        /// How long the attempt took.
         elapsed: Duration,
     },
     /// Moving on to the mediators discovered from the parties above.
-    FollowingMediators { count: usize },
+    FollowingMediators {
+        /// How many mediators are not already in the report.
+        count: usize,
+    },
     /// About to probe a transport URL.
-    Probing { url: String },
+    Probing {
+        /// The URL about to be probed.
+        url: String,
+    },
     /// A probe finished.
-    Probed { probe: Probe, elapsed: Duration },
+    Probed {
+        /// What the probe found.
+        probe: Probe,
+        /// How long the probe took.
+        elapsed: Duration,
+    },
     /// Resolution done; negotiating transports (local, fast).
-    Negotiating { pairs: usize },
+    Negotiating {
+        /// How many links are being negotiated.
+        pairs: usize,
+    },
     /// The whole report is built.
-    Finished { elapsed: Duration },
+    Finished {
+        /// How long the whole report took.
+        elapsed: Duration,
+    },
 }
 
 /// Where [`build_report_with_progress`] reports to. `&dyn` rather than a
@@ -314,12 +375,16 @@ pub type ProgressFn<'a> = &'a (dyn Fn(Step) + Send + Sync);
 /// A DID to include in the report, with the provenance to label it by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subject {
+    /// What the party is in the chain.
     pub role: Role,
+    /// Where the DID came from, to label it by.
     pub label: String,
+    /// The DID.
     pub did: String,
 }
 
 impl Subject {
+    /// A subject from its role, label and DID.
     pub fn new(role: Role, label: impl Into<String>, did: impl Into<String>) -> Self {
         Self {
             role,
@@ -806,13 +871,12 @@ fn send_failure(url: &str, error: &reqwest::Error) -> Probe {
 /// turn one of these into `BlockedHost`, so probing and resolution agree on what
 /// counts as a refusal rather than each deciding for itself.
 ///
-/// This replaced a match on the sentence the refusal used to render,
-/// `"<host> resolves to non-routable <addr>"`. `affinidi-did-web` 0.1.5 moved
-/// the guard into `affinidi-net-guard`, which renders
-/// `"blocked address <addr> (<class>) for host <host>"` instead — and a string
-/// match is precisely how that move would otherwise have turned every refusal
-/// quietly back into `Probe::Unreachable`, which reads as "the host did not
-/// answer" when what happened is "we declined to ask".
+/// Not a match on the sentence the refusal renders: that text depends on
+/// which crate hosts the guard (`"<host> resolves to non-routable <addr>"` in
+/// `affinidi-did-web`, `"blocked address <addr> (<class>) for host <host>"` in
+/// `affinidi-net-guard`), and a string match would quietly turn every refusal
+/// back into `Probe::Unreachable` when it changes — which reads as "the host did
+/// not answer" when what happened is "we declined to ask".
 /// `probe_client_dns_guard_refuses_localhost_name` covers the recovery.
 fn dns_refusal_in_chain(error: &(dyn std::error::Error + 'static)) -> Option<String> {
     affinidi_net_guard::blocked_in_chain(error).map(ToString::to_string)

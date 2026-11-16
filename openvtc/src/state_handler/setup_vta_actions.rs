@@ -89,9 +89,9 @@ fn advertised_transports(resolved: &vta_sdk::provision_client::ResolvedVta) -> V
 /// when nothing did, on REST — the DIDComm mediator the VTA advertised.
 ///
 /// Only the DIDComm one: a persona's DID document publishes a DIDComm
-/// mediator, so a TSP-only mediator is no substitute. Before #501 a REST
-/// bootstrap kept `None` here, and the first persona mint then refused with
-/// "your VTA did not advertise a DIDComm mediator" about a VTA that had.
+/// mediator, so a TSP-only mediator is no substitute. A REST bootstrap that
+/// kept `None` here would leave the first persona mint refusing with "your VTA
+/// did not advertise a DIDComm mediator" about a VTA that had (#501).
 fn kept_mediator(connected: Option<String>, advertised_didcomm: Option<String>) -> Option<String> {
     connected.or(advertised_didcomm)
 }
@@ -417,7 +417,7 @@ pub(crate) async fn handle_vta_start_provision(
     };
 
     // Adopt the admin credential as the authenticated identity for the rest
-    // of setup. Mirrors what the legacy paste-bundle flow used to do.
+    // of setup.
     state.setup.vta.credential_did = admin.admin_did.clone();
     if let Some(rest) = connect_rest_url {
         state.setup.vta.vta_url = rest;
@@ -724,8 +724,8 @@ mod tests {
         assert!(advertised_transports(&resolved(false, false, false)).is_empty());
     }
 
-    /// #501: a REST bootstrap reports no mediator, and the account must keep
-    /// the DIDComm one the VTA advertised rather than save none.
+    /// A REST bootstrap reports no mediator, and the account must keep the
+    /// DIDComm one the VTA advertised rather than save none (#501).
     #[test]
     fn a_rest_bootstrap_keeps_the_advertised_didcomm_mediator() {
         let advertised = Some("did:webvh:zM:mediator.example.com".to_string());
@@ -738,10 +738,10 @@ mod tests {
         assert_eq!(kept_mediator(None, None), None);
     }
 
-    /// The regression: a TSP bootstrap must reopen a TSP session, never fall
-    /// back to REST auth. It used to land in the REST arm, and on a VTA with no
-    /// `#vta-rest` service the empty base URL produced reqwest's "builder
-    /// error" at `/auth/challenge` immediately after provisioning succeeded.
+    /// A TSP bootstrap must reopen a TSP session, never fall back to REST auth.
+    /// In the REST arm, on a VTA with no `#vta-rest` service, the empty base URL
+    /// produces reqwest's "builder error" at `/auth/challenge` immediately after
+    /// provisioning succeeds.
     #[test]
     fn tsp_bootstrap_reopens_a_tsp_session() {
         assert_eq!(

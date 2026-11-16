@@ -3,9 +3,9 @@
 //! A join launch creates things before the community has the request: the
 //! community's context at the VTA, possibly a freshly minted persona (persisted
 //! to the account at once), and the applicant's mediator listener. Until the
-//! request is out, each of those is speculative. The TUI used to track two of
-//! them in out-parameters and undo them by hand at five call sites, relying on
-//! where each `.await` happened to sit when a cancel dropped the future.
+//! request is out, each of those is speculative. Undoing them by hand at each
+//! call site would rely on where each `.await` happens to sit when a cancel
+//! drops the future.
 //!
 //! [`JoinSaga`] records the steps as they complete, in order:
 //!

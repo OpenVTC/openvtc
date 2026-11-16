@@ -1,47 +1,45 @@
-/*!
- * Personhood assertion — the member side of the VTC's personhood ceremony.
- *
- * A community that vets its members can mark them as people. The claim lands
- * as a `PersonhoodCredential` type on the member's VMC, which is what DTG
- * Credentials means by a PHC ("a PHC is simply a VMC issued by a VTC whose
- * governance enforces real human personhood and exactly one membership per
- * person"). Nothing here decides whether the member *is* a person — the
- * community's `personhood.rego` does, over the evidence this module presents.
- *
- * ## The ceremony
- *
- * 1. `vtc/members/personhood/challenge/0.1` → the community mints a
- *    single-use nonce with a ten-minute life.
- * 2. Out of band, two humans confirm they are talking about the same
- *    ceremony — see [`match_code`].
- * 3. `vtc/members/personhood/assert/0.2` → the member presents a signed VP
- *    carrying that nonce and whatever credentials the community's policy
- *    wants to see — and, for each witness credential among them, its
- *    session's outcome evidence in `outcomeEvidence`.
- *
- * Both verbs ride the same Trust Task document path as the join ceremony
- * ([`crate::join`]): DIDComm wraps the document in an authcrypt envelope, TSP
- * carries it bare. The sender is cryptographically proven either way, so no
- * separate holder-binding signature rides along.
- *
- * ## Why the challenge is written twice
- *
- * The published task says the presentation's `proof.challenge` must be the
- * paired `challengeId`, and that this is what "stops one captured and
- * replayed into another". In W3C Data Integrity that holds because the proof
- * options are canonicalised with the document, so `challenge` is signed.
- *
- * `affinidi_data_integrity` has no `challenge` proof option, and the VTC
- * verifies over the presentation with the whole `proof` block removed — so a
- * value written only to `proof.challenge` is **not covered by the
- * signature**, and swapping it on a captured presentation would go unnoticed.
- *
- * So [`build_presentation`] writes the challenge to `proof.challenge` (what
- * the spec names) *and* to top-level `nonce` (what the signature actually
- * covers), and the VTC requires both to agree. Do not "simplify" this by
- * dropping one: `proof.challenge` alone is unsigned, and `nonce` alone is
- * off-spec.
- */
+//! Personhood assertion — the member side of the VTC's personhood ceremony.
+//!
+//! A community that vets its members can mark them as people. The claim lands
+//! as a `PersonhoodCredential` type on the member's VMC, which is what DTG
+//! Credentials means by a PHC ("a PHC is simply a VMC issued by a VTC whose
+//! governance enforces real human personhood and exactly one membership per
+//! person"). Nothing here decides whether the member *is* a person — the
+//! community's `personhood.rego` does, over the evidence this module presents.
+//!
+//! ## The ceremony
+//!
+//! 1. `vtc/members/personhood/challenge/0.1` → the community mints a
+//!    single-use nonce with a ten-minute life.
+//! 2. Out of band, two humans confirm they are talking about the same
+//!    ceremony — see [`match_code`].
+//! 3. `vtc/members/personhood/assert/0.2` → the member presents a signed VP
+//!    carrying that nonce and whatever credentials the community's policy
+//!    wants to see — and, for each witness credential among them, its
+//!    session's outcome evidence in `outcomeEvidence`.
+//!
+//! Both verbs ride the same Trust Task document path as the join ceremony
+//! ([`crate::join`]): DIDComm wraps the document in an authcrypt envelope, TSP
+//! carries it bare. The sender is cryptographically proven either way, so no
+//! separate holder-binding signature rides along.
+//!
+//! ## Why the challenge is written twice
+//!
+//! The published task says the presentation's `proof.challenge` must be the
+//! paired `challengeId`, and that this is what "stops one captured and
+//! replayed into another". In W3C Data Integrity that holds because the proof
+//! options are canonicalised with the document, so `challenge` is signed.
+//!
+//! `affinidi_data_integrity` has no `challenge` proof option, and the VTC
+//! verifies over the presentation with the whole `proof` block removed — so a
+//! value written only to `proof.challenge` is **not covered by the
+//! signature**, and swapping it on a captured presentation would go unnoticed.
+//!
+//! So [`build_presentation`] writes the challenge to `proof.challenge` (what
+//! the spec names) *and* to top-level `nonce` (what the signature actually
+//! covers), and the VTC requires both to agree. Do not "simplify" this by
+//! dropping one: `proof.challenge` alone is unsigned, and `nonce` alone is
+//! off-spec.
 
 use std::sync::Arc;
 
@@ -164,7 +162,9 @@ pub fn match_code_from_reply(ext: &Value) -> Option<String> {
 /// transposed pair away from sending a member's presentation to their own
 /// mediator's DID.
 pub struct Route<'a> {
+    /// The messaging client the document is sent through.
     pub atm: &'a ATM,
+    /// The member's messaging profile.
     pub profile: &'a Arc<ATMProfile>,
     /// The member acting — the authcrypt sender / TSP sender VID, and so the
     /// identity the community proves this request came from.
@@ -476,6 +476,7 @@ pub fn parse_challenge_reply(body: &Value) -> Result<ChallengeReply, OpenVTCErro
 /// re-issued credentials that now carry it.
 #[derive(Debug, Clone)]
 pub struct AssertReply {
+    /// The member the assertion was for (wire `did`).
     pub did: String,
     /// Always `true` on success — the community answers a refusal with a
     /// `trust-task-error` document, not with `personhood: false`.

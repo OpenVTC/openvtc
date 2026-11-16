@@ -129,7 +129,7 @@ jobs:
   # mediator or VTA (~1-30 s each). Policy: a test is `#[ignore]`d only for
   # being slow or needing an in-process service — never for being flaky or
   # broken — and every one of them gates PRs here. The coverage job also runs
-  # them, but it has no threshold, so a failure there did not fail a PR.
+  # them, under a line-coverage floor of its own.
   test-ignored:
     name: Test (ignored e2e suites)
     runs-on: ubuntu-latest
@@ -348,10 +348,14 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
       - name: Generate coverage (lcov)
-        # Includes ignored tests so any future #[ignore]-gated integration
-        # tests still contribute to the report.
-        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info -- --include-ignored
+        # Includes the ignored e2e suites, which cover the orchestration
+        # paths. The floor sits a few points under the workspace's line
+        # coverage (66.1-67.2% over five consecutive runs on main), so a
+        # drop of that size fails the PR while ordinary churn does not.
+        # Raise it as coverage rises; never lower it to make a PR pass.
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info --fail-under-lines 63 -- --include-ignored
       - name: Upload lcov artifact
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lcov.info

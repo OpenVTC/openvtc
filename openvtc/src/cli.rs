@@ -1,5 +1,4 @@
-/*! Command Line Interface configuration
- */
+//! Command Line Interface configuration
 
 use anyhow::Context;
 use clap::{Arg, Command};
@@ -96,7 +95,7 @@ pub fn cli() -> Command {
                         .value_name("DID")
                         .action(clap::ArgAction::Append)
                         .help(
-                            "A community VTC DID to include. Repeatable. Communities \
+                            "A community's DID to include. Repeatable. Communities \
                              already in the account are included automatically; use this \
                              to check one before joining, or when the account cannot be \
                              loaded.",
@@ -176,8 +175,8 @@ pub fn get_user_pin() -> anyhow::Result<SecretString> {
         .with_prompt("Please enter Token User PIN")
         .allow_empty_password(false)
         .interact()?;
-    // `allow_empty_password(false)` above means this cannot be empty, which is
-    // what made the factory-PIN fallback that used to sit here dead code.
+    // `allow_empty_password(false)` above means this cannot be empty, so no
+    // factory-PIN fallback is needed.
     Ok(SecretString::new(user_pin.into()))
 }
 

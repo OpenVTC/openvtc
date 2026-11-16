@@ -1,10 +1,9 @@
-/*! `openvtc setup --vta-did …` — the wizard's "new account with a VTA" route,
- * headless.
- *
- * Same steps, same core calls: unlock code, resolve the VTA and mint the setup
- * DID, print the PNM grant command, poll provisioning until the grant lands,
- * create the State-A account, then re-load it to prove it was saved.
- */
+//! `openvtc setup --vta-did …` — the wizard's "new account with a VTA" route,
+//! headless.
+//!
+//! Same steps, same core calls: unlock code, resolve the VTA and mint the setup
+//! DID, print the PNM grant command, poll provisioning until the grant lands,
+//! create the State-A account, then re-load it to prove it was saved.
 
 use crate::headless::{self, Admin, progress, step, warn};
 use crate::state_handler::{

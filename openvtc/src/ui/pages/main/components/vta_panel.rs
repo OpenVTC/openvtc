@@ -277,9 +277,9 @@ fn render_transports(state: &VtaState, lines: &mut Vec<Line<'static>>) {
         }
         Some(a) => {
             // Only mention the transports we are *not* on; the one in use is
-            // already the headline. This used to be a single `Option<&str>`
-            // computed as REST-or-nothing, so a VTA advertising `#tsp` and no
-            // `#vta-rest` fell through to "only transport offered" — false
+            // already the headline. Every advertised transport counts, not
+            // REST-or-nothing: a VTA advertising `#tsp` and no `#vta-rest`
+            // would otherwise fall through to "only transport offered" — false
             // about a VTA that offers two.
             let mut others = Vec::new();
 
@@ -445,7 +445,7 @@ fn render_receive(state: &VtaState, now: std::time::Instant, lines: &mut Vec<Lin
 /// their lifecycle state, the confirm gates, and the focus-aware key hints.
 fn render_vics(state: &VtaState, panel_focused: bool, lines: &mut Vec<Line<'static>>) {
     // The only list on this panel, so it has the keyboard whenever the panel
-    // does — there is no longer a second list to Tab between.
+    // does — there is no second list to Tab between.
     let focused = panel_focused;
     let header_style = if focused {
         Style::new().fg(COLOR_SUCCESS).bold()
@@ -460,10 +460,10 @@ fn render_vics(state: &VtaState, panel_focused: bool, lines: &mut Vec<Line<'stat
             header_style,
         ),
         Span::styled(focus_hint(focused), Style::new().fg(COLOR_DARK_GRAY)),
-        // The vault query runs off the loop now, so the list can be visibly
+        // The vault query runs off the loop, so the list can be visibly
         // mid-load. Saying so is the difference between "you hold no VICs" and
-        // "we haven't heard back yet" — the panel used to render both as the
-        // empty state, and the load was only ever noticed as a frozen Tab.
+        // "we haven't heard back yet", which would otherwise both render as
+        // the empty state.
         Span::styled(
             if state.vic_loading {
                 "   loading…"
@@ -605,9 +605,8 @@ impl MainPage {
     /// credentials: ↑/↓ move the selection, `a` imports, `i` flips the archived
     /// filter, `r`/`u`/`d`/`p` drive the lifecycle. Returns true if consumed.
     ///
-    /// The persona DID list that used to share this panel — and the `n`, `g`
-    /// and `d` verbs that acted on it — moved to the identity pane, which is
-    /// where the rest of a persona's management already lives.
+    /// The persona DID list — and the `n`, `g` and `d` verbs that act on it —
+    /// live on the identity pane, with the rest of a persona's management.
     pub(in crate::ui::pages::main) fn handle_vta_key(&mut self, key: KeyEvent) -> bool {
         use crate::state_handler::main_page::content::VicLifecycle;
 
@@ -640,12 +639,10 @@ impl MainPage {
 
         match key.code {
             // The list is read on demand rather than polled, and this is the
-            // key that asks. It was Tab because Tab moved focus onto the list
-            // and the load rode along; with one list left, the load is the
-            // whole of what the key does.
+            // key that asks.
             //
-            // Refresh is `r` here as on every other panel (#580); Tab is the
-            // global panel switch again.
+            // Refresh is `r` here as on every other panel; Tab is the global
+            // panel switch (#580).
             KeyCode::Char('r') => {
                 let _ = self.action_tx.send(Action::VicRefresh);
                 true
@@ -912,9 +909,9 @@ mod tests {
         assert!(out.contains("only transport offered"), "{out}");
     }
 
-    /// The defect in #185: a VTA advertising `#tsp` alongside `#vta-didcomm`,
-    /// and no `#vta-rest`, rendered as "only transport offered". Two transports
-    /// were offered.
+    /// A VTA advertising `#tsp` alongside `#vta-didcomm`, and no `#vta-rest`,
+    /// offers two transports, so it must not render as "only transport
+    /// offered" (#185).
     #[test]
     fn a_tsp_advertising_vta_is_not_reported_as_single_transport() {
         let out = joined(&render(
@@ -975,9 +972,9 @@ mod tests {
         assert!(out.contains("TSP for trust tasks"), "{out}");
     }
 
-    /// The adjacent inconsistency #185 exposed: `rest_url` is stored config, so
-    /// the endpoint line printed under a transport line saying REST is not
-    /// offered. Both facts are true; unlabelled they read as a contradiction.
+    /// `rest_url` is stored config, so the endpoint line can print under a
+    /// transport line saying REST is not offered. Both facts are true;
+    /// unlabelled they read as a contradiction (#185).
     #[test]
     fn a_configured_but_unadvertised_rest_endpoint_is_labelled_as_such() {
         let out = joined(&render(
@@ -1140,8 +1137,7 @@ mod tests {
     /// The invitation-credential list carries the panel's focus affordance and
     /// shows its cursor and hints only when the content panel has the keyboard.
     ///
-    /// It used to have to say which of *two* lists was focused; the persona
-    /// list has moved to the identity pane, so the remaining question is just
+    /// The persona list is on the identity pane, so the only question is
     /// whether this panel is the focused one.
     #[test]
     fn the_vic_list_shows_a_cursor_and_hints_only_when_the_panel_is_focused() {
@@ -1162,9 +1158,9 @@ mod tests {
         assert!(unfocused.contains("[→] focus the panel"), "{unfocused}");
     }
 
-    /// The persona list, and the `n` / `g` / `d` verbs that acted on it, are
-    /// gone from this panel — they live on the identity pane, and a panel that
-    /// still advertised them would be advertising keys it no longer handles.
+    /// The persona list, and the `n` / `g` / `d` verbs that act on it, are not
+    /// on this panel — they live on the identity pane, and a panel that
+    /// advertised them would be advertising keys it does not handle.
     #[test]
     fn the_persona_list_is_no_longer_on_this_panel() {
         let out = joined(&render(&state_with(vec![vic(None)]), true));
@@ -1173,8 +1169,7 @@ mod tests {
     }
 
     /// An in-flight vault query is visible. "No invitation credentials" is a
-    /// claim about the vault, and it can only be made once the vault answers —
-    /// before this the load was inline, so the panel simply froze instead.
+    /// claim about the vault, and it can only be made once the vault answers.
     #[test]
     fn a_loading_vic_list_says_so_instead_of_claiming_none() {
         let mut state = state_with(vec![]);

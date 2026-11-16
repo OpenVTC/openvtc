@@ -1,14 +1,14 @@
 //! A page's view of the published [`State`] without copying it (#556).
 //!
-//! The state handler publishes an `Arc<State>`. A page's props used to clone
-//! the part they render out of it on every update — the whole main-page model,
-//! the join state — whether or not the page was on screen. [`Shared`] holds the
-//! `Arc` instead and derefs to the part, so a props update is a reference-count
-//! increment and the page reads its fields exactly as before.
+//! The state handler publishes an `Arc<State>`. [`Shared`] holds the `Arc` and
+//! derefs to the part a page renders, so a props update is a reference-count
+//! increment — not a clone of the whole main-page model or the join state on
+//! every update, whether or not the page is on screen — and the page reads its
+//! fields as if it owned them.
 //!
 //! A page that edits its props locally (a selection the next update
-//! overwrites) still can: the first write copies the part, as every update used
-//! to, and only that page's copy changes.
+//! overwrites) still can: the first write copies the part, and only that page's
+//! copy changes.
 
 use std::{
     fmt,

@@ -264,15 +264,31 @@ pub(crate) fn spawn_grant_check(
     tdk: &affinidi_tdk::TDK,
     check: GrantCheck,
 ) {
-    let resolver = tdk.did_resolver().clone();
-    background_dispatch::spawn_dispatch(
-        dispatch_tx.clone(),
-        DispatchDomain::VettingStatus,
-        async move {
-            let result = check.run(&resolver).await;
-            DispatchOutcome::VettingStatus(GrantChecked { check, result })
-        },
-    );
+    let job = GrantCheckJob {
+        resolver: tdk.did_resolver().clone(),
+        check,
+    };
+    background_dispatch::spawn_unclaimed(job, dispatch_tx);
+}
+
+/// One revocation check, with the resolver it reads the status list through.
+struct GrantCheckJob {
+    resolver: affinidi_tdk::did_resolver::DIDCacheClient,
+    check: GrantCheck,
+}
+
+impl background_dispatch::Job for GrantCheckJob {
+    fn domain(&self) -> DispatchDomain {
+        DispatchDomain::VettingStatus
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        let result = self.check.run(&self.resolver).await;
+        DispatchOutcome::VettingStatus(GrantChecked {
+            check: self.check,
+            result,
+        })
+    }
 }
 
 /// A finished revocation check.

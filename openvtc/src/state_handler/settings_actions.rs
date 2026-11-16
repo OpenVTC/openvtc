@@ -33,12 +33,10 @@ pub fn update_friendly_name(config: &mut Config, name: &str) {
 // `dev-overrides` builds and calls `Config::set_active_mediator_did_runtime`,
 // which never touches the persisted account record.
 
-// There is likewise no `update_org_did`. Settings used to carry an "Org DID"
-// row, seeded at setup with one operator's own deployment and read by nothing:
-// no protocol, trust check or message ever consulted it. A reference CLI has no
-// business asserting an organisation on anyone's behalf, so the row and the
-// account field are gone; an existing config's `org_did` key now rides in
-// `Account::extra`, carried untouched.
+// There is likewise no `update_org_did`, and no "Org DID" row: no protocol,
+// trust check or message consults one, and a reference CLI has no business
+// asserting an organisation on anyone's behalf. An existing config's `org_did`
+// key rides in `Account::extra`, carried untouched.
 
 /// Set a passphrase to encrypt the config in the keyring.
 ///
@@ -283,14 +281,13 @@ fn handle_protection_tab_switch(state: &mut State, next_field: usize) {
 /// R11: the per-setting save is coalesced (`Persist::SaveAndSync` marks the
 /// config dirty rather than saving inline).
 ///
-/// No row here can decline to apply, and none triggers a mediator reconnect. The
-/// mediator DID used to be the exception on both counts: it is a *per-persona*
-/// field, so on a profile with no persona the write vanished while the panel
-/// still said "Setting saved" over a field that read back empty ("it did not
-/// take"), and it still asked for a reconnect that had nothing new to dial —
-/// leaving the header on "Connecting…" under a success message. The row is now
-/// read-only (`MEDIATOR_ROW` never opens an edit mode), so that whole shape is
-/// gone rather than merely reported honestly.
+/// No row here can decline to apply, and none triggers a mediator reconnect.
+/// The mediator DID would be the exception on both counts: it is a
+/// *per-persona* field, so on a profile with no persona a write would vanish
+/// while the panel said "Setting saved" over a field that read back empty, and
+/// it would ask for a reconnect with nothing new to dial — leaving the header on
+/// "Connecting…" under a success message. So that row is read-only
+/// (`MEDIATOR_ROW` never opens an edit mode).
 fn handle_submit_edit(
     config: &mut Box<Config>,
     state: &mut State,
@@ -330,7 +327,7 @@ async fn handle_export_config_action(
     // the user sees progress while the key is computed off the runtime. Push it
     // to the render task now — `export_config` then awaits a `spawn_blocking`
     // derive, during which the loop is parked here but the render task keeps
-    // drawing this status (the runtime is no longer pegged by the KDF).
+    // drawing this status (the runtime is not pegged by the KDF).
     state.main_page.content_panel.settings.status_message =
         Some(Status::progress("Deriving encryption key…".to_string()));
     let _ = state_tx.publish(state);
@@ -576,8 +573,8 @@ fn handle_wipe_confirm(state: &mut State, config: &Config, profile: &str) -> boo
 
 /// Detect the did-git-sign install for the persona shown in Settings, off the
 /// loop: the read is two small files, but on a slow or network home directory
-/// that is the stall, and `sync_from_config` used to do it on every config
-/// change. The answer arrives as [`DispatchOutcome::DidGitSign`] and is stored by
+/// that is the stall, and `sync_from_config` runs on every config change. The
+/// answer arrives as [`DispatchOutcome::DidGitSign`] and is stored by
 /// [`apply_did_git_sign`].
 ///
 /// Call it at startup, and whenever the install may have changed. When a
@@ -627,6 +624,32 @@ impl background_dispatch::Job for DidGitSignJob {
             persona_did: self.persona_did,
             info,
         }
+    }
+}
+
+/// A mediator change or manual reconnect: replace the persona listener with
+/// `listener` and wait for it to connect. The listener is built on the loop
+/// (it reads secrets from the TDK, no network); only the connect runs here.
+pub(crate) struct MediatorReconnectJob {
+    pub(crate) service: openvtc_core::didcomm::Messaging,
+    pub(crate) listener_id: String,
+    pub(crate) listener: openvtc_core::didcomm::ListenerSpec,
+}
+
+impl background_dispatch::Job for MediatorReconnectJob {
+    fn domain(&self) -> DispatchDomain {
+        DispatchDomain::Mediator
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        DispatchOutcome::MediatorReconnect(
+            openvtc_core::didcomm::reconnect_persona_listener_io(
+                &self.service,
+                self.listener_id,
+                self.listener,
+            )
+            .await,
+        )
     }
 }
 
@@ -1123,7 +1146,7 @@ pub(crate) async fn dispatch(
         SettingsAction::FormProblem(why) => {
             state.main_page.content_panel.settings.form_problem = Some(why);
         }
-        // No editable setting changes the mediator any more, so committing one
+        // No editable setting changes the mediator, so committing one
         // never implies a reconnect. `SettingsAction::ReconnectMediator` is the
         // remaining (explicit, operator-driven) way to ask for one.
         SettingsAction::SubmitEdit { value } => handle_submit_edit(config, state, save, &value),
@@ -1445,10 +1468,9 @@ mod tests {
         assert!(validate_file_path("/tmp/safe/../../../etc/shadow").is_err());
     }
 
-    /// The reported bug, closed at the source: pressing Enter on the Mediator
-    /// DID row must not open an edit mode at all. It used to, and on a profile
-    /// with no persona the write then vanished while the panel said "Setting
-    /// saved" over a field that read back empty ("it did not take").
+    /// Pressing Enter on the Mediator DID row must not open an edit mode at
+    /// all: on a profile with no persona the write would vanish while the panel
+    /// said "Setting saved" over a field that read back empty.
     #[test]
     fn mediator_row_does_not_open_an_edit_mode() {
         let mut state = State::default();
@@ -1463,9 +1485,9 @@ mod tests {
         );
     }
 
-    /// A committed edit no longer implies a mediator reconnect — nothing
-    /// editable can move the mediator, so the reconnect that used to fire (and
-    /// hang on "Connecting…") has no trigger left.
+    /// A committed edit never implies a mediator reconnect — nothing editable
+    /// can move the mediator, so a reconnect (which would hang on
+    /// "Connecting…") has no trigger.
     #[tokio::test]
     async fn submitting_an_edit_never_asks_for_a_reconnect() {
         let mut config = Box::new(crate::state_handler::dispatch_util::test_config());

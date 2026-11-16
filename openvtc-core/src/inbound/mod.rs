@@ -7,8 +7,8 @@
 //! view — is reported up in [`InboundEffects`] for the caller (the TUI's
 //! runtime loop, or a headless command via [`apply_inline`]) to act on.
 //!
-//! Moved here from the CLI crate (issue #530) so it has no TUI dependency and
-//! core's end-to-end harness can drive it.
+//! It lives in core, not the CLI crate, so it has no TUI dependency and core's
+//! end-to-end harness can drive it (#530).
 
 use std::sync::Arc;
 
@@ -205,13 +205,17 @@ pub enum VerifyJob {
     Credential {
         /// The whole delivery: its own proof is checked before the credential's.
         document: serde_json::Value,
+        /// The DID the message came from.
         sender: String,
     },
     /// A community's operational document (removal notice, join replies,
     /// profile, capability/git-ns replies, refusals).
     Operational {
+        /// The document as delivered.
         document: serde_json::Value,
+        /// The DID the message came from, which must be the document's issuer.
         sender: String,
+        /// Our DIDs, one of which must be the document's recipient.
         our_dids: Vec<String>,
         /// The type the message is handled as, which the document's signed
         /// `type` must be (its kind and window follow from it).
@@ -219,12 +223,19 @@ pub enum VerifyJob {
     },
     /// A relationship DID's binding proofs.
     DidBinding {
+        /// The relationship DID offered.
         did: String,
+        /// Its holder's proof of control of it.
         did_proof: Option<serde_json::Value>,
+        /// The sending persona DID.
         persona: String,
+        /// The persona's proof that it names the relationship DID.
         persona_proof: Option<serde_json::Value>,
+        /// Our DID the message was addressed to.
         peer: String,
+        /// The handshake's thread id.
         thid: String,
+        /// Which side of the handshake the proofs are for.
         role: crate::relationships::BindingRole,
     },
     /// A VRC's proof against its issuer's key.
@@ -233,8 +244,11 @@ pub enum VerifyJob {
     /// re-issued VMC and role VAC it carries, each as an issued credential
     /// (proof, validity, revocation — fails closed).
     Renewal {
+        /// The answer as delivered.
         document: serde_json::Value,
+        /// The DID the message came from.
         sender: String,
+        /// Our persona DIDs, one of which the answer must be addressed to and renew.
         our_dids: Vec<String>,
     },
     /// No check: the message needs none, but its sender has messages queued
@@ -253,17 +267,22 @@ pub enum VerifyJob {
 /// The result of a [`VerifyJob`]. Recording (replay sets) and every state
 /// change stay on the loop: this carries only what was proven.
 pub enum PreVerified {
+    /// An issued credential's check.
     Credential(
         Result<
             crate::issued_credential::VerifiedIssuedCredential,
             crate::issued_credential::IssuedCredentialError,
         >,
     ),
+    /// An operational document's check.
     Operational(
         Result<crate::operational::VerifiedOperational, crate::operational::OperationalError>,
     ),
+    /// A relationship DID's binding check.
     DidBinding(Result<(), crate::relationships::DidBindingError>),
+    /// A VRC's proof check; the error says why it failed.
     Vrc(Result<(), String>),
+    /// A renewal answer's check.
     Renewal(Result<crate::renewal::VerifiedRenewal, crate::renewal::RenewalError>),
     /// Nothing was checked ([`VerifyJob::Barrier`]).
     Barrier,
@@ -273,7 +292,10 @@ pub enum PreVerified {
 pub enum Arrival<'a> {
     /// Just arrived. `waiting(sender)` says whether that sender has messages
     /// queued for a check ahead of this one, which it must not overtake.
-    New { waiting: &'a dyn Fn(&str) -> bool },
+    New {
+        /// Whether a sender has messages queued for a check.
+        waiting: &'a dyn Fn(&str) -> bool,
+    },
     /// Queued for its check before a restart
     /// ([`crate::config::protected_config::ProtectedConfig::deferred_inbound`]).
     /// It passed the age and replay gates when it arrived; it is set aside
@@ -1527,7 +1549,7 @@ async fn credential_issue(
         // Snapshot before, so the log can say what *changed* rather than that a
         // message arrived. An issued membership credential is the moment a join
         // completes — the single most consequential inbound message there is,
-        // and it used to be indistinguishable from any other in the log.
+        // and it must not read like any other in the log.
         let was_active = config
             .account
             .memberships_for(&from_did)

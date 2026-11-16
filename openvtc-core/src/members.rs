@@ -251,12 +251,11 @@ mod tests {
         );
 
         // Digesting a round trip through the local model produces the *same*
-        // value. This used to be the hazard the acknowledgement guarded against:
-        // the model had no field for `credentialStatus`, so parsing dropped it and
-        // a digest over the parse mismatched the one the community recomputes. The
-        // model carries `credentialStatus` (and `issuerScope`), so the round trip
-        // is lossless and either route digests to the same bytes. Parsed without
-        // the proof, which the digest excludes anyway.
+        // value. A model with no field for `credentialStatus` would drop it on
+        // parse, and a digest over the parse would mismatch the one the community
+        // recomputes. The model carries `credentialStatus` (and `issuerScope`),
+        // so the round trip is lossless and either route digests to the same
+        // bytes. Parsed without the proof, which the digest excludes anyway.
         let mut proofless = grant();
         proofless.as_object_mut().expect("object").remove("proof");
         let parsed: DTGCredential = serde_json::from_value(proofless).expect("parses");

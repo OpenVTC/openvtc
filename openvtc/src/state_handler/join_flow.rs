@@ -1436,9 +1436,9 @@ fn open_invitation_choice(state: &mut State, config: &Config, persona_id: Person
     // Always offer the choice, including with none found.
     // The step carries a paste row, so an empty list is a
     // question ("do you have one?") rather than a reason
-    // to skip. It used to launch straight into an open
-    // request here, which is why an operator holding an
-    // invitation was never asked for it.
+    // to skip. Launching straight into an open request
+    // here would never ask an operator holding an
+    // invitation for it.
     state.join.invitation_options = invitations;
     state.join.vetting_in_hand = state
         .join
@@ -1527,9 +1527,9 @@ fn foreign_invitation_subject(config: &Config, vic: &serde_json::Value) -> Optio
 /// unexpired: otherwise the sequence would fall back to whichever vault
 /// invitation matches, which a new persona was never meant to present.
 ///
-/// This used to be `false` whatever the invitation, and the flow cleared it:
-/// a pasted invitation was thrown away and the join went out as an open
-/// request, with no word until the progress page (issue #373).
+/// Answering `false` whatever the invitation would throw a pasted invitation
+/// away and send the join out as an open request, with no word until the
+/// progress page (#373).
 fn mint_can_present(config: &Config, state: &State, vtc_did: &str) -> bool {
     state.invitation_credential.as_ref().is_some_and(|vic| {
         openvtc_core::join::invitation_subject(vic).is_some()
@@ -2548,7 +2548,7 @@ mod tests {
         assert!(why.contains("asdasd"), "{why}");
         assert!(why.contains("did:webvh"), "and what one looks like: {why}");
     }
-    /// `is_duplicate_membership` mirrors `Account::live_community`: live
+    /// `is_duplicate_membership` mirrors `Account::has_live_membership`: live
     /// (Active/Pending) memberships are duplicates; inactive ones and unknown
     /// DIDs are not. Table-driven over the membership status.
     #[test]
@@ -2713,7 +2713,7 @@ mod tests {
         config
     }
 
-    // ---- Issue #373: an invitation on a join that mints a persona ----
+    // ---- An invitation on a join that mints a persona (#373) ----
 
     /// A first join: no persona can vouch for a new one, so the invitation is
     /// not presented — but it is kept (the sequence vaults it and says why), and
@@ -2737,7 +2737,7 @@ mod tests {
 
     /// "Be someone new" with an invitation naming one of our personas: the new
     /// persona presents it through a subject-linkage proof, as a reused persona
-    /// already could. It used to be dropped for an open request.
+    /// already could.
     #[test]
     fn a_new_persona_presents_an_invitation_one_of_ours_can_vouch_for() {
         let config = config_with_persona("did:webvh:example.com:alice");
@@ -2909,7 +2909,7 @@ mod tests {
     /// The entry-page paste records the VIC's issuer, which *is* the community
     /// being joined. The entry page prefills its DID input from this, so an
     /// operator holding an invitation never has to find and retype a DID the
-    /// credential already carries (issue #29).
+    /// credential already carries (#29).
     #[test]
     fn an_entry_page_paste_records_the_issuing_community() {
         let mut state = State::default();
@@ -3909,9 +3909,8 @@ mod vetting_tests {
     /// Applying signs cards with a persona, and the open request mints one on
     /// the way — so with none, both are takeable and only one announces a step.
     ///
-    /// This assertion used to read `!available()` for the vetting route. That
-    /// was the bug: the route the community is telling you about looked like
-    /// the one you could not use.
+    /// The vetting route must read as available: otherwise the route the
+    /// community is telling you about looks like the one you cannot use.
     #[test]
     fn with_no_persona_both_routes_are_takeable_and_only_one_says_so() {
         let routes = build_routes("Kernel", &requirements(None), &[], &[], &[]);

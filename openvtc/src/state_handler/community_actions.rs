@@ -157,7 +157,7 @@ impl CommunityJob {
         };
         // What the send produced, where it produces something worth keeping. The
         // member's own acknowledgement is the one credential in this exchange
-        // that nothing on this side used to retain.
+        // that nothing else on this side retains.
         let mut issued: Option<serde_json::Value> = None;
         let result = match &self.verb {
             Verb::Leave { signing_secret } => openvtc_core::join::submit_self_remove(
@@ -517,8 +517,7 @@ mod tests {
                 .as_ref()
                 .map(|s| s.text.as_str())
                 // The status must say the credential was *sent*, not accepted:
-                // a DIDComm `Ok` is a local hand-off. This assertion used to
-                // look for "issued", which is what the old wording claimed.
+                // a DIDComm `Ok` is a local hand-off.
                 .is_some_and(|m| m.contains("sent") && m.contains("waiting")),
         );
     }

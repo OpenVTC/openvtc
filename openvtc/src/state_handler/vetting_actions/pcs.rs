@@ -15,7 +15,7 @@ use super::dispatch::{persist, status};
 use super::faces::application_context;
 use super::hidden::{cannot_attest_hidden, vetter_context};
 use super::jobs::Sent;
-use super::send::{sign_and_send, spawn_send};
+use super::send::{Claim, sign_and_send, spawn_send};
 use super::words::community_display;
 use crate::state_handler::background_dispatch;
 use crate::state_handler::hidden_vetting_vta::{PcsDone, PcsJob, PcsOutcome, PcsWork};
@@ -443,7 +443,7 @@ async fn send_enrolment(
         community: community.to_string(),
         kind: QueryKind::PcsRoot,
     };
-    if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, persona, document, sent, Claim::Unheld).await {
         status(ctx, Status::error(format!("Could not ask to enrol: {e}")));
     }
 }
@@ -479,7 +479,7 @@ async fn send_draw(
         community: community.to_string(),
         kind: QueryKind::PcsTokens,
     };
-    if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, persona, document, sent, Claim::Unheld).await {
         status(ctx, Status::error(format!("Could not draw tokens: {e}")));
     }
 }
@@ -530,7 +530,14 @@ fn send_attestation(
         request_id: job.request_id.clone(),
         previous,
     };
-    spawn_send(ctx, message, vetter_did, &job.applicant, sent);
+    spawn_send(
+        ctx,
+        message,
+        vetter_did,
+        &job.applicant,
+        sent,
+        Claim::Unheld,
+    );
 }
 
 /// Take the VTA's answer to an item a community or a vetter sent.

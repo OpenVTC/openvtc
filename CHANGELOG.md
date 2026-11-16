@@ -39,6 +39,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The UI says *community* for a community and *VTC* only for the service behind it**
+  ([#554](https://github.com/OpenVTC/openvtc/issues/554)), as the README's glossary has
+  it: the Communities and TSP panels label the community's DID "community", and the CLI
+  help asks for "the community's DID".
+- **Every vetting, repos, rooms and elections view, and every overlay, takes exactly
+  the keys its footer lists** ([#580](https://github.com/OpenVTC/openvtc/issues/580)).
+  Vetting forms take Tab/↑/↓ only where there is another field, ←/→ only on a choice and
+  Space only on a box to tick, and a key a form does not take says so instead of moving
+  the focus off it. A list's verbs are listed and taken only when there is a row for
+  them. Repos takes its "this machine" keys only where they apply to the highlighted
+  repository; an overlay says which keys it does not take instead of swallowing them.
 - **Joining a community no longer freezes the rest of the app**
   ([#529](https://github.com/OpenVTC/openvtc/issues/529)). The join runs as a job on the
   main loop instead of a nested event loop, so saves, inbound messages, VTA supervision
@@ -181,6 +192,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The identity forms draw the caret where the cursor is**
+  ([#578](https://github.com/OpenVTC/openvtc/issues/578)). It was always drawn at the end
+  of the text, though ←/→ moved the cursor; a choice (the value type) shows none.
+- **Ctrl+V pastes a ticket link into "Ask a vetter" again, and `y`/`u` copy the code and
+  link on the full-screen ticket** ([#580](https://github.com/OpenVTC/openvtc/issues/580)).
+  Both were listed but did nothing.
 - **A failed join submit no longer deletes a persona the join reused**
   ([#529](https://github.com/OpenVTC/openvtc/issues/529)). Only a persona the join itself
   minted is rolled back.

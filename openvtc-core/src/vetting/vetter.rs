@@ -340,8 +340,8 @@ impl DeskEntry {
 
 /// The `#response` accepting `entry`.
 ///
-/// `acceptsDocumentation` is `minItems: 1` and unique on this line, where it
-/// used to accept `[]`. A vetter who accepts no documentation at all — which V0
+/// `acceptsDocumentation` is `minItems: 1` and unique on this line. A vetter
+/// who accepts no documentation at all — which V0
 /// allows, for someone they already know (D16) — therefore **omits** the member
 /// rather than sending an empty list the published response refuses, and a
 /// token repeated in the vetter's own policy is listed once.

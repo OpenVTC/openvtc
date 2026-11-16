@@ -1,9 +1,9 @@
 //! Shown when the chosen Trust Context already holds an account (D5).
 //!
-//! Setup used to write into whatever context it was given without looking. A
+//! Setup looks before it writes into the context it was given. Without that, a
 //! fresh install pointed at a context already in use would quietly mint a
-//! *second* set of personas beside the first, and a mistyped context id was
-//! indistinguishable from a deliberate one until much later.
+//! *second* set of personas beside the first, and a mistyped context id would
+//! be indistinguishable from a deliberate one until much later.
 //!
 //! This page turns that into a decision. It is reached only when the probe
 //! found something, so a genuine first run never sees it.

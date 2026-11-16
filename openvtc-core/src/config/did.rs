@@ -1,3 +1,13 @@
+//! The persona's `did:webvh`: creating it, and reading what its document
+//! advertises (mediator, TSP).
+//!
+//! [`normalize_webvh_url`] is the canonical entry point for turning what an
+//! operator types into a `did:webvh` URL; it delegates to `didwebvh-rs` and
+//! must stay that way — never hand-roll DID/URL mapping here (see
+//! `CLAUDE.md`). [`create_initial_webvh_did`] mints the first DID of a
+//! persona; [`validate_custom_path`] and [`explicit_path_mode`] check a path
+//! the operator chose.
+
 use affinidi_tdk::{
     did_common::{
         Document,
@@ -716,10 +726,10 @@ mod tests {
         assert!(normalize_webvh_url("https://example.com/foo:bar").is_err());
     }
 
-    /// Regression: https://r2.ic3.dev/vincent previously produced a placeholder
-    /// DID with a stray slash ("did:webvh:{SCID}:r2.ic3.dev/vincent") which
-    /// resolved to "r2.ic3.dev/vincent/.well-known/did.jsonl". The DID should
-    /// use colons between the host and path components.
+    /// https://r2.ic3.dev/vincent must not produce a placeholder DID with a
+    /// stray slash ("did:webvh:{SCID}:r2.ic3.dev/vincent"), which resolves to
+    /// "r2.ic3.dev/vincent/.well-known/did.jsonl". The DID uses colons between
+    /// the host and path components.
     #[test]
     fn placeholder_did_converts_path_slash_to_colon() {
         assert_eq!(

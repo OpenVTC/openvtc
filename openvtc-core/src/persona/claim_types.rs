@@ -5,22 +5,20 @@
 //! VTI #1315. The reasoning behind the table itself lives beside it in
 //! `dtgwg-trust-tasks-tf/specs/persona/_shared/0.1/CLAIM-TYPES.md`.
 //!
-//! # Why this stopped being vendored
+//! # Why this is not vendored
 //!
-//! This module used to carry a copy of the registry, and the copy was
-//! *correct*. That was never the problem. The problem is that a copy of a table
-//! two other repositories own costs a re-sync against each of them on every
-//! change — which is the argument for the registry existing at all, applied one
-//! layer down — and, since VTI #1327, that a **deployment may declare its own
-//! claim types**. An agent serving an extension token is invisible to a client
+//! A copy of the registry, even a *correct* one, is the wrong trade. A copy of
+//! a table two other repositories own costs a re-sync against each of them on
+//! every change — which is the argument for the registry existing at all,
+//! applied one layer down — and, since VTI #1327, a **deployment may declare its
+//! own claim types**. An agent serving an extension token is invisible to a client
 //! that ships its own table, and the divergence is silent: the token resolves
 //! from the compiled copy exactly as it would have with no configuration at
 //! all, so the operator's intended tightening is quietly not in force and the
 //! screen looks completely normal.
 //!
-//! That is the shape of the `employer` / `profile.*` masking divergence this
-//! module was carrying: our copy matched spec 0.1 exactly, and 0.1 simply has
-//! no entry for either.
+//! The `employer` / `profile.*` masking divergence has that shape: a copy that
+//! matches spec 0.1 exactly has no entry for either, because 0.1 has none.
 //!
 //! # The compiled copy that remains
 //!
@@ -54,8 +52,8 @@
 //! - **`sensitivity: high`** means the value is *withheld from a listing that
 //!   did not explicitly ask for sensitive values* — a read-path control, not a
 //!   cosmetic one. It exists on the wire (`persona_attribute_list`'s
-//!   `include_sensitive`), and this pane still has one escalation where the
-//!   control needs two. See `pool::list`.
+//!   `include_sensitive`), and the identity pane makes it as a second
+//!   escalation of its own, separate from showing values. See `pool::list`.
 //!
 //! `release` is carried but not acted on: nothing in this client releases
 //! anything. It is read so that a caller can *say* what a type would require,
@@ -250,8 +248,11 @@ impl Release {
 /// What one claim type says about showing and releasing its value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClaimTypeDefaults {
+    /// How carefully the value is shown to its holder.
     pub sensitivity: Sensitivity,
+    /// How the value is reduced when shown masked.
     pub mask: MaskStyle,
+    /// What it takes to let the value leave.
     pub release: Release,
 }
 
@@ -348,6 +349,7 @@ pub struct UnappliedClaimType {
 /// somebody can be told, and this is the half that tells them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UnappliedReport {
+    /// The declared claim types the agent refused, one row each.
     pub rejected: Vec<UnappliedClaimType>,
     /// Set when the extension file itself could not be read — a different
     /// sentence from a rejected row, because then *nothing* the deployment
@@ -388,8 +390,8 @@ pub struct Registry {
 
 impl Default for Registry {
     /// The compiled copy. A [`Registry`] is only ever *default* before the
-    /// first read has come back, and drawing from spec 0.1 in that window is
-    /// the same answer this client gave for its whole life until now.
+    /// first read has come back, and drawing from spec 0.1 in that window
+    /// gives the answer an agent too old to serve the registry gets anyway.
     fn default() -> Self {
         Self::vendored()
     }
@@ -736,9 +738,8 @@ mod tests {
     use super::*;
 
     /// Every resolution test below runs against the compiled copy, which is
-    /// spec 0.1 — the same table this module used to *be*. Keeping the
-    /// assertions is what says the fallback did not quietly change meaning when
-    /// it stopped being the only answer.
+    /// spec 0.1. The assertions pin the fallback's meaning, so it cannot
+    /// quietly change now that it is not the only answer.
     fn spec_0_1() -> Registry {
         Registry::vendored()
     }

@@ -219,6 +219,27 @@ pub(in crate::ui::pages::main) fn repos_key(
     }
 }
 
+/// [`repos_key`] as the view takes it: an armed change and an open form keep
+/// every key `repos_key` maps, but the screen takes exactly the keys its
+/// footer lists ([`screen_bindings`](super::screen_bindings)) — so a key for
+/// this machine that does not apply to the highlighted repository is not
+/// taken, and says so, rather than answering with a refusal.
+pub(in crate::ui::pages::main) fn repos_view_key(
+    key: KeyEvent,
+    view: &crate::state_handler::main_page::repos::ReposView,
+) -> Option<crate::state_handler::actions::ReposAction> {
+    use crate::state_handler::main_page::repos::ReposScreen;
+    let on_screen = view.confirm.is_none()
+        && view.workspace.confirm.is_none()
+        && view.workspace.form.is_none()
+        && view.add.is_none()
+        && !matches!(view.screen, ReposScreen::NewRepo(_));
+    if on_screen && !super::screen_bindings(view).iter().any(|b| b.matches(&key)) {
+        return None;
+    }
+    repos_key(key, view)
+}
+
 /// The checkout path `p` copies: the highlighted or open repository's, when
 /// it is checked out and nothing else has the keys.
 pub(in crate::ui::pages::main) fn repos_copy_path(

@@ -57,13 +57,10 @@ pub enum SetupPage {
     FinalPage,
 }
 
-// R-A-5 moved persona minting out of setup and into the State-B join flow, which
-// drives it headlessly from `JoinProgress` rather than through wizard pages. The
-// pages that used to walk an operator through it — mediator choice, display name,
-// webvh address/server, DID-key display and export, did-git-sign install — were
-// left behind unreachable, and stayed that way long enough to start reading as
-// live code. They are gone; `SetupState` keeps the *fields* they wrote, because
-// the join flow now fills the same struct itself before calling
+// Persona minting is not part of setup (R-A-5): the State-B join flow drives it
+// headlessly from `JoinProgress` rather than through wizard pages. `SetupState`
+// still holds the persona fields — mediator, display name, webvh address, DID
+// keys — because the join flow fills the same struct itself before calling
 // `Config::mint_persona_into`.
 
 // ****************************************************************************
@@ -84,7 +81,7 @@ pub struct SetupState {
     /// Persona DID keys minted for the identity currently being created.
     ///
     /// Written by the State-B join flow / standalone persona mint, then read by
-    /// `Config::mint_persona_into`. Setup itself no longer fills this in.
+    /// `Config::mint_persona_into`. Setup itself does not fill this in.
     pub did_keys: Option<PersonaDIDKeys>,
 
     /// How is the config protected?

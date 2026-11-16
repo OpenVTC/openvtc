@@ -8,11 +8,11 @@
 //! community approves manually. The default highlight is the first invitation, so
 //! Enter preserves the auto-join behaviour.
 //!
-//! The step used to be skipped when no VIC was found for the chosen identity,
-//! which made "do you have an invitation?" a question the flow only asked when it
-//! already knew the answer. An operator holding one — sent by email, sitting in a
-//! file, issued to a different persona — was never given anywhere to put it and
-//! silently submitted an open request instead. Hence the paste row, and hence the
+//! The step is unconditional, even when no VIC is found for the chosen identity:
+//! skipping it would make "do you have an invitation?" a question the flow only
+//! asks when it already knows the answer. An operator holding one — sent by email,
+//! sitting in a file, issued to a different persona — would have nowhere to put it
+//! and silently submit an open request instead. Hence the paste row, and hence the
 //! step being unconditional: an empty list is a question, not a decision.
 
 use crate::colors::{

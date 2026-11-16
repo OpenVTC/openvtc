@@ -86,6 +86,16 @@ pub(crate) struct SendJob {
     pub(super) sent: Sent,
 }
 
+impl crate::state_handler::background_dispatch::Job for SendJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Vetting
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Vetting(self.run().await)
+    }
+}
+
 impl SendJob {
     pub(crate) async fn run(self) -> VettingOutcome {
         let result = openvtc_core::didcomm::send_message_via(
@@ -181,6 +191,16 @@ async fn fill_claim_types(client: &VtaClient, faces: &mut [FaceChoice]) {
             // when they happened to sit next to each other.
             .filter(|t| seen.insert(t.clone()))
             .collect();
+    }
+}
+
+impl crate::state_handler::background_dispatch::Job for FaceJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Vetting
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Vetting(self.run().await)
     }
 }
 
@@ -410,6 +430,16 @@ pub(crate) enum CardFailure {
 
 fn failed(e: impl std::fmt::Display) -> CardFailure {
     CardFailure::Failed(e.to_string())
+}
+
+impl crate::state_handler::background_dispatch::Job for CardJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Vetting
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Vetting(self.run().await)
+    }
 }
 
 impl CardJob {

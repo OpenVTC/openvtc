@@ -9,10 +9,10 @@ use tracing::{debug, info};
 
 /// One VRC request, resolved on the loop thread.
 ///
-/// The only credential action that touches the network. It used to be awaited
-/// inline, which meant asking a peer for a credential froze the application for
-/// as long as the send retried — and an unresponsive peer is a common reason for
-/// the request to be slow, not a rare one.
+/// The only credential action that touches the network, so it is not awaited
+/// inline: that would freeze the application for as long as the send retries
+/// — and an unresponsive peer is a common reason for the request to be slow,
+/// not a rare one.
 pub(crate) struct VrcRequestJob {
     pub(crate) service: Messaging,
     /// The DIDComm message, built on the loop where `Config` is available.
@@ -23,6 +23,16 @@ pub(crate) struct VrcRequestJob {
     pub(crate) remote_p_did: Arc<String>,
     /// Message id, which becomes the tracking task's id on success.
     pub(crate) msg_id: Arc<String>,
+}
+
+impl crate::state_handler::background_dispatch::Job for VrcRequestJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Credential
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Credential(self.run().await)
+    }
 }
 
 impl VrcRequestJob {

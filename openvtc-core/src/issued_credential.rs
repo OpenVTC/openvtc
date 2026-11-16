@@ -41,28 +41,40 @@ pub const VALID_FROM_SKEW: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 /// nothing about the credential's contents.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IssuedCredentialError {
+    /// No check result was found for this credential before it was handled.
     #[error("the credential was not checked")]
     NotChecked,
+    /// The delivery document's `issuer` is not the sender.
     #[error("the delivery is not a Trust Task document naming the community that sent it")]
     DeliveryIssuerNotSender,
+    /// The delivery document's proof did not verify.
     #[error("the delivery's proof: {0}")]
     DeliveryProof(ProofError),
+    /// The delivery carries no `credential_response.credential`.
     #[error("the delivery carries no credential")]
     NoCredential,
+    /// The check timed out, or its task failed.
     #[error("its check did not finish (timed out or failed) — ask the community to send it again")]
     CheckUnfinished,
+    /// The credential has no `issuer`.
     #[error("the credential names no issuer")]
     NoIssuer,
+    /// The credential's issuer is not the sender.
     #[error("the credential's issuer is not the community that sent it")]
     IssuerNotSender,
+    /// The credential's proof did not verify.
     #[error("the credential's proof: {0}")]
     Proof(#[from] ProofError),
+    /// A validity bound (the field named) is not an RFC 3339 timestamp.
     #[error("the credential's {0} is not a valid timestamp")]
     BadTimestamp(&'static str),
+    /// The credential's validity starts later than now plus [`VALID_FROM_SKEW`].
     #[error("the credential is not valid yet")]
     NotYetValid,
+    /// The credential's validity has ended.
     #[error("the credential has expired")]
     Expired,
+    /// The issuer's status list marks the credential revoked or suspended.
     #[error("the community has revoked or suspended the credential")]
     Revoked,
     /// Carries why: an unreachable host and a list that did not verify are
@@ -111,14 +123,6 @@ pub fn issuer_of(credential: &Value) -> Option<&str> {
     }
 }
 
-/// Verify a credential `sender` delivered as issued by itself: the issuer is
-/// the sender, every proof verifies under the issuer's `assertionMethod` keys,
-/// it is in its validity window and, where it names a status entry, not
-/// revoked.
-///
-/// # Errors
-///
-/// The first check that failed, as an [`IssuedCredentialError`].
 /// Verify a pushed `credential-exchange/issue` document and the credential it
 /// delivers.
 ///
@@ -151,6 +155,14 @@ pub async fn verify_issued_delivery(
     verify_issued_credential(credential, sender, resolver, now).await
 }
 
+/// Verify a credential `sender` delivered as issued by itself: the issuer is
+/// the sender, every proof verifies under the issuer's `assertionMethod` keys,
+/// it is in its validity window and, where it names a status entry, not
+/// revoked.
+///
+/// # Errors
+///
+/// The first check that failed, as an [`IssuedCredentialError`].
 pub async fn verify_issued_credential(
     credential: Value,
     sender: &str,

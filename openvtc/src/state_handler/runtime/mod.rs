@@ -1,11 +1,9 @@
 //! The runtime loop (#528).
 //!
-//! `StateHandler::main_loop` used to be one ~2,500-line function: setup, then
-//! a `select!` whose 21 arms read and wrote some thirty loop-local variables.
-//! None of it could be called from a test. Those locals are now the fields of
-//! [`Runtime`], each `select!` arm is one method on it, and [`Runtime::run`] is
-//! a router: it waits for the next event, hands it to its method, and runs the
-//! end-of-iteration work every arm used to fall through to.
+//! The state the loop carries is the fields of [`Runtime`], and each `select!`
+//! arm is one method on it, so every arm can be called from a test.
+//! [`Runtime::run`] is a router: it waits for the next event, hands it to its
+//! method, and runs the end-of-iteration work every arm falls through to.
 //!
 //! The arm methods live next to what they handle:
 //!
@@ -503,7 +501,7 @@ impl Runtime {
             join_status_tick: tokio::time::interval(std::time::Duration::from_secs(60)),
             join_status_pacer: openvtc_core::join::status_poll::PollPacer::default(),
             // Ask each Active community, once per session, for its declared
-            // `relationshipIdentifierDefault` (issue #241). The pacer asks each
+            // `relationshipIdentifierDefault` (#241). The pacer asks each
             // community once, so this tick over communities already asked does
             // no work; a bare account (no Active membership) does none at all.
             community_profile_tick: tokio::time::interval(std::time::Duration::from_secs(60)),

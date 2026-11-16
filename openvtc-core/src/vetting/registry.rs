@@ -221,12 +221,19 @@ fn check_event(event: &VetterEvent) -> Result<(), DraftError> {
 /// One event, as typed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EventDraft {
+    /// The event's name, e.g. `Linux Plumbers Conference 2026`.
     pub name: String,
+    /// First day, `YYYY-MM-DD`.
     pub start_date: String,
+    /// Last day, `YYYY-MM-DD`.
     pub end_date: String,
+    /// ISO 3166-1 alpha-2 country code; blank for no place.
     pub country: String,
+    /// Region; blank for none.
     pub region: String,
+    /// City; blank for none.
     pub city: String,
+    /// The event's own `https` page; blank for none.
     pub url: String,
 }
 
@@ -282,18 +289,25 @@ impl EventDraft {
 pub struct ProfileDraft {
     /// Shown in the directory.
     pub listed: bool,
+    /// The name the vetter chooses to be listed under. Self-asserted.
     pub display_name: String,
     /// BCP 47 tags, separated by commas or spaces.
     pub languages: String,
+    /// ISO 3166-1 alpha-2 country code; blank for no place.
     pub country: String,
+    /// Region; blank for none.
     pub region: String,
+    /// City; blank for none.
     pub city: String,
     /// In [`VettingMethod`] order.
     pub methods: Vec<VettingMethod>,
     /// Documentation tokens, separated by commas or spaces.
     pub accepts_documentation: String,
+    /// Free text on when the vetter is available to vet.
     pub availability: String,
+    /// Free text on how to obtain a ticket from the vetter.
     pub contact_hint: String,
+    /// Events the vetter will attend and vet at.
     pub events: Vec<EventDraft>,
 }
 
@@ -470,13 +484,21 @@ impl ProfileDraft {
 /// Directory filters, as typed. Empty means "any".
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DirectoryFilter {
+    /// BCP 47 tag a listed language must equal or begin with.
     pub language: String,
+    /// ISO 3166-1 alpha-2 country code.
     pub country: String,
+    /// Region name.
     pub region: String,
+    /// City name.
     pub city: String,
+    /// A method the vetter offers.
     pub method: Option<VettingMethod>,
+    /// Earliest event date, `YYYY-MM-DD`.
     pub event_from: String,
+    /// Latest event date, `YYYY-MM-DD`.
     pub event_to: String,
+    /// Text an event's name must contain, case-insensitively.
     pub event_name: String,
 }
 

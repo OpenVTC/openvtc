@@ -1,31 +1,29 @@
-/*!
- * Durable backing for TSP Rev 3 relationship state.
- *
- * Rev 3 §7.2.2 gates application traffic on a recorded relationship: a peer the
- * endpoint holds none with has its messages dropped. The SDK records that state
- * into whatever `RelationshipStore` the ATM is built with, and the default is
- * in-memory — wiped on restart. After a restart, every peer that still holds the
- * relationship the endpoint forgot has its traffic silently dropped until it is
- * re-formed. Persisting the store is what closes that window.
- *
- * The SDK already solves the store itself: `PersistentRelationshipStore` keeps
- * the FSM, the per-facet key layout and the (de)serialisation, and delegates raw
- * bytes to a three-method `RelationshipKv`. This module is that backend — an
- * in-memory map OpenVTC mirrors into the encrypted `ProtectedConfig`, alongside
- * (but deliberately separate from) the DIDComm [`crate::relationships`] model,
- * which is a different kind of relationship keyed and stored its own way.
- *
- * ## Why an in-memory map with a persisted mirror, not a file the KV writes
- *
- * The KV is written by the SDK's background tasks — the inbound dispatcher
- * records an invite, a send forms one — which run off the single-mutator loop.
- * Writing straight to disk from there would fight the loop's coalesced-save
- * ownership of the config file. So a write lands in a shared in-memory map and
- * raises a `Notify`; the loop drains that notify, snapshots the map into
- * `ProtectedConfig` and saves on its own schedule. Hydration runs the other way
- * at load, before any listener connects, so the SDK sees existing relationships
- * and does not re-invite a peer it is already bidirectional with.
- */
+//! Durable backing for TSP Rev 3 relationship state.
+//!
+//! Rev 3 §7.2.2 gates application traffic on a recorded relationship: a peer the
+//! endpoint holds none with has its messages dropped. The SDK records that state
+//! into whatever `RelationshipStore` the ATM is built with, and the default is
+//! in-memory — wiped on restart. After a restart, every peer that still holds the
+//! relationship the endpoint forgot has its traffic silently dropped until it is
+//! re-formed. Persisting the store is what closes that window.
+//!
+//! The SDK already solves the store itself: `PersistentRelationshipStore` keeps
+//! the FSM, the per-facet key layout and the (de)serialisation, and delegates raw
+//! bytes to a three-method `RelationshipKv`. This module is that backend — an
+//! in-memory map OpenVTC mirrors into the encrypted `ProtectedConfig`, alongside
+//! (but deliberately separate from) the DIDComm [`crate::relationships`] model,
+//! which is a different kind of relationship keyed and stored its own way.
+//!
+//! ## Why an in-memory map with a persisted mirror, not a file the KV writes
+//!
+//! The KV is written by the SDK's background tasks — the inbound dispatcher
+//! records an invite, a send forms one — which run off the single-mutator loop.
+//! Writing straight to disk from there would fight the loop's coalesced-save
+//! ownership of the config file. So a write lands in a shared in-memory map and
+//! raises a `Notify`; the loop drains that notify, snapshots the map into
+//! `ProtectedConfig` and saves on its own schedule. Hydration runs the other way
+//! at load, before any listener connects, so the SDK sees existing relationships
+//! and does not re-invite a peer it is already bidirectional with.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

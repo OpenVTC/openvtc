@@ -18,7 +18,7 @@
 //!
 //! - an **attribute** stays an **attribute** — *something you say about
 //!   yourself, held once*. This row is the one the table does not translate:
-//!   the friendlier word it used to carry, *fact*, claimed a truth a
+//!   the friendlier word *fact* would claim a truth a
 //!   self-asserted value does not have, and `Facts` already means a verified
 //!   policy input in `vtc-service`. Truth is carried by the provenance line
 //!   beneath the value, never by the noun;
@@ -1504,17 +1504,17 @@ fn render_attribute_form(form: &AttributeForm) -> Vec<Line<'static>> {
     );
     lines.push(Line::from(""));
 
-    field(
+    input_field(
         &mut lines,
         "Type",
-        form.claim_type.value(),
+        &form.claim_type,
         form.field == AttributeField::ClaimType,
     );
     lines.push(Line::from("      e.g. name.legal, email.work, phone.mobile").fg(COLOR_DARK_GRAY));
-    field(
+    input_field(
         &mut lines,
         "Label",
-        form.label.value(),
+        &form.label,
         form.field == AttributeField::Label,
     );
     field(
@@ -1526,10 +1526,10 @@ fn render_attribute_form(form: &AttributeForm) -> Vec<Line<'static>> {
         ),
         form.field == AttributeField::ValueType,
     );
-    field(
+    input_field(
         &mut lines,
         "Value",
-        form.value.value(),
+        &form.value,
         form.field == AttributeField::Value,
     );
 
@@ -1571,10 +1571,10 @@ fn render_profile_form(state: &IdentityState, form: &ProfileForm) -> Vec<Line<'s
     );
     lines.push(Line::from(""));
 
-    field(
+    input_field(
         &mut lines,
         "Name",
-        form.name.value(),
+        &form.name,
         form.focus == ProfileFormFocus::Name,
     );
     lines.push(Line::from(""));
@@ -1718,26 +1718,28 @@ fn render_compose_form(form: &ComposeForm) -> Vec<Line<'static>> {
             Style::new().fg(COLOR_TEXT_DEFAULT)
         }
     };
-    let caret = |field: usize| if form.field == field { "▏" } else { "" };
-    lines.push(Line::from(vec![
-        Span::styled(" Your name for it   ", style(0)),
-        Span::styled(form.name.value().to_string(), style(0)),
-        Span::styled(caret(0), style(0)),
-    ]));
+    lines.push(Line::from(labelled(
+        " Your name for it   ",
+        &form.name,
+        form.field == 0,
+        style(0),
+    )));
     lines.push(Line::from("   Only you ever see it.").fg(COLOR_DARK_GRAY));
     lines.push(Line::from(""));
     for (i, row) in form.rows.iter().enumerate() {
         let (t, v) = (1 + 2 * i, 2 + 2 * i);
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:<18}", "What it is"), style(t)),
-            Span::styled(row.claim_type.value().to_string(), style(t)),
-            Span::styled(caret(t), style(t)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:<18}", "Value"), style(v)),
-            Span::styled(row.value.value().to_string(), style(v)),
-            Span::styled(caret(v), style(v)),
-        ]));
+        lines.push(Line::from(labelled(
+            format!(" {:<18}", "What it is"),
+            &row.claim_type,
+            form.field == t,
+            style(t),
+        )));
+        lines.push(Line::from(labelled(
+            format!(" {:<18}", "Value"),
+            &row.value,
+            form.field == v,
+            style(v),
+        )));
         lines.push(
             Line::from(if row.share {
                 "   ☑ used in my other faces too — it becomes reusable"
@@ -1904,26 +1906,28 @@ fn render_local_face_form(
             Style::new().fg(COLOR_TEXT_DEFAULT)
         }
     };
-    let caret = |field: usize| if form.field == field { "▏" } else { "" };
-    lines.push(Line::from(vec![
-        Span::styled(" Your name for it   ", style(0)),
-        Span::styled(form.name.value().to_string(), style(0)),
-        Span::styled(caret(0), style(0)),
-    ]));
+    lines.push(Line::from(labelled(
+        " Your name for it   ",
+        &form.name,
+        form.field == 0,
+        style(0),
+    )));
     lines.push(Line::from("   Only you ever see it.").fg(COLOR_DARK_GRAY));
     lines.push(Line::from(""));
     for (i, row) in form.rows.iter().enumerate() {
         let (t, v) = (1 + 2 * i, 2 + 2 * i);
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:<18}", "What it is"), style(t)),
-            Span::styled(row.claim_type.value().to_string(), style(t)),
-            Span::styled(caret(t), style(t)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:<18}", "Value"), style(v)),
-            Span::styled(row.value.value().to_string(), style(v)),
-            Span::styled(caret(v), style(v)),
-        ]));
+        lines.push(Line::from(labelled(
+            format!(" {:<18}", "What it is"),
+            &row.claim_type,
+            form.field == t,
+            style(t),
+        )));
+        lines.push(Line::from(labelled(
+            format!(" {:<18}", "Value"),
+            &row.value,
+            form.field == v,
+            style(v),
+        )));
     }
     lines.push(Line::from(""));
     if let Some(e) = &view.error {
@@ -2132,33 +2136,36 @@ fn render_contact_form(
             Style::new().fg(COLOR_TEXT_DEFAULT)
         }
     };
-    let caret = |field: usize| if form.field == field { "▏" } else { "" };
-    lines.push(Line::from(vec![
-        Span::styled(" Their DID          ", style(0)),
-        Span::styled(form.subject_did.value().to_string(), style(0)),
-        Span::styled(caret(0), style(0)),
-    ]));
+    lines.push(Line::from(labelled(
+        " Their DID          ",
+        &form.subject_did,
+        form.field == 0,
+        style(0),
+    )));
     lines.push(Line::from(""));
     for (i, row) in form.rows.iter().enumerate() {
         let (t, v) = (1 + 2 * i, 2 + 2 * i);
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:<18}", "What it is"), style(t)),
-            Span::styled(row.claim_type.value().to_string(), style(t)),
-            Span::styled(caret(t), style(t)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:<18}", "What they said"), style(v)),
-            Span::styled(row.value.value().to_string(), style(v)),
-            Span::styled(caret(v), style(v)),
-        ]));
+        lines.push(Line::from(labelled(
+            format!(" {:<18}", "What it is"),
+            &row.claim_type,
+            form.field == t,
+            style(t),
+        )));
+        lines.push(Line::from(labelled(
+            format!(" {:<18}", "What they said"),
+            &row.value,
+            form.field == v,
+            style(v),
+        )));
     }
     let n = form.notes_field();
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(" Your note          ", style(n)),
-        Span::styled(form.notes.value().to_string(), style(n)),
-        Span::styled(caret(n), style(n)),
-    ]));
+    lines.push(Line::from(labelled(
+        " Your note          ",
+        &form.notes,
+        form.field == n,
+        style(n),
+    )));
     lines.push(Line::from("   Never disclosed to anyone.").fg(COLOR_DARK_GRAY));
     lines.push(Line::from(""));
     if let Some(e) = &view.error {
@@ -2356,18 +2363,12 @@ fn render_world_form(form: &WorldForm) -> Vec<Line<'static>> {
         }
     };
 
-    lines.push(Line::from(vec![
-        Span::styled(" What do you call it?  ", focused(WorldFormFocus::Name)),
-        Span::styled(form.name.value().to_string(), focused(WorldFormFocus::Name)),
-        Span::styled(
-            if form.focus == WorldFormFocus::Name {
-                "▏"
-            } else {
-                ""
-            },
-            focused(WorldFormFocus::Name),
-        ),
-    ]));
+    lines.push(Line::from(labelled(
+        " What do you call it?  ",
+        &form.name,
+        form.focus == WorldFormFocus::Name,
+        focused(WorldFormFocus::Name),
+    )));
     lines.push(
         Line::from("   Only you ever see it — it is not a scope, and no counterparty is told it.")
             .fg(COLOR_DARK_GRAY),
@@ -2397,18 +2398,12 @@ fn render_world_form(form: &WorldForm) -> Vec<Line<'static>> {
     lines.push(Line::from("   ←/→ to choose.").fg(COLOR_DARK_GRAY));
     lines.push(Line::from(""));
 
-    lines.push(Line::from(vec![
-        Span::styled(" A mark (optional)    ", focused(WorldFormFocus::Icon)),
-        Span::styled(form.icon.value().to_string(), focused(WorldFormFocus::Icon)),
-        Span::styled(
-            if form.focus == WorldFormFocus::Icon {
-                "▏"
-            } else {
-                ""
-            },
-            focused(WorldFormFocus::Icon),
-        ),
-    ]));
+    lines.push(Line::from(labelled(
+        " A mark (optional)    ",
+        &form.icon,
+        form.focus == WorldFormFocus::Icon,
+        focused(WorldFormFocus::Icon),
+    )));
     lines.push(
         Line::from("   One or two emoji. A terminal that cannot draw it shows the name instead.")
             .fg(COLOR_DARK_GRAY),
@@ -2582,19 +2577,55 @@ pub fn bind_options(state: &IdentityState) -> Vec<String> {
 // Shared bits
 // ---------------------------------------------------------------------------
 
-/// One labelled form field, with the focused one marked.
+/// One labelled form field showing a choice, with the focused one marked.
 fn field(lines: &mut Vec<Line<'static>>, label: &str, value: &str, focused: bool) {
-    let style = if focused {
-        Style::new().fg(COLOR_SUCCESS).bold()
-    } else {
-        Style::new().fg(COLOR_TEXT_DEFAULT)
-    };
+    let style = field_style(focused);
     lines.push(Line::from(vec![
         Span::styled(if focused { " ▸ " } else { "   " }, style),
         Span::styled(format!("{label:<12}"), Style::new().fg(COLOR_DARK_GRAY)),
         Span::styled(value.to_string(), style),
-        Span::styled(if focused { "▏" } else { "" }, style),
     ]));
+}
+
+/// One labelled text field, with the focused one marked and its caret drawn
+/// at the cursor.
+fn input_field(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    input: &tui_input::Input,
+    focused: bool,
+) {
+    let style = field_style(focused);
+    let mut spans = vec![
+        Span::styled(if focused { " ▸ " } else { "   " }, style),
+        Span::styled(format!("{label:<12}"), Style::new().fg(COLOR_DARK_GRAY)),
+    ];
+    spans.extend(crate::ui::pages::main::text_input::input_spans(
+        input, focused, style,
+    ));
+    lines.push(Line::from(spans));
+}
+
+/// `label`, then `input`'s text with its caret at the cursor when `focused`.
+fn labelled(
+    label: impl Into<String>,
+    input: &tui_input::Input,
+    focused: bool,
+    style: Style,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(label.into(), style)];
+    spans.extend(crate::ui::pages::main::text_input::input_spans(
+        input, focused, style,
+    ));
+    spans
+}
+
+fn field_style(focused: bool) -> Style {
+    if focused {
+        Style::new().fg(COLOR_SUCCESS).bold()
+    } else {
+        Style::new().fg(COLOR_TEXT_DEFAULT)
+    }
 }
 
 /// Truncate prose for a fixed-width column, with an ellipsis so a cut is
@@ -2666,13 +2697,13 @@ mod tests {
     /// agreed phrase for a generated value — the table bans *"verifier" in
     /// prose*, not that phrase.
     ///
-    /// **"attribute"** came *off* this list on 2026-09-08, and **"fact"** went
-    /// on in its place. The screen used to translate an attribute to a *fact*,
-    /// which asserted a truth the model cannot promise — everything in the pool
-    /// is self-asserted until a credential backs it, and a face exists so a
-    /// person may show an old, pinned, overridden or untrue value — while
-    /// `Facts` already named a *verified* policy input in `vtc-service`. The
-    /// spec word came to the screen instead; provenance carries the truth.
+    /// **"fact"** is on this list and **"attribute"** is not. Translating an
+    /// attribute to a *fact* would assert a truth the model cannot promise —
+    /// everything in the pool is self-asserted until a credential backs it, and
+    /// a face exists so a person may show an old, pinned, overridden or untrue
+    /// value — while `Facts` already names a *verified* policy input in
+    /// `vtc-service`. The screen uses the spec word; provenance carries the
+    /// truth.
     #[test]
     fn the_pane_speaks_the_agreed_vocabulary() {
         const BANNED: &[&str] = &[
@@ -3525,10 +3556,10 @@ mod tests {
 
     /// The history says who a release went to, so that DID has to be one you
     /// can compare against another. A real `did:webvh` is about ninety
-    /// characters and the column holds forty-four, and the cut used to take the
-    /// tail and mark nothing — leaving
+    /// characters and the column holds forty-four, and a cut that takes the
+    /// tail and marks nothing leaves
     /// `did:webvh:QmX38g7H85V9zYdkEucGMcRZbJgyBBWBic`, which has no host, no
-    /// path, and no sign that it had been cut at all.
+    /// path, and no sign that it has been cut at all.
     #[test]
     fn a_disclosure_names_a_verifier_you_can_still_recognise() {
         use openvtc_core::persona::disclosure::DisclosureRow;
@@ -3652,11 +3683,9 @@ mod tests {
     /// A face's masked claims say they are masked, and say which key opens the
     /// selected one — rather than sending the holder to another tab.
     ///
-    /// This is the half the view used to be missing. A face was read as a whole
-    /// with no cursor, so it could offer no per-claim reveal and told the reader
-    /// to go and find the value among their attributes instead. That is a real
-    /// answer to a question nobody asked: the holder is looking at *this* face
-    /// because they want to know what *this* face shows.
+    /// Telling the reader to go and find the value among their attributes
+    /// instead would be a real answer to a question nobody asked: the holder is
+    /// looking at *this* face because they want to know what *this* face shows.
     #[test]
     fn a_face_says_which_key_opens_the_selected_masked_claim() {
         let state = face_with_two_masked_claims();
@@ -3849,10 +3878,8 @@ mod tests {
 
     /// A face masks what it shows too, and a claim left unselected stays masked.
     ///
-    /// This used to assert that the view sent the reader "among your
-    /// attributes" to read a value, because the detail had no cursor of its own
-    /// to reveal from. It has one now, so the pointer to another tab is gone
-    /// and what is left to check is the masking itself.
+    /// The detail has a cursor of its own to reveal from, so what is left to
+    /// check is the masking itself.
     #[test]
     fn a_face_masks_its_values_and_says_where_to_read_one() {
         use openvtc_core::persona::profile::{ProfileDetail, ProfileSummary, ResolvedClaim};
@@ -3982,6 +4009,30 @@ mod tests {
         assert!(shown.contains("kept in this face alone"), "{shown}");
         assert!(shown.contains("used in my other faces too"), "{shown}");
     }
+
+    /// The focused field's caret sits at its cursor, not at the end of the
+    /// text (#578); an unfocused field draws none.
+    #[test]
+    fn the_caret_is_drawn_at_the_cursor() {
+        use crate::state_handler::main_page::content::{ComposeForm, ComposeRow};
+        let mut state = populated(PersonaTab::Communities);
+        state.mode = PersonaMode::Compose(ComposeForm {
+            community: "Co-op".into(),
+            name: tui_input::Input::new("Market".into()).with_cursor(2),
+            rows: vec![ComposeRow {
+                claim_type: tui_input::Input::new("name.display".into()),
+                value: tui_input::Input::new("Ada".into()),
+                share: false,
+            }],
+            field: 0,
+            ..ComposeForm::default()
+        });
+        let shown = text(&render(&state));
+        assert!(shown.contains("Ma▏rket"), "{shown}");
+        assert!(!shown.contains("Market▏"), "{shown}");
+        assert!(!shown.contains("Ada▏"), "not focused: {shown}");
+    }
+
     /// The faces made here list their values, mark the chosen ones, and put
     /// the one-way warning before a promotion.
     #[test]

@@ -229,7 +229,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow
 }
 
 /// Undoes everything `setup_terminal` turned on. The normal exit and the panic
-/// hook both use it, so a panic no longer leaves bracketed paste on or the
+/// hook both use it, so a panic does not leave bracketed paste on or the
 /// cursor hidden.
 fn reset_terminal(out: &mut impl io::Write) -> anyhow::Result<()> {
     disable_raw_mode()?;

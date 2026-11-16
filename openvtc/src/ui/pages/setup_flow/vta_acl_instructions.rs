@@ -4,12 +4,12 @@
 //!
 //! # Why this is its own step, said that loudly
 //!
-//! This page used to read as information: a DID, some commands, and "`[ENTER]
-//! once authorised`" at the end of a long block. People pressed Enter without
-//! running anything, step 2 failed with `forbidden: DID not in ACL`, and
-//! nothing on either screen connected that refusal to the command they had
-//! skipped. So the page now leads with what to *do* — three numbered actions,
-//! including what PNM prints when it worked — and Enter means "I've run it".
+//! A page that reads as information — a DID, some commands, and "`[ENTER]
+//! once authorised`" at the end of a long block — gets Enter pressed without
+//! anything run; step 2 then fails with `forbidden: DID not in ACL`, and
+//! nothing on either screen connects that refusal to the skipped command. So
+//! the page leads with what to *do* — three numbered actions, including what
+//! PNM prints when it worked — and Enter means "I've run it".
 //!
 //! When step 2 fails and the cause is fixed in PNM, the wizard comes back here
 //! with [`VtaAclInstructions::retry_reason`] set and the page opens with a
@@ -1090,8 +1090,8 @@ mod tests {
         }
     }
 
-    /// #501: `[TAB]` cycles automatic → each advertised transport → automatic,
-    /// and Enter carries the pick to step 2.
+    /// `[TAB]` cycles automatic → each advertised transport → automatic, and
+    /// Enter carries the pick to step 2 (#501).
     #[test]
     fn tab_picks_an_advertised_transport_and_enter_carries_it() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1150,7 +1150,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
     /// Esc goes back a page, through the whole VTA leg, keeping what was
-    /// typed — it no longer clears the field (#588).
+    /// typed — it does not clear the field (#588).
     #[test]
     fn esc_walks_back_through_the_wizard_keeping_the_input() {
         use crate::ui::component::Component as _;

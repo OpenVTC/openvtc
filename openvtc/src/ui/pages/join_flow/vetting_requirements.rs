@@ -519,11 +519,11 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                 ));
             }
             lines.push(Line::default());
-            // Three keys: move, commit, leave. Every other way in used to have
-            // a key of its own down here as well as a row up there, so the foot
-            // of the page was a second, shorter, differently-worded menu of the
-            // same choices — and one of them (`n`) contradicted the row it
-            // duplicated. What a row does is the row's business now.
+            // Three keys: move, commit, leave. What a row does is the row's
+            // business: a key of its own down here as well as a row up there
+            // would make the foot of the page a second, shorter,
+            // differently-worded menu of the same choices, free to contradict
+            // the row it duplicates.
             lines.push(keys(&[
                 ("↑/↓", "choose"),
                 ("ENTER", "continue"),
@@ -833,7 +833,7 @@ mod tests {
     }
 
     /// Three keys: move, commit, leave. Everything else a row does is the
-    /// row's business — the foot of the page used to repeat the list in a
+    /// row's business — the foot of the page does not repeat the list in a
     /// second vocabulary.
     #[test]
     fn the_foot_of_the_page_offers_only_moving_committing_and_leaving() {
@@ -873,8 +873,8 @@ mod tests {
         assert!(shown.contains("as did:key:zA"), "{shown}");
     }
 
-    /// The application's next step names the row it is taken from. It used to
-    /// borrow the Vetting panel's "j — join now", and the join page has no `j`.
+    /// The application's next step names the row it is taken from, not the
+    /// Vetting panel's "j — join now": the join page has no `j`.
     #[test]
     fn the_next_step_names_the_row_rather_than_a_key_from_another_page() {
         let shown = text_of(&body_lines(&JoinState::default(), &view(known(Some(true)))));
