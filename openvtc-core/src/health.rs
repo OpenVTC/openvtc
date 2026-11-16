@@ -806,13 +806,12 @@ fn send_failure(url: &str, error: &reqwest::Error) -> Probe {
 /// turn one of these into `BlockedHost`, so probing and resolution agree on what
 /// counts as a refusal rather than each deciding for itself.
 ///
-/// This replaced a match on the sentence the refusal used to render,
-/// `"<host> resolves to non-routable <addr>"`. `affinidi-did-web` 0.1.5 moved
-/// the guard into `affinidi-net-guard`, which renders
-/// `"blocked address <addr> (<class>) for host <host>"` instead — and a string
-/// match is precisely how that move would otherwise have turned every refusal
-/// quietly back into `Probe::Unreachable`, which reads as "the host did not
-/// answer" when what happened is "we declined to ask".
+/// Not a match on the sentence the refusal renders: that text depends on
+/// which crate hosts the guard (`"<host> resolves to non-routable <addr>"` in
+/// `affinidi-did-web`, `"blocked address <addr> (<class>) for host <host>"` in
+/// `affinidi-net-guard`), and a string match would quietly turn every refusal
+/// back into `Probe::Unreachable` when it changes — which reads as "the host did
+/// not answer" when what happened is "we declined to ask".
 /// `probe_client_dns_guard_refuses_localhost_name` covers the recovery.
 fn dns_refusal_in_chain(error: &(dyn std::error::Error + 'static)) -> Option<String> {
     affinidi_net_guard::blocked_in_chain(error).map(ToString::to_string)

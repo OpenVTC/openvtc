@@ -202,10 +202,9 @@ fn no_secure_store_message(err: &keyring_core::Error) -> String {
 /// The default path delegates to [`vta_sdk::keyring_init::install_default_store`]
 /// — the same call `pnm-cli` makes — so `openvtc`, `pnm` and anything else on
 /// the SDK put secrets in the same store on the same OS: Apple Keychain,
-/// Windows Credential Manager, or DBus Secret Service. OpenVTC previously
-/// registered its own per-platform set and picked the Linux kernel keyring,
-/// which is RAM-only; that divergence is what made a reboot look like a
-/// corrupt install.
+/// Windows Credential Manager, or DBus Secret Service. A per-platform set of
+/// OpenVTC's own would diverge — the Linux kernel keyring, for one, is
+/// RAM-only, and makes a reboot look like a corrupt install.
 ///
 /// `profile` names the store entry in the diagnostics and locates the file
 /// store, so this runs *after* profile resolution.
@@ -338,9 +337,9 @@ fn rotated_debug_log_path(path: &std::path::Path) -> std::path::PathBuf {
 
 /// Open the `OPENVTC_DEBUG_LOG` file for appending, owner-only on unix.
 ///
-/// Append, never truncate. `File::create` truncated on every launch, so the
-/// evidence from a failed run was destroyed by the restart used to reproduce it
-/// — the exact workflow this variable exists to serve. Each run announces
+/// Append, never truncate. `File::create` truncates on every launch, so the
+/// evidence from a failed run would be destroyed by the restart that reproduces
+/// it — the exact workflow this variable exists to serve. Each run announces
 /// itself, so runs stay separable in one file.
 ///
 /// Two things beyond a plain append:
@@ -517,8 +516,8 @@ async fn main() -> Result<()> {
         theme::force_monochrome();
     }
     // Which configuration profile to use? Resolved before the theme so the theme
-    // choice can be scoped to it: the choice used to live in a single shared
-    // `tui.toml`, so a theme change under one profile repainted every other. Its
+    // choice can be scoped to it: in a single shared `tui.toml`, a theme change
+    // under one profile would repaint every other. Its
     // informational messages print with the default palette, since the theme is
     // not chosen yet — a rare, acceptable trade for per-profile isolation.
     let profile = resolve_profile(&matches)?;
@@ -1127,9 +1126,8 @@ fn load_fast(
     };
 
     // Only a Token-protected profile ever talks to a card, so only that one asks
-    // for a PIN. There used to be a literal placeholder PIN here for every other
-    // protection type; `None` says the same thing without compiling a PIN into
-    // the binary.
+    // for a PIN. Every other protection type gets `None` rather than a
+    // placeholder PIN, so no PIN is compiled into the binary.
     #[cfg(feature = "openpgp-card")]
     let user_pin = if matches!(&public_config.protection, ConfigProtectionType::Token(_)) {
         Some(

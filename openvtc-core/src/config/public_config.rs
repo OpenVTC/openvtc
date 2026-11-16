@@ -50,9 +50,9 @@ pub struct PublicConfig {
     /// Human friendly name to use when referring to ourself
     pub friendly_name: String,
 
-    /// The activity log as configs written before #568 stored it, in clear.
+    /// The activity log as older configs stored it, in clear (#568).
     ///
-    /// Read, never written: the log now lives in the encrypted
+    /// Read, never written: the log lives in the encrypted
     /// [`ProtectedConfig::logs`]. [`PublicConfig::migrate_logs_into`] moves
     /// what an older config carried there, and the next save leaves this key
     /// out of the file.
@@ -415,8 +415,8 @@ mod tests {
         unsafe { env::remove_var("OPENVTC_CONFIG_PATH") };
     }
 
-    /// #568: an older config's plaintext log is read, moved into the
-    /// protected tier, and never written back out in clear.
+    /// An older config's plaintext log is read, moved into the protected tier,
+    /// and never written back out in clear (#568).
     #[test]
     fn plaintext_logs_move_to_the_protected_tier() {
         let old = r#"{

@@ -164,9 +164,9 @@ impl MainPageState {
     /// Re-check where this profile's secret is actually stored, and warn if
     /// that place will not keep it.
     ///
-    /// The Linux kernel keyring is RAM-only by design, and OpenVTC used to keep
-    /// a profile's only copy of its seed there — so a reboot destroyed the
-    /// account and presented as a corrupt install. Where a durable store cannot
+    /// The Linux kernel keyring is RAM-only by design: a profile's only copy of
+    /// its seed kept there is destroyed by a reboot, which presents as a corrupt
+    /// install. Where a durable store cannot
     /// be used (no Secret Service, and no passphrase, so the encrypted-file
     /// store must refuse the blob), the user is at least told, and told the two
     /// things that fix it.
@@ -1282,7 +1282,7 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
             // Does it still acknowledge the grant we hold? The digest names one
             // grant; once the community re-issues, ours no longer matches and we
             // owe a fresh one. Saying "stale" here is the only place a member
-            // learns that — the community sees it, and until now we did not.
+            // learns that — the community sees it, and otherwise we would not.
             let stale = c
                 .credentials
                 .get(&openvtc_core::CredentialKind::Membership)
@@ -2372,9 +2372,8 @@ mod tests {
     }
 
     /// A verified agent name in the cache labels both the presented persona and
-    /// the community, in place of the truncated DID. This is the regression the
-    /// panel previously had: it never consulted the cache at all, so an enabled
-    /// name could not appear on the communities screen.
+    /// the community, in place of the truncated DID. A panel that does not
+    /// consult the cache cannot show an enabled name on the communities screen.
     #[test]
     fn community_row_prefers_a_verified_agent_name_over_a_truncated_did() {
         let persona_did = "did:webvh:QmScidPersonaAAAAAAAAAAAAAAAAAAA:example.com:persona";
@@ -2407,8 +2406,8 @@ mod tests {
     }
 
     /// The header's community slot names the community by its verified agent
-    /// name when it has no explicit display name — it used to fall straight to a
-    /// shortened DID, so a named community still announced itself as
+    /// name when it has no explicit display name, before falling back to a
+    /// shortened DID — a named community must not announce itself as
     /// `did:webvh:QmXi1…` in the top-left.
     #[test]
     fn header_community_falls_back_to_the_agent_name_before_the_did() {

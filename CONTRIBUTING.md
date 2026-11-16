@@ -65,6 +65,23 @@ cargo clippy --workspace --all-targets -- -D warnings
   are declared as a `keymap::Binding` list, never typed into a footer
   string (`openvtc/src/ui/pages/main/keymap.rs`).
 
+### Comments
+
+- **A comment states what the code does now and why** — the invariant, the
+  constraint, the failure it prevents. It does not narrate how the code came
+  to be ("used to", "no longer", "previously", "before this", "was changed
+  to"): that history belongs in the commit message and CHANGELOG, and it goes
+  stale silently in a comment.
+- **An issue or PR reference is a trailing `(#NNN)`** on a sentence that
+  stands without it, never the explanation itself. Keep it when the issue
+  holds context worth following.
+- **Requirement and decision ids** (`R-C-6`, `D9`, `R1.2`) are kept only
+  where they resolve to a document in this repository or the design docs it
+  links (`docs/design/multi-community-support.md`,
+  `../design-docs/vti-stack-development-guide.md`).
+- A `//!` module header opens with what the module owns; what it must not
+  do and where to start reading come next.
+
 ### Commit Messages
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/) style: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`

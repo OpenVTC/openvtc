@@ -321,7 +321,7 @@ async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>, only_stale: bool) {
             .filter(|s| s.live)
             .filter(|s| !only_stale || book.mode_refresh_due(&s.community, now))
             // Not again within seconds of the last ask or answer: `d` pressed three times, or a
-            // pass chained on an answer, used to fetch the same manifest each time (R1.4). Unless
+            // pass chained on an answer, would fetch the same manifest each time (R1.4). Unless
             // a draw was refused as over the community's rate since: that read is owed now, once.
             .filter(|s| {
                 !book.manifest_recently_asked(&s.community, now)

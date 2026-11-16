@@ -1,7 +1,7 @@
 //! Off-loop probe of the transports a VTA advertises.
 //!
-//! The VTA panel used to show a bare `VTA URL`, which says nothing about *how*
-//! the CLI is talking to the VTA — the URL stays populated on the DIDComm path
+//! A bare `VTA URL` on the VTA panel says nothing about *how* the CLI is
+//! talking to the VTA — the URL stays populated on the DIDComm path
 //! too, where it is only the REST fallback. What the operator needs is the pair
 //! "what does this VTA offer" / "which one are we on".
 //!
@@ -17,13 +17,13 @@
 //! setup flow calls the same function — so the panel and the bootstrap
 //! diagnostics can never disagree about what a VTA advertises.
 //!
-//! `#tsp` extraction arrived with vta-sdk 0.20 (upstream
-//! OpenVTC/verifiable-trust-infrastructure#765). Before it, `ResolvedVta`
-//! surfaced only DIDComm and REST, so a TSP-enabled VTA that advertised nothing
-//! else rendered as `DIDComm (in use) · only transport offered` — a claim the
-//! panel had no way to know was false. Taking it from the SDK rather than
-//! reaching into the DID document here is what keeps that from recurring in the
-//! other direction.
+//! `ResolvedVta` surfaces `#tsp` as well as DIDComm and REST (upstream
+//! OpenVTC/verifiable-trust-infrastructure#765). A resolver that surfaced only
+//! those two would render a TSP-enabled VTA that advertises nothing else as
+//! `DIDComm (in use) · only transport offered` — a claim the panel has no way
+//! to know is false. Taking the transports from the SDK rather than reaching
+//! into the DID document here keeps the panel and the SDK from disagreeing in
+//! either direction.
 
 use crate::state_handler::main_page::content::AdvertisedTransports;
 

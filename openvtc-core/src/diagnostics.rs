@@ -2,15 +2,15 @@
 //!
 //! # Why this module exists
 //!
-//! Every startup failure used to render the same line — *"Check your network
-//! and that your VTA/mediator are reachable, then restart OpenVTC"* — including
-//! failures with no network in them at all. A user whose OS keychain no longer
-//! held their profile was told to check their network, which is both useless
+//! One line for every startup failure — *"Check your network and that your
+//! VTA/mediator are reachable, then restart OpenVTC"* — would cover failures
+//! with no network in them at all. A user whose OS keychain no longer holds
+//! their profile would be told to check their network, which is both useless
 //! and misleading: it points away from the machine the problem is on.
 //!
 //! The stack development guide's **R6.4** says error text must let an operator
 //! tell network-unreachable from auth-rejected from contract-mismatch, and
-//! forbids exactly the one fixed hint for all failures that we had. This module
+//! forbids exactly that one fixed hint for all failures. This module
 //! is that rule applied to startup: [`diagnose`] maps a typed [`OpenVTCError`]
 //! to a [`Diagnosis`] carrying what failed, the state of the things it depends
 //! on, commands to confirm it, and remedies in the order they should be tried.

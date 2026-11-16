@@ -769,11 +769,10 @@ fn view_id(page: &MainPageState) -> String {
 /// The account's self-display name for the top-right header slot, or `None` when
 /// it would only repeat the community chip already shown top-left.
 ///
-/// A join used to copy the community's name into `public.friendly_name`, so this
-/// slot rendered the community a second time; accounts carrying that legacy
-/// value still would, and a user may also have typed the community's name in
-/// themselves. Either way the top bar should read "community · you", never
-/// "community · community · you".
+/// An account may carry the community's name in `public.friendly_name` — a
+/// legacy value older joins wrote there, or one the user typed in themselves —
+/// and this slot would render the community a second time. Either way the top
+/// bar should read "community · you", never "community · community · you".
 fn header_self_name<'a>(name: &'a str, community: &str) -> Option<&'a str> {
     let name = name.trim();
     (!name.is_empty() && name != community.trim()).then_some(name)
@@ -900,10 +899,10 @@ impl ComponentRender<()> for MainPage {
 
         // Top-right: who *we* are. The account's self-display name goes above the
         // active persona's identity — but only when it says something the chrome
-        // isn't already saying. A join used to copy the community's name into
-        // `friendly_name`, so this line rendered the community a second time,
-        // right of the community chip top-left; an account carrying that legacy
-        // value still would. Suppressing the duplicate leaves the top bar reading
+        // isn't already saying. An account whose `friendly_name` holds the
+        // community's name (a legacy value older joins wrote) would render the
+        // community a second time, right of the community chip top-left.
+        // Suppressing the duplicate leaves the top bar reading
         // "community · you" instead of "community · community · you".
         let mut top_right = Vec::new();
         if let Some(self_name) = header_self_name(
@@ -2046,9 +2045,8 @@ mod key_handler_tests {
     }
 
     /// The profile and the vetter credential belong to the desk, not to one of
-    /// its views: `p` and `g` work from all three. They used to exist only on
-    /// Tickets, which is how the profile came to be hidden under a list it has
-    /// nothing to do with.
+    /// its views: `p` and `g` work from all three, not only from Tickets — a
+    /// list the profile has nothing to do with.
     #[test]
     fn vetting_desk_opens_the_profile_and_resend_from_every_view() {
         use crate::state_handler::actions::VettingAction as V;
@@ -3823,9 +3821,8 @@ mod key_handler_tests {
 
     /// The menu's identity entry opens a panel like every other one.
     ///
-    /// It used to be "Create Persona DID" — a menu item that fired an action
-    /// instead of switching panels, because minting was the only persona verb
-    /// the TUI had. Everything it stood for is now a key inside the pane.
+    /// Minting a persona is a key inside the pane, not a menu item that fires
+    /// an action instead of switching panels.
     #[test]
     fn menu_enter_on_identity_switches_to_the_panel() {
         let (mut page, mut rx) = page_for(MainMenu::Identity, |s| {
@@ -3939,10 +3936,8 @@ mod key_handler_tests {
 
     /// Tab asks for the invitation-credential listing.
     ///
-    /// It used to *also* move focus, because the panel held two lists and the
-    /// load rode along with the focus change. With the persona list moved to
-    /// the identity pane there is one list left, and asking for it is the whole
-    /// of what the key does.
+    /// The panel holds one list (the persona list is on the identity pane), so
+    /// asking for it is the whole of what the key does — it does not move focus.
     #[test]
     fn vta_r_asks_for_the_vic_listing() {
         let (mut page, mut rx) = page_for(MainMenu::Vta, |_| {});
@@ -4095,8 +4090,8 @@ mod key_handler_tests {
 
     #[test]
     fn inbox_d_and_c_arm_confirmation() {
-        // `d` on a selected task arms a dismiss confirmation (R25) — it no longer
-        // dismisses instantly.
+        // `d` on a selected task arms a dismiss confirmation (R25) — it does not
+        // dismiss instantly.
         let (mut page, mut rx) = page_for(MainMenu::Inbox, |s| {
             s.main_page.content_panel.inbox.tasks = Arc::from(vec![task_summary("t1")]);
         });

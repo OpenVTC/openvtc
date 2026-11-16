@@ -4,32 +4,29 @@
 //! something: a verdict, a credential, a problem-report. If any of those is lost
 //! — a socket that was down at the wrong moment, a mediator that dropped it, a
 //! decision a human took days later and the push went nowhere — the record sits
-//! `Pending` and nothing here ever asks. `join-requests/status/0.1` is the
-//! protocol's answer to that, and OpenVTC has until now implemented only the
-//! receiving half (`messaging::handle_join_status_response`).
+//! `Pending` and nothing else ever asks. `join-requests/status/0.1` is the
+//! protocol's answer to that; this module is the asking half, and
+//! `messaging::handle_join_status_response` the receiving half.
 //!
 //! ## What can be polled
 //!
 //! Every `Pending` join, including one that never got *any* reply.
 //!
-//! That used to be untrue, and the exception swallowed the rule. The VTC mints
-//! its own request id and tells us in the first correlated reply; until one
-//! arrives we hold the id of the document we sent, which the VTC has never heard
-//! of and answers `not found` for. So the only joins this module could ask about
-//! were the ones that had already been answered once — and a join that never got
-//! a reply, the case it exists for, could not be polled at all.
+//! The VTC mints its own request id and tells us in the first correlated reply;
+//! until one arrives we hold the id of the document we sent, which the VTC has
+//! never heard of and answers `not found` for. Quoting that id would let this
+//! module ask only about joins already answered once — never about a join that
+//! got no reply, the case it exists for. Collecting the stored mail the reply
+//! sits in is no recovery either: it is empty whenever the mail was acked and
+//! deleted before anything consumed it. With both blind, the record sits
+//! `Pending` for good, and the only way out is editing the id into the config by
+//! hand (#221).
 //!
-//! The fallback named here was collecting the stored mail the reply is sitting
-//! in. That is empty whenever the mail was acked and deleted before anything
-//! consumed it, which is the same failure. Both recoveries had one blind spot and
-//! shared it (#221): the record sat `Pending` for good, and the only way out was
-//! editing the id into the config by hand.
-//!
-//! A poll now omits the id when we do not hold the community's, which asks
+//! So a poll omits the id when we do not hold the community's, which asks
 //! "what is my open request?" — resolved from the authenticated applicant, and
-//! answered with the id. So the record repairs itself on the first reply and
+//! answered with the id. The record repairs itself on the first reply and
 //! quotes the real id from then on. [`CommunityRecord::request_id_confirmed`]
-//! still decides *what we send*; it no longer decides whether we may ask.
+//! decides *what we send*, not whether we may ask.
 //!
 //! ## Pacing
 //!

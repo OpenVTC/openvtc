@@ -368,9 +368,9 @@ pub async fn local_face_put(
             // construction and saying so would be this client asserting what
             // nobody checked.
             //
-            // It used to send one, through the SDK's own type, and every write
-            // was refused (VTI #1676): `LocalInlineValue` is that type without
-            // the member, so this no longer compiles the wrong way round.
+            // The SDK's own type carries the member, and the VTA refuses every
+            // write that sends it (VTI #1676): `LocalInlineValue` is that type
+            // without the member, so this cannot compile the wrong way round.
             inline: LocalInlineValue {
                 claim_type: v.claim_type,
                 value: Value::String(v.value),

@@ -295,7 +295,7 @@ pub(crate) mod fixtures {
     /// refused; nothing outside a test may emit or accept it.
     pub(crate) const RETIRED_CONTEXT: &str = "https://firstperson.network/credentials/dtg/v1";
 
-    /// A pre-v1 role credential exactly as a VTC used to deliver it: the
+    /// A pre-v1 role credential exactly as a pre-v1 VTC delivers it: the
     /// retired context and type, no `issuerScope`. Only ever used to prove it is
     /// refused or set aside.
     pub(crate) fn retired_role_endorsement(community: &str, member: &str) -> Value {

@@ -584,9 +584,9 @@ async fn a_failed_send_undoes_a_minted_persona_and_its_listener() {
     assert!(h.config.account.memberships().next().is_none());
 }
 
-/// The one deliberate change (#529): a failed send as a *reused* persona used
-/// to delete that persona from the account. The saga never records a reused
-/// persona as minted, so only the listener this launch opened is undone.
+/// A failed send as a *reused* persona must not delete that persona from the
+/// account (#529). The saga never records a reused persona as minted, so only
+/// the listener this launch opened is undone.
 #[tokio::test]
 async fn a_failed_send_never_removes_a_reused_persona() {
     let mut h = Harness::new(Fail::SubmitSend).await;

@@ -2156,11 +2156,11 @@ impl VettingBook {
     /// application shows them before its own manifest request is answered.
     ///
     /// The path is decided here exactly as a manifest just read decides it
-    /// ([`Application::adopt_criterion`]): this route used to copy the
-    /// requirements and leave the hidden-vetting parameters behind, so an
-    /// application started from the join page stayed on named vetting under a
-    /// criterion that hides its vetters, and its requests carried no
-    /// identifier a vetter could attest to.
+    /// ([`Application::adopt_criterion`]). Copying only the requirements would
+    /// leave the hidden-vetting parameters behind, so an application started
+    /// from the join page would stay on named vetting under a criterion that
+    /// hides its vetters, and its requests would carry no identifier a vetter
+    /// could attest to.
     ///
     /// Returns whether anything changed; `Ok(false)` when nothing is known
     /// yet.

@@ -384,8 +384,7 @@ pub async fn create_did_via_server(
             // transport match can actually resolve to TSP for this persona.
             // Without it the document carries one `DIDCommMessaging` entry and
             // the intersection is DIDComm however much TSP the rest of the
-            // stack speaks — which is what #211 diagnosed and could only work
-            // around by degrading.
+            // stack speaks (#211).
             //
             // Safe to assert unconditionally from here, from both sides:
             // ours, because a persona's inbound TSP arrives on the mediator

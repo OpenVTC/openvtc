@@ -25,8 +25,7 @@ pub mod config;
 // logic. Both module docs state the split. Deliberately a `//` comment, not a
 // `///` doc: an outer doc on a `pub mod` merges with that module's own `//!`
 // docs and is resolved in *this* file's scope, so every intra-doc link the
-// module writes about its own items breaks — which is what failed CI on #192
-// and again here.
+// module writes about its own items breaks, and CI fails on the broken links.
 pub mod context_probe;
 pub mod credential_sync;
 pub mod devices;

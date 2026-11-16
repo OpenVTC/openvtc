@@ -253,9 +253,9 @@ struct UnlockCache {
 
 /// An unlock code the user typed, to be tried against a stored profile.
 ///
-/// Holds the code itself rather than a key: since #566 each profile seals its
-/// secured config under its own random salt, stored beside the ciphertext, so
-/// the key can only be derived once the stored blob has been read.
+/// Holds the code itself rather than a key: each profile seals its secured
+/// config under its own random salt, stored beside the ciphertext, so the key
+/// can only be derived once the stored blob has been read (#566).
 /// [`secured_config::SecuredConfig::check_unlock_code`] and
 /// [`secured_config::SecuredConfig::load`] do that, and the keys they derive
 /// are kept here, so the unlock prompt's check and the load after it run
@@ -485,8 +485,8 @@ pub struct Config {
     ///
     /// The persisted source of truth for the account's personas and community
     /// memberships (stored encrypted in [`ProtectedConfig`]). The persona DID
-    /// and mediator DID that used to live as `public.*` singletons are now read
-    /// from here via [`Config::persona_did`] and [`Config::mediator_did`].
+    /// and mediator DID are read from here via [`Config::persona_did`] and
+    /// [`Config::mediator_did`].
     pub account: account::Account,
 
     /// Random key that encrypts [`ProtectedConfig`], carried from
@@ -637,12 +637,11 @@ const PROFILE_LABEL_DID_WIDTH: usize = 32;
 /// makes that structural instead of a comment asking the next editor to
 /// remember.
 ///
-/// The middle arm used to be `context_path::render_for_display(&c.vtc_did)`.
+/// The middle arm is not `context_path::render_for_display(&c.vtc_did)`.
 /// That is a **sub-context** helper: it splits on the last `/` and returns the
 /// tail, which is right for `openvtc-glenn/qmxi1pzd4nev` and a no-op on a DID,
-/// since a DID contains no `/`. So the "slug" fallback was the whole
-/// `did:webvh:Qm…` string. A verified agent name is the readable label that arm
-/// was reaching for.
+/// since a DID contains no `/`, so its "slug" would be the whole
+/// `did:webvh:Qm…` string. A verified agent name is the readable label.
 ///
 /// `agent_name` must yield **only verified** names. [`Config::agent_name_for`]
 /// and [`ProtectedConfig::cached_agent_name`] both read the cache of completed
@@ -774,8 +773,8 @@ impl Config {
 
     /// The active persona's `did:webvh` as an owned `Arc<String>`.
     ///
-    /// For the call sites that previously cloned the `Arc<String>` singleton
-    /// (e.g. to stash the DID on a message or relationship). The returned `Arc`
+    /// For call sites that need an owned `Arc<String>` (e.g. to stash the DID
+    /// on a message or relationship). The returned `Arc`
     /// is freshly allocated; equality is by value, so sharing is not required.
     pub fn persona_did_arc(&self) -> std::sync::Arc<String> {
         std::sync::Arc::new(self.persona_did().to_string())
@@ -1090,7 +1089,7 @@ async fn connect_runtime_vta_client(
 ) -> Result<vta_sdk::client::VtaClient, OpenVTCError> {
     // The transport choice (DIDComm vs REST), the `rest_fallback` derivation,
     // and the empty-URL rule are SDK-level knowledge — `connect_auto`
-    // encapsulates them so this no longer hand-rolls the branch (R22). The
+    // encapsulates them so this does not hand-roll the branch (R22). The
     // issued REST token is dropped: runtime clients re-auth per process and
     // never cached it here.
     let mut client = vta_sdk::client::VtaClient::connect_auto(vta_sdk::client::AutoConnect {
@@ -1495,8 +1494,7 @@ pub(crate) enum TspDiscovery {
 ///
 /// Split from applying the result purely so it is testable. `resolve_vta` builds
 /// its resolver from the environment, so a test could not point discovery at a
-/// fixture — which is why #196 shipped with this path verified by construction
-/// rather than execution. vta-sdk 0.20.3 added the seam upstream (VTI #813); this
+/// fixture without a seam. vta-sdk 0.20.3 added the seam upstream (VTI #813); this
 /// is that seam one layer down, so a test can seed a `#tsp`-advertising document
 /// and assert what OpenVTC makes of it.
 ///
@@ -1707,10 +1705,9 @@ impl std::fmt::Debug for KeyInfo {
 
 /// TSP discovery against a **seeded** resolver.
 ///
-/// These are the assertions #196 could not make. Its enablement path was verified
-/// by construction, because `resolve_vta` built its resolver from the environment
-/// and no fixture could reach it. vta-sdk 0.20.3 (VTI #813) added the seam; this
-/// exercises it, in-process with no network and no live VTA.
+/// `resolve_vta` builds its resolver from the environment, so no fixture can reach
+/// the TSP enablement path (#196) except through the seam vta-sdk 0.20.3 added
+/// (VTI #813). These tests exercise it, in-process with no network and no live VTA.
 #[cfg(test)]
 mod tsp_discovery_tests {
     use super::{TspDiscovery, discover_tsp_mediator};
@@ -1736,7 +1733,7 @@ mod tsp_discovery_tests {
     }
 
     /// The reference deployment's shape: `#tsp` and `#vta-didcomm` at the **same**
-    /// mediator. This is the case #196 wires up and could not previously assert.
+    /// mediator. This is the case TSP enablement wires up (#196).
     #[tokio::test]
     async fn a_tsp_advertising_vta_yields_its_mediator() {
         let resolver = resolver_serving(json!([
@@ -1769,8 +1766,8 @@ mod tsp_discovery_tests {
 
     /// A DID that resolves to nothing **and** yields no URL is `Unavailable`,
     /// not `NotAdvertised`. Conflating them would report "this VTA offers no TSP"
-    /// about one we simply failed to ask — the false-certainty #187 fixed in the
-    /// panel.
+    /// about one we simply failed to ask — the false certainty the panel also
+    /// avoids (#187).
     #[tokio::test]
     async fn an_unresolvable_vta_is_unavailable_not_unadvertised() {
         let resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
@@ -1783,12 +1780,10 @@ mod tsp_discovery_tests {
         ));
     }
 
-    /// **An unresolvable `did:web` reports `Unavailable`.** Until `vta-sdk` 0.73,
-    /// `resolve_vta_endpoint` synthesized `https://<domain>` from the DID when
-    /// resolution failed and returned that as a REST endpoint, so discovery
-    /// "succeeded" with no `#tsp` and this reported `NotAdvertised`. 0.73
-    /// resolves with `OnUnresolved::Refuse`: a DID that does not resolve is an
-    /// error, and the failure is no longer hidden. Both outcomes degrade to
+    /// **An unresolvable `did:web` reports `Unavailable`.** `vta-sdk` resolves
+    /// with `OnUnresolved::Refuse`: a DID that does not resolve is an error,
+    /// not a synthesized `https://<domain>` REST endpoint on which discovery
+    /// would "succeed" with no `#tsp` and report `NotAdvertised`. Both outcomes degrade to
     /// DIDComm, so the connect behaves the same; this pins which one we get.
     ///
     /// The address is loopback with a closed port, so no DNS lookup is made and
@@ -1960,9 +1955,9 @@ mod membership_profile_label_tests {
         assert_eq!(label, format!("Acme Corp ({PERSONA_SHORT})"));
     }
 
-    /// The arm this change fixes. It used to run the DID through
-    /// `context_path::render_for_display` — a no-op on a DID — so the label was
-    /// the whole `did:webvh:…` string.
+    /// The middle arm uses the verified name, not the DID run through
+    /// `context_path::render_for_display` — a no-op on a DID, which would leave
+    /// the whole `did:webvh:…` string as the label.
     #[test]
     fn a_verified_agent_name_is_used_when_there_is_no_display_name() {
         let c = membership(None);
@@ -1986,8 +1981,8 @@ mod membership_profile_label_tests {
     }
 
     /// A persona with no community yet (State A) is named by its DID rather
-    /// than the bare word "Persona" — which is what several State-A listeners
-    /// used to share, in the logs and in the mediator's view alike.
+    /// than the bare word "Persona", which several State-A listeners would
+    /// otherwise share, in the logs and in the mediator's view alike.
     #[test]
     fn no_membership_is_still_identified_by_its_did() {
         assert_eq!(
@@ -2077,8 +2072,8 @@ mod tests {
         assert_ne!(*uc1.legacy_key().unwrap(), *uc2.legacy_key().unwrap());
     }
 
-    /// #566: a key being set is salted at random, so the same code set twice
-    /// (two profiles, two users) yields unrelated keys.
+    /// A key being set is salted at random, so the same code set twice
+    /// (two profiles, two users) yields unrelated keys (#566).
     #[test]
     fn a_set_unlock_key_is_salted_per_derivation() {
         let a = UnlockKey::derive(b"same unlock code").unwrap();
@@ -2346,10 +2341,9 @@ mod tests {
         assert_eq!(config.mediator_did(), "");
     }
 
-    /// The *write* side of the State-A case. Reading back `""` was already
-    /// pinned above; what was not was that the write reports having done
-    /// nothing. It used to return `()`, so the settings panel said "Setting
-    /// saved" over a value that had gone nowhere.
+    /// The *write* side of the State-A case (reading back `""` is pinned
+    /// above): the write reports having done nothing, so the settings panel
+    /// cannot say "Setting saved" over a value that has gone nowhere.
     #[test]
     fn setting_mediator_did_without_a_persona_reports_that_it_did_not_apply() {
         let mut config = test_config(BTreeMap::new());

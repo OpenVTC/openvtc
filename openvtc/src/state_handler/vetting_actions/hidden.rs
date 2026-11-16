@@ -31,7 +31,7 @@ use openvtc_core::vetting::book::PcsInbound;
 /// tokens left has not failed, it is at capacity until the next drip.
 /// Ask the community for the challenge this submission must bind.
 ///
-/// Called when an applicant refreshes a hidden-vetting application. The join no longer depends
+/// Called when an applicant refreshes a hidden-vetting application. The join does not depend
 /// on it: a launch asks for a fresh challenge of its own and waits for it
 /// (`join_flow::challenge_step`). The community issues one per applicant and spends it when the
 /// proof is read, so asking twice replaces rather than accumulates — which is why this is safe
@@ -182,8 +182,8 @@ pub(crate) fn hidden_vetting_tick(
         return;
     };
     // Never a second enrolment while one is unanswered: the community answers the first and
-    // refuses the second (`alreadyEnrolled`), and that refusal is what used to read as a lost
-    // answer. The first's answer is taken whenever it lands — the VTA holds its blinding.
+    // refuses the second (`alreadyEnrolled`), and that refusal would read as a lost answer.
+    // The first's answer is taken whenever it lands — the VTA holds its blinding.
     let enrolling = |owed: &openvtc_core::vetting::hidden::Due| match owed {
         openvtc_core::vetting::hidden::Due::Enrol { period } => {
             ctx.config

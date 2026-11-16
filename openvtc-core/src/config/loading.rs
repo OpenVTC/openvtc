@@ -265,10 +265,9 @@ async fn hydrate_persona(
     ctx.progress("Identity", "Fetching persona keys");
     // THE isolation point. A persona recorded in the account with no
     // `key_info` — the signature of a save that wrote the config file
-    // and then died before the credential store — used to return here
-    // and fail the ENTIRE profile: every other persona, every
-    // community, every relationship. Now it costs exactly the persona
-    // that has the fault.
+    // and then died before the credential store — costs exactly the
+    // persona that has the fault, never the ENTIRE profile: every
+    // other persona, every community, every relationship.
     if let Err(reason) =
         Config::regenerate_persona_keys(tdk, ctx.sc, ctx.key_backend, &document, ctx.vta_client)
             .await
@@ -542,7 +541,7 @@ impl Config {
             stored_key
         };
 
-        // #568: the activity log moved from the plaintext tier into this one.
+        // The activity log lives in this tier, not the plaintext one (#568).
         // An older config's entries are carried across here; the next save
         // writes them encrypted and drops them from the plaintext part of the
         // file, in the one atomic write.
@@ -722,8 +721,8 @@ impl Config {
                 // Name the persona's messaging profile after its community
                 // AND its own DID, so two personas in one community are still
                 // distinguishable. Shares one helper with the runtime label
-                // (`Config::persona_profile_label`) — this used to be a second
-                // copy of the expression, which is how the two could drift.
+                // (`Config::persona_profile_label`) rather than a second copy
+                // of the expression, so the two cannot drift.
                 //
                 // No `Config` exists yet here, so the verified-name lookup
                 // goes through `private_cfg` directly.
@@ -753,7 +752,7 @@ impl Config {
             // works; take it from one that actually loaded, since a degraded
             // persona's mediator may be exactly what was wrong with it.
             // Registers each profile with the ATM service as a side-effect; the
-            // returned map is no longer stored on `Config`.
+            // returned map is not stored on `Config`.
             let relationship_mediator = identities
                 .values()
                 .find_map(|i| i.mediator_did.clone())
@@ -1033,8 +1032,8 @@ mod protected_key_fallback_tests {
         assert!(err.is_err(), "must not fabricate an empty account");
     }
 
-    /// #569: a blob written for another profile does not open under any key,
-    /// even the right one — it is not this profile's data.
+    /// A blob written for another profile does not open under any key, even
+    /// the right one — it is not this profile's data (#569).
     #[test]
     fn a_blob_bound_to_another_profile_is_refused() {
         let stored = seed(1);

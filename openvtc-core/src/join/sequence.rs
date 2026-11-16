@@ -3,8 +3,7 @@
 //!
 //! Each step here touches only [`Config`] and the network; what the person is
 //! shown about it (the TUI's join page, the headless command's progress lines)
-//! stays with the caller, which applies the step's result. Moved from the CLI
-//! (issue #530).
+//! stays with the caller, which applies the step's result.
 //!
 //! Each network step comes in two halves where the TUI needs them apart
 //! (#529): an owned I/O half that runs off the runtime loop

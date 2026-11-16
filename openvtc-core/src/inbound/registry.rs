@@ -1,14 +1,12 @@
 //! The one list of inbound message types this client handles.
 //!
-//! Two decisions used to describe the same fact separately: the transport's
-//! accept gate (a hand-written regex in `didcomm.rs`) and the dispatcher's
-//! chain of `if message.typ == …` branches. A branch added without a matching
-//! gate prefix was a verb that failed totally and silently — the message was
-//! dropped at `debug!` before the dispatcher saw it, and the sender waited out
-//! its timeout. It happened (capability replies, `git-ns` answers over TSP), and
-//! a hand-maintained census test was the only thing reconciling the two.
+//! The transport's accept gate and the dispatcher describe the same fact, so
+//! both are derived from one table rather than kept in step by hand. Were they
+//! separate, a dispatcher branch added without a matching gate prefix would be
+//! a verb that fails totally and silently — the message dropped at `debug!`
+//! before the dispatcher sees it, and the sender waiting out its timeout.
 //!
-//! Now both are derived from [`ROUTES`]:
+//! Both are derived from [`ROUTES`]:
 //!
 //! - the gate ([`crate::didcomm::routes_inbound_type`]) admits a type exactly
 //!   when [`classify`] gives it a [`Family`];

@@ -311,10 +311,10 @@ impl VRCRequestReject {
 /// credentials by `id` cannot make a re-issue idempotent, tell a renewal from a
 /// duplicate, or reference this VRC from a `witnessed/1` statement (`object.digestMultibase`).
 ///
-/// Nothing rejects a VRC for a missing `id` *today*. That is exactly what the
-/// reciprocal membership credential looked like, right up until a community
-/// started keying on it and every delivery began failing silently — so this is
-/// a gap being closed before it bites rather than after.
+/// Nothing rejects a VRC for a missing `id` *today*, but a peer that starts
+/// keying on it would make every id-less delivery fail silently, as the
+/// reciprocal membership credential's did once a community keyed on it — so the
+/// gap is closed before it bites rather than after.
 ///
 /// The id is set here, before signing, because it has to be: a Data Integrity
 /// proof covers every member but `proof`, so one spliced in afterwards leaves a

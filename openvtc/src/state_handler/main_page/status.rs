@@ -3,8 +3,8 @@
 //! Every main-page panel shows at most one status line. Its colour comes from
 //! the [`Severity`] the producer set — the code that knows whether the thing it
 //! is reporting worked — never from the wording of the text. Deciding colour
-//! from wording drew failures phrased without "Error" ("Couldn't archive: …",
-//! "Messaging unavailable — …") as successes (#577).
+//! from wording would draw failures phrased without "Error" ("Couldn't
+//! archive: …", "Messaging unavailable — …") as successes (#577).
 
 /// How a status line reads: its colour comes from this, never from its text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

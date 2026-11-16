@@ -174,14 +174,11 @@ impl ResolvedClaim {
     /// The same line with the mask lifted, for a holder who asked for this one
     /// claim.
     ///
-    /// This used to be deliberately absent, on the argument that a resolved
-    /// claim has no identity of its own to reveal *one* of — a face was read as
-    /// a whole, so the only reveal the type could offer was the blanket one the
-    /// mask exists to avoid. That argument was about the **pane**, not the
-    /// type: it held only for as long as the face view had no cursor over its
-    /// claims. It has one now, so "the selected claim" is a thing a holder can
-    /// name, and the one-at-a-time reveal that the attributes tab has always
-    /// offered works here on the same terms.
+    /// A resolved claim has no identity of its own to reveal *one* of, but the
+    /// face view has a cursor over its claims, so "the selected claim" is a
+    /// thing a holder can name, and the one-at-a-time reveal that the
+    /// attributes tab offers works here on the same terms — rather than the
+    /// blanket reveal the mask exists to avoid.
     ///
     /// Still a separate method rather than a `reveal: bool` on
     /// [`display_value`](Self::display_value), for the reason

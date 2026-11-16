@@ -65,8 +65,7 @@ pub trait ConfigExtension {
     ///
     /// An **empty** `username` mints the persona unlabelled and leaves
     /// `public.friendly_name` alone: the join flow has no operator-chosen name
-    /// to offer, and the community name it used to pass here is not a name for
-    /// the persona.
+    /// to offer, and the community's name is not a name for the persona.
     async fn mint_persona_into(
         config: &mut Config,
         state: &SetupState,
@@ -89,12 +88,11 @@ pub trait ConfigExtension {
 /// isn't one.
 ///
 /// Gates both the persona's `label` and the account's `public.friendly_name`.
-/// The join flow used to pass the *community's* name here (falling back to a
-/// rendering of the community's VTC DID when it had no verified name), which
-/// labelled the persona with a community identifier and made the account's
-/// self-display name the community it had just joined — the top bar then named
-/// that community twice. A join now passes nothing and both fields are left
-/// alone; only a name the operator actually typed sets them.
+/// A join passes nothing, and both fields are left alone; only a name the
+/// operator actually typed sets them. Passing the *community's* name here (or a
+/// rendering of its VTC DID) would label the persona with a community
+/// identifier and make the account's self-display name the community it had
+/// just joined — the top bar would then name that community twice.
 fn operator_chosen_name(username: &str) -> Option<&str> {
     let name = username.trim();
     (!name.is_empty()).then_some(name)
@@ -105,15 +103,16 @@ fn operator_chosen_name(username: &str) -> Option<&str> {
 ///
 /// A persona's mediator is published in its DID document — it is where everyone
 /// else delivers to it — so it has to be one the operator's own infrastructure
-/// stands behind. There used to be a fallback here: a built-in "public"
-/// mediator that was really one operator's own deployment, quietly written into
-/// every persona minted against a VTA that advertised none. There is no
-/// fallback now, and the message says what is actually missing (R6.4) instead
-/// of minting a persona whose inbound mail goes somewhere nobody chose.
+/// stands behind. There is deliberately no fallback: a built-in "public"
+/// mediator would be some operator's own deployment, quietly written into
+/// every persona minted against a VTA that advertised none. The message says
+/// what is actually missing (R6.4) instead of minting a persona whose inbound
+/// mail goes somewhere nobody chose.
 ///
-/// It names both ways an account ends up here. Before #501 a setup that
-/// connected over REST saved no mediator even when the VTA advertised one, so
-/// "your VTA did not advertise one" alone would blame a VTA that is fine.
+/// It names both ways an account ends up here. A setup that connected over
+/// REST with an earlier OpenVTC saved no mediator even when the VTA advertised
+/// one (#501), so "your VTA did not advertise one" alone would blame a VTA that
+/// is fine.
 pub(crate) const NO_VTA_MEDIATOR: &str = "This account has no DIDComm mediator recorded for its \
      VTA, so a new persona cannot be given one — a persona's DID document publishes the \
      mediator others reach it through, and OpenVTC has no built-in one to fall back on. \
@@ -440,8 +439,8 @@ impl ConfigExtension for Config {
         );
         config.key_info.extend(key_info);
         // Only an operator-chosen name may become the account's self-display
-        // name. The join flow passes nothing, so a join no longer overwrites
-        // `friendly_name` with the community it was joining.
+        // name. The join flow passes nothing, so a join does not overwrite
+        // `friendly_name` with the community it is joining.
         if let Some(name) = operator_chosen_name(&state.username) {
             config.public.friendly_name = name.to_string();
         }

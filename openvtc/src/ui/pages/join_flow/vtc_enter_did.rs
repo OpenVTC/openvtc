@@ -44,8 +44,8 @@ impl VtcEnterDid {
             KeyCode::Enter => {
                 // Submit unconditionally, empty input included: the handler
                 // answers an empty field with an on-screen reason. Swallowing
-                // the keypress here made Enter look broken after a VIC paste,
-                // which populates the invitation but not this input (issue #29).
+                // the keypress here would make Enter look broken after a VIC
+                // paste, which populates the invitation but not this input.
                 let did = state.vtc_did.value().trim().to_string();
                 let _ = state.action_tx.send(Action::JoinSubmitVtc(did));
             }
@@ -102,13 +102,10 @@ impl VtcEnterDid {
         // invitation sits under that prompt, close enough to be seen while
         // still being the secondary answer.
         //
-        // It led the page for a while (issue #29), when this was the only
-        // screen that mentioned invitations at all and one pasted here was
-        // easy to miss. That stopped being true once the join learned to list
-        // the ways in: an invitation is now offered again — counted, matched
-        // against the community, with a paste row of its own — on the step
-        // after this one. What it does *here* is fill in a DID you may not
-        // have, which is a shortcut, not the main road.
+        // An invitation is also offered on the step after this one —
+        // counted, matched against the community, with a paste row of its
+        // own. What it does *here* is fill in a DID you may not have, which
+        // is a shortcut, not the main road.
         let width = inner.width as usize;
         let mut header = wrapped(
             "Enter the Verifiable Trust Community (VTC) DID you want to join. OpenVTC \
@@ -290,11 +287,10 @@ fn invitation_lines(state: &JoinState, width: usize) -> Vec<Line<'static>> {
 
 /// The explicit "paste an invitation" row.
 ///
-/// The reason issue #29 was filed at all: bracketed paste worked the whole
-/// time, but nothing on screen said so, and an affordance nobody can see is not
-/// an affordance. A named key is discoverable in the way "just paste" is not —
-/// and it still degrades to bracketed paste over SSH, where reading the OS
-/// clipboard cannot work.
+/// Bracketed paste works without it, but nothing on screen would say so, and
+/// an affordance nobody can see is not an affordance. A named key is
+/// discoverable in the way "just paste" is not — and it still degrades to
+/// bracketed paste over SSH, where reading the OS clipboard cannot work (#29).
 fn paste_row(width: usize) -> Line<'static> {
     key_row(
         "[Ctrl+V]",
@@ -451,13 +447,13 @@ mod tests {
         );
     }
 
-    /// The thing that was broken: a pasted DID is a DID.
+    /// A pasted DID is a DID.
     ///
-    /// `[Ctrl+V]` used to hand its text to the invitation loader whatever it
-    /// was, so pasting the community's DID — the commonest thing anyone pastes
-    /// on this page — came back "Pasted text is not valid JSON", while the
-    /// identical text bracketed-pasted worked. Both routes now come through
-    /// `apply_entry_paste`, so they cannot disagree again.
+    /// Were `[Ctrl+V]` to hand its text to the invitation loader whatever it
+    /// is, pasting the community's DID — the commonest thing anyone pastes on
+    /// this page — would come back "Pasted text is not valid JSON", while the
+    /// identical text bracketed-pasted works. Both routes come through
+    /// `apply_entry_paste`, so they cannot disagree.
     #[test]
     fn a_pasted_did_goes_in_the_field_and_an_invitation_is_loaded() {
         use crate::ui::component::Component;
@@ -512,13 +508,10 @@ mod tests {
     /// The community is what this page asks for, so its prompt comes first and
     /// the invitation follows the input — but still ahead of the examples.
     ///
-    /// The invitation led the page for a while (issue #29), when this was the
-    /// only screen that mentioned one and a VIC pasted here was easy to miss.
-    /// What #29 actually caught was an affordance that was dim, unnamed and
-    /// last; the fix that stuck is the named `[Ctrl+V]` row, which this keeps.
-    /// The join now offers invitations again on the step after this one —
-    /// counted and matched against the community — so leading with them here
-    /// buys nothing and pushes the DID prompt down the page.
+    /// The join offers invitations on the step after this one — counted and
+    /// matched against the community — so leading with them here buys nothing
+    /// and pushes the DID prompt down the page. The named `[Ctrl+V]` row keeps
+    /// the invitation from being dim, unnamed and last (`paste_row`).
     #[test]
     fn the_did_prompt_leads_and_the_invitation_follows_the_input() {
         let drawn = rows(&JoinState::default(), "", 100);
@@ -527,7 +520,7 @@ mod tests {
             "the input prompt should precede the invitation:\n{}",
             drawn.join("\n")
         );
-        // Still ahead of the examples, so it is not the dim last thing again.
+        // Still ahead of the examples, so it is not the dim last thing.
         assert!(
             row_of(&drawn, "Don't have the DID?") < row_of(&drawn, "Examples:"),
             "the invitation should precede the examples:\n{}",

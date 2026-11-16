@@ -1,10 +1,9 @@
 //! A harness for the runtime loop (#528, #537).
 //!
-//! The loop used to be one function nothing could call. Every piece of the
-//! world it needs builds offline — `TDK` without an environment file,
-//! `Messaging` with no listeners, an admin session that is simply absent — so
-//! the harness assembles a real [`Runtime`] and drives one arm at a time, or
-//! the whole loop until it is told to stop.
+//! Every piece of the world the loop needs builds offline — `TDK` without an
+//! environment file, `Messaging` with no listeners, an admin session that is
+//! simply absent — so the harness assembles a real [`Runtime`] and drives one
+//! arm at a time, or the whole loop until it is told to stop.
 
 use std::time::{Duration, Instant};
 
@@ -259,8 +258,8 @@ async fn the_pending_expiry_sweep_over_an_empty_account_changes_nothing() {
     );
 }
 
-/// The join no longer parks the loop (#529): with its screen up, the other
-/// arms still run, and its actions are the join's.
+/// The join does not park the loop: with its screen up, the other arms still
+/// run, and its actions are the join's (#529).
 #[tokio::test]
 async fn an_open_join_leaves_the_other_arms_running() {
     let (mut rt, _h) = runtime().await;

@@ -1,9 +1,9 @@
 //! The "create a new persona DID" overlay — its keys and its rendering.
 //!
-//! Lifted off the main page so the join flow can host the same overlay. A join
-//! that needs a persona used to say "create one under My Identity", which meant
-//! leaving the flow, finding the right pane, and coming back to start the join
-//! again — and the community DID had to be entered a second time. The overlay
+//! Hosted by both the main page and the join flow, so a join that needs a
+//! persona creates one in place. Sending the operator to My Identity instead
+//! would mean leaving the flow, finding the right pane, and coming back to
+//! start the join again — entering the community DID a second time. The overlay
 //! floats over whichever page opened it; nothing about it is page-specific, and
 //! the phases, the keys and the wording must not fork between the two callers.
 
@@ -263,7 +263,7 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
                     Style::new().fg(COLOR_BORDER),
                 )));
                 lines.push(Line::default());
-                // The question this screen used to leave hanging. A typed path
+                // The question this screen must not leave hanging. A typed path
                 // reads like the way to get a memorable identifier, and it is
                 // the expensive way: permanent, public, and possibly taken. The
                 // cheap way exists and is reversible, so say so here rather

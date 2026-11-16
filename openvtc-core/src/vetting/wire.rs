@@ -1082,8 +1082,8 @@ pub(crate) mod tests {
 
     /// The statement's delivery is a Trust Task document signed by the vetter
     /// persona for `authentication`, addressed to the applicant and threaded on
-    /// the session, and it opens for the vetter only. An unsigned one — the
-    /// bare body this used to send — is still claimed, and refused.
+    /// the session, and it opens for the vetter only. An unsigned one — a
+    /// bare body — is still claimed, and refused.
     #[tokio::test]
     async fn a_statement_delivery_is_signed_for_authentication_and_refused_unsigned() {
         let (vetter, applicant, other) = (secret(1), secret(2), secret(3));

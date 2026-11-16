@@ -739,8 +739,8 @@ pub struct CommunitySummary {
     ///
     /// Only used to qualify the unacknowledged warning. Without it the warning
     /// reads the same whether the community ignored us or could not decode the
-    /// transport it advertised, which is the ambiguity that made a real failure
-    /// take a night to find. `None` for records written before it was recorded.
+    /// transport it advertised, an ambiguity that hides a real transport
+    /// failure. `None` for records written before it was recorded.
     pub submit_transport: Option<String>,
     /// Whether this community is archived (R-C-8); only shown when "show archived"
     /// is on, with a marker.
@@ -2638,9 +2638,9 @@ pub fn claim_heading(claim_type: &str) -> String {
 /// already said which claim types its card must carry, so the form is driven by
 /// that list — one row per claim type asked for, each either ready or not.
 ///
-/// A required claim type the pool has nothing for is filled in right here. The
-/// holder used to be sent to My Identity to add it under a type key they had no
-/// reason to know, and back again to press `f`; most stopped at that point.
+/// A required claim type the pool has nothing for is filled in right here:
+/// sending the holder to My Identity to add it under a type key they have no
+/// reason to know, and back again to press `f`, loses most of them.
 /// The value is saved through the same write My Identity makes
 /// ([`pool::draft_from_text`](openvtc_core::persona::pool::draft_from_text),
 /// then [`pool::put`](openvtc_core::persona::pool::put)), so it is a real,

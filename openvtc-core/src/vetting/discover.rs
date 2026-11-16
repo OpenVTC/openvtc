@@ -190,7 +190,7 @@ fn trust_tasks_url(base: &str, policy: ProbePolicy) -> Result<reqwest::Url, Disc
 /// A community publishes its `VTCRest` endpoint in one of two forms: the API
 /// base including its `/v1` mount (what VTI's `vtc-host` template advertises
 /// since VTI #1615), or the bare host (communities minted before it). Appending
-/// `v1/trust-tasks` to the first gave `/v1/v1/trust-tasks`, which a VTC answers
+/// `v1/trust-tasks` to the first gives `/v1/v1/trust-tasks`, which a VTC answers
 /// with 405 (VTI-55), so the mount is added only when `base` does not already
 /// end with it.
 fn trust_tasks_url_string(base: &str) -> String {

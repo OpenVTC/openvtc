@@ -176,8 +176,8 @@ pub fn get_user_pin() -> anyhow::Result<SecretString> {
         .with_prompt("Please enter Token User PIN")
         .allow_empty_password(false)
         .interact()?;
-    // `allow_empty_password(false)` above means this cannot be empty, which is
-    // what made the factory-PIN fallback that used to sit here dead code.
+    // `allow_empty_password(false)` above means this cannot be empty, so no
+    // factory-PIN fallback is needed.
     Ok(SecretString::new(user_pin.into()))
 }
 

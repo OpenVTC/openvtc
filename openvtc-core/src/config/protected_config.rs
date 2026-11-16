@@ -698,8 +698,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// #569: the blob is bound to its profile. One copied into another
-    /// profile's config, or presented as an export, does not open.
+    /// The blob is bound to its profile. One copied into another profile's
+    /// config, or presented as an export, does not open (#569).
     #[test]
     fn a_blob_bound_to_one_profile_does_not_open_in_another() {
         let seed = test_seed();

@@ -397,9 +397,9 @@ mod tests {
         assert_eq!(classify(&state), ProvisionFailure::Other);
     }
 
-    /// #501: the provision request went out over a working TSP session and its
+    /// The provision request went out over a working TSP session and its
     /// reply never came back. The VTA has acted on it, so this is a re-grant,
-    /// not "unreachable, retry as-is" — which the VTA would refuse.
+    /// not "unreachable, retry as-is" — which the VTA would refuse (#501).
     #[test]
     fn a_timeout_on_the_provision_row_is_a_lost_reply() {
         let mut state = failed_with(

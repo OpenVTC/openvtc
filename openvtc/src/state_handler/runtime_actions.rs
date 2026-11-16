@@ -1,14 +1,11 @@
 //! The runtime loop's action handling, lifted out of the loop (R14 follow-up).
 //!
-//! `main_loop` was ~1,600 lines, 900 of them one `match` over `Action`, and
-//! nothing in it could be called by a test: every fix this file's history
-//! records was verified by reading it, by a live log, or by a unit test on some
-//! piece extracted from it. That is also how a change whose entire purpose was
-//! compile-time exhaustiveness shipped broken across feature sets.
+//! Out here an arm can be called by a test, instead of being verifiable only by
+//! reading it, by a live log, or by a unit test on some piece extracted from it.
 //!
-//! What made the lift possible is the R14 sweep: the arms are now uniformly
+//! The lift rests on the R14 sweep: the arms are uniformly
 //! *resolve owned inputs -> claim a domain -> spawn -> apply on the outcome*, so
-//! they need a fixed set of resources and no longer interleave network work with
+//! they need a fixed set of resources and do not interleave network work with
 //! loop-local state. [`ActionCtx`] is that set.
 //!
 //! Three arms stay in the loop, because they are not about acting on state:
@@ -100,9 +97,8 @@ pub(crate) enum Handled {
 
 /// Handle one action.
 ///
-/// The match is exhaustive with no `_` arm, which is the guarantee #236 added
-/// and this move carries over intact: a new `Action` variant cannot be added
-/// without deciding here what the runtime loop does with it.
+/// The match is exhaustive with no `_` arm: a new `Action` variant cannot be
+/// added without deciding here what the runtime loop does with it (#236).
 pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Handled {
     match action {
         // Shared nav reducer first: pure-ctx.state nav arms live in exactly
@@ -1576,10 +1572,9 @@ mod tests {
 
     /// `g` on a selected persona must actually dispatch.
     ///
-    /// This is the test that did not exist when three surfaces were found to be
-    /// silently dropping actions (#235). It asserts the property that was
-    /// violated: the action claimed its domain, so something is running — not
-    /// that a VTA answered.
+    /// A silently dropped action shows only as a key that does nothing (#235).
+    /// This asserts that the action claimed its domain, so something is
+    /// running — not that a VTA answered.
     #[tokio::test]
     async fn opening_the_agent_name_manager_dispatches() {
         let mut h = Harness::new(true).await;

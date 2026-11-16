@@ -250,8 +250,7 @@ impl MainPage {
         // and guard on the view. A key bound on the desk generally (`p`, `g`)
         // has no guard, which is the point of the header — the profile and the
         // vetter credential belong to the whole desk, not to whichever list is
-        // open. `p` used to exist only on Tickets, where it had nothing to do
-        // with tickets.
+        // open.
         let action = match (vetting.tab, key.code) {
             (_, KeyCode::Tab) => V::SwitchTab,
             (VettingTab::Desk, KeyCode::Left) => V::SwitchDeskView(false),

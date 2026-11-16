@@ -762,8 +762,8 @@ impl Application {
                 .ticket(Some(ticket))
                 .requirements_digest(digest)
                 .preferred_method(preferred)
-                // An empty `languages` is sent as `[]` on this line where it
-                // used to be omitted, so "no preference" stays absent.
+                // An empty `languages` is passed as `None` rather than `[]`,
+                // so "no preference" stays absent from the wire.
                 .languages((!languages.is_empty()).then_some(languages))
                 .message(message)
                 .availability(availability),

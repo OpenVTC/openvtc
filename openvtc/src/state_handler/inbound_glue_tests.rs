@@ -114,8 +114,8 @@ async fn dispatch_checked(config: &mut Config, tdk: &TDK, m: &Message) -> Inboun
 /// the TSP binding envelope, mapped and passed through the inbound gate
 /// (`deliver_tsp_document`), checked off the loop and dispatched
 /// (`process_inbound_message`), then correlated by the Repos view
-/// (`repos_actions::apply_replies`). The gate used to drop this exact type
-/// at debug, and the view timed out on an answer the VTC had sent.
+/// (`repos_actions::apply_replies`). A gate that drops this type at debug
+/// leaves the view timing out on an answer the VTC has sent.
 #[tokio::test(flavor = "current_thread")]
 async fn a_tsp_git_ns_view_answer_loads_the_repos_view() {
     use crate::state_handler::main_page::repos::{Pending, Purpose, ReposPhase, ReposView};

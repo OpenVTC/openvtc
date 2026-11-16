@@ -21,9 +21,6 @@ environments.json
 *.log
 Thumbs.db
 
-# Redis dump written into the repo root by a local dev stack. Untracked and
-# unignored, it sits in `git status` looking like something to commit — and
-# `git add -A` duly swept it into a persona commit, which is how this line
-# came to exist.
+# Redis dump a local dev stack writes into the repo root; never committed.
 *.rdb
 __pycache__/

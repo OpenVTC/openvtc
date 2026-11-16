@@ -22,10 +22,10 @@ use openvtc_core::{
 use serde_json::json;
 use tracing::{debug, info, warn};
 
-// NOTE (R14): the formerly-inline `accept_relationship_request` /
-// `reject_relationship_request` are now split into a loop-thread `prepare_*`
-// (below, in the dispatch-wrapper section) and an I/O-only job, so the slow
-// VTA round-trip + handshake send no longer park the runtime select loop.
+// NOTE (R14): accepting / rejecting a relationship request is split into a
+// loop-thread `prepare_*` (below, in the dispatch-wrapper section) and an
+// I/O-only job, so the slow VTA round-trip + handshake send never park the
+// runtime select loop.
 
 /// Accept a received VRC — store it in vrcs_received and remove the task.
 pub fn accept_vrc(config: &mut Config, task_id: &str) -> Result<()> {
@@ -81,9 +81,9 @@ pub fn accept_vrc(config: &mut Config, task_id: &str) -> Result<()> {
     Ok(())
 }
 
-// NOTE (R14): the formerly-inline `accept_vrc_request` / `reject_vrc_request`
-// are now split into a loop-thread `prepare_*` (in the dispatch-wrapper section
-// below) + an I/O-only send job, so the DIDComm send no longer parks the loop.
+// NOTE (R14): accepting / rejecting a VRC request is split into a loop-thread
+// `prepare_*` (in the dispatch-wrapper section below) + an I/O-only send job,
+// so the DIDComm send never parks the loop.
 // The VRC create + sign stays on the loop thread (local crypto, not network).
 
 /// Clear all tasks from the inbox.
@@ -829,15 +829,14 @@ async fn prepare_accept_vrc_request(
     // The VRC is issued under **the identity this relationship uses**, not the
     // persona DID. It is the durable artifact both parties retain and may
     // publish to the community trust graph, so a persona-attributed issuer
-    // correlated every relationship a persona had, indefinitely, from a
-    // credential that outlives the handshake that produced it. The subject was
-    // already the peer's relationship DID; only the issuer half was persona-attributed,
-    // which meant the pairwise channel led straight back to the persona.
+    // would correlate every relationship a persona has, indefinitely, from a
+    // credential that outlives the handshake that produced it. The subject is
+    // the peer's relationship DID; a persona-attributed issuer would lead the
+    // pairwise channel straight back to the persona.
     //
-    // This could not be fixed here until the VTC stopped requiring it: its
-    // publish path pinned the VRC issuer to the authenticated session DID, so
-    // a VRC issued under a relationship DID was rejected. Lifted in
-    // OpenVTC/verifiable-trust-infrastructure#1061.
+    // The VTC's publish path accepts a VRC issued under a relationship DID
+    // rather than pinning the issuer to the authenticated session DID
+    // (OpenVTC/verifiable-trust-infrastructure#1061).
     let valid_from = Utc::now();
     // The VRC carries its own identifier, set before signing.
     //

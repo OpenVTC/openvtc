@@ -211,8 +211,8 @@ async fn a_credential_is_verified_off_the_loop_before_anything_is_applied() {
 
 /// A community's answer to a hidden-vetting question — here a vetter's enrolment, in the
 /// binding envelope the VTC replies in — reaches the vetting router and takes the question
-/// it threads on. It used to be dropped before the router saw it, so the question waited
-/// out its 30 seconds as "no answer" and the vetter never held a token to attest with.
+/// it threads on. Dropped before the router saw it, the question would wait out its 30
+/// seconds as "no answer" and the vetter would never hold a token to attest with.
 #[tokio::test]
 async fn a_hidden_vetting_answer_reaches_the_question_it_answers() {
     use crate::vetting::queries::{CommunityQuery, QueryKind};

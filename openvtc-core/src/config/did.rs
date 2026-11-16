@@ -716,10 +716,10 @@ mod tests {
         assert!(normalize_webvh_url("https://example.com/foo:bar").is_err());
     }
 
-    /// Regression: https://r2.ic3.dev/vincent previously produced a placeholder
-    /// DID with a stray slash ("did:webvh:{SCID}:r2.ic3.dev/vincent") which
-    /// resolved to "r2.ic3.dev/vincent/.well-known/did.jsonl". The DID should
-    /// use colons between the host and path components.
+    /// https://r2.ic3.dev/vincent must not produce a placeholder DID with a
+    /// stray slash ("did:webvh:{SCID}:r2.ic3.dev/vincent"), which resolves to
+    /// "r2.ic3.dev/vincent/.well-known/did.jsonl". The DID uses colons between
+    /// the host and path components.
     #[test]
     fn placeholder_did_converts_path_slash_to_colon() {
         assert_eq!(

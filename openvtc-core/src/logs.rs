@@ -194,8 +194,8 @@ mod tests {
         assert_eq!(logs.messages[2].message, "fourth");
     }
 
-    /// #568: peer-supplied text is cleaned and capped on the way in, whoever
-    /// the caller is.
+    /// Peer-supplied text is cleaned and capped on the way in, whoever the
+    /// caller is (#568).
     #[test]
     fn insert_strips_bidi_and_control_characters_and_caps_length() {
         let mut logs = Logs::default();
@@ -245,10 +245,11 @@ mod tests {
     /// An existing config picks up the current ceiling rather than the one it
     /// was written with.
     ///
-    /// This is the whole reason `limit` is `skip`ped. It used to serialize, so
-    /// every config already on disk carried `"limit": 100` — and raising the
-    /// default would have changed nothing for exactly the users who had logs to
-    /// lose, while passing every test written against a fresh `Default`.
+    /// This is the whole reason `limit` is `skip`ped. A serialized limit pins
+    /// every config on disk to the ceiling it was written with (`"limit": 100`),
+    /// so raising the default would change nothing for exactly the users who
+    /// have logs to lose, while passing every test written against a fresh
+    /// `Default`.
     #[test]
     fn a_stored_limit_does_not_pin_an_old_ceiling() {
         let stored = r#"{"messages": [], "limit": 100}"#;
@@ -259,7 +260,7 @@ mod tests {
         );
     }
 
-    /// And it is no longer written back out, so this cannot regress.
+    /// And it is not written back out, so this cannot regress.
     #[test]
     fn the_limit_is_not_persisted() {
         let json = serde_json::to_value(Logs::default()).expect("serialises");

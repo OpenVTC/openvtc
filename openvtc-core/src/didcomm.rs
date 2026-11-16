@@ -5,21 +5,14 @@
 //! [`MessagingService`] holding one `DidCommTransport` per identity, with a
 //! durable outbox behind every send.
 //!
-//! It used to wrap `affinidi-messaging-didcomm-service`, the type-routed framework
-//! both VTI services cut away from (#189). That crate is no longer a dependency of
-//! this workspace.
-//!
 //! ## Why this is in `openvtc-core` and not the TUI
 //!
-//! It lived at `openvtc/src/state_handler/didcomm.rs` until the delivery-layer
-//! migration (#189) needed it under test. `openvtc` is a **binary-only** crate
-//! (`[[bin]]`, no `src/lib.rs`), so no integration test can import it — which is
-//! why this module, alone among OpenVTC's messaging code, had no coverage beyond
-//! two pure unit groups. Its failure mode is `duplicate-channel` and duelling
-//! reconnect loops, which produce neither a compile error nor a failing unit
-//! test, so rewriting it without integration coverage was the wrong trade.
-//!
-//! Nothing here referenced the binary crate, so the move is mechanical.
+//! It needs integration tests, and `openvtc` is a **binary-only** crate
+//! (`[[bin]]`, no `src/lib.rs`), so no integration test can import it. This
+//! module's failure mode is `duplicate-channel` and duelling reconnect loops,
+//! which produce neither a compile error nor a failing unit test, so it lives
+//! where integration coverage can reach it. Nothing here references the binary
+//! crate.
 //!
 //! ## Relationship to [`crate::messaging`]
 //!
@@ -190,13 +183,12 @@ const CYCLING_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 /// access token lives ~900 s and the SDK's websocket transport refreshes it
 /// proactively at 80% of that, tearing the socket down and bringing it back as
 /// part of the refresh: one drop per token per listener, every ~12 minutes, back
-/// inside a second or two. That is the healthy steady state — it is what
-/// affinidi-tdk-rs #716 *reduced* the count to, from four — and it is not
-/// something an operator can act on.
+/// inside a second or two. That is the healthy steady state
+/// (affinidi-tdk-rs #716), and it is not something an operator can act on.
 ///
-/// Reporting it as `disconnected (no transport error reported)` made the
-/// activity log's most alarming line the one it printed most often, which is the
-/// failure mode that costs a real disconnect its meaning. So a drop is held
+/// Reporting it as `disconnected (no transport error reported)` would make the
+/// activity log's most alarming line the one it prints most often, which costs
+/// a real disconnect its meaning. So a drop is held
 /// briefly before it is reported: if the listener returns first, the pair
 /// becomes one calm line, and the `Disconnected` line keeps its meaning of "it
 /// is *still* down".
@@ -319,8 +311,8 @@ struct IdentityWire {
     ///
     /// A `DidCommTransport` is bound to the ATM task that owns its websocket. That
     /// task retries internally, but if it dies outright the transport is stale
-    /// forever and nothing else can revive it — the framework's `RestartPolicy`
-    /// used to. Rebuilding means constructing a fresh ATM, profile and transport,
+    /// forever and nothing else can revive it. Rebuilding means constructing a
+    /// fresh ATM, profile and transport,
     /// which needs the same inputs as the first time.
     spec: ListenerSpec,
     /// This identity's outbox drain, held here rather than in
@@ -937,12 +929,6 @@ pub const PERSONA_LISTENER_ID: &str = "persona";
 /// `did:webvh:ScidB:host2.example:magic-depart` would collapse onto one id and
 /// two personas would share a listener. Do not shorten it here.
 ///
-/// It used to run the DID through `context_path::render_for_display` and the doc
-/// promised a short slug (`silent-tongue`). That call was always a no-op: it
-/// splits on `/`, which a DID has none of, so the whole DID came back. Removing
-/// it changes no behaviour and stops the contract claiming something it never
-/// delivered.
-///
 /// Display is a separate concern, handled where the id is *rendered* rather than
 /// where it is minted: the runtime loop formats listener ids through
 /// `resolve_did_to_display`, so the activity log reads
@@ -1012,11 +998,9 @@ pub enum DIDCommEvent {
         /// Which transport actually carried this frame.
         ///
         /// The pump knows — it matches on `Protocol` to decode the payload —
-        /// but used to drop it here, so every consumer that wanted to say how a
-        /// message arrived had to guess. The activity log guessed "DIDComm" and
-        /// was wrong for every TSP frame, which is the transport this stack
-        /// prefers. Carrying it costs one field and makes the log able to tell
-        /// the truth.
+        /// and carries it here so a consumer that says how a message arrived
+        /// does not have to guess: a guess of "DIDComm" is wrong for every TSP
+        /// frame, which is the transport this stack prefers.
         transport: MessagingTransport,
     },
     /// A trust-ping was received — state handler decides whether to respond.
@@ -1040,9 +1024,8 @@ pub enum DIDCommEvent {
 
 /// The DIDComm event channel is **unbounded**, deliberately.
 ///
-/// It used to be a 256-slot bounded channel whose overflow behaviour was
-/// `try_send` → log → drop, on the reasoning that a pathological mediator should
-/// not be able to grow memory without bound. That reasoning missed what a
+/// A bounded channel whose overflow is `try_send` → log → drop would stop a
+/// pathological mediator growing memory without bound, but misses what a
 /// dropped event costs here.
 ///
 /// By the time an event reaches this channel the delivery layer has already
@@ -1050,20 +1033,20 @@ pub enum DIDCommEvent {
 /// immediately after handing off to its subscriber broadcast — and an ack is a
 /// delete at the mediator. So a dropped event is not a deferred message, it is a
 /// **permanently destroyed** one, with a single `warn!` line as the only record.
-/// These carry membership credentials and join verdicts; #221 is what that looks
-/// like from the outside, and it took four services' logs to find.
+/// These carry membership credentials and join verdicts, so a drop strands a
+/// join with nothing on screen to say why (#221).
 ///
-/// Backpressure was never really available anyway. Blocking on a full channel
-/// would stall this consumer, the layer's broadcast buffer would overflow
-/// instead, and `subscribe()` swallows that as `Lagged` **silently** — strictly
-/// worse than the warned drop it replaced. The only choice actually on offer is
+/// Backpressure is not available either. Blocking on a full channel would
+/// stall this consumer, the layer's broadcast buffer would overflow instead,
+/// and `subscribe()` swallows that as `Lagged` **silently** — strictly worse
+/// than a warned drop. The only choice actually on offer is
 /// where the loss happens, so we choose nowhere.
 ///
 /// The memory concern is bounded in practice by the mediator: events arrive only
 /// as fast as it delivers, the consumer is the state handler's `select!` (always
 /// draining unless mid-await), and the payloads are small. Unbounded growth
 /// requires a consumer stalled indefinitely, which is a bug that would strand the
-/// UI too — visible, unlike the silent credential loss this replaces.
+/// UI too — visible, unlike a silent credential loss.
 ///
 /// Kept as a named constant for the historical record and for anyone who goes
 /// looking for the old capacity; nothing reads it.
@@ -1115,7 +1098,7 @@ pub async fn reconnect_persona_listener_io(
     // Drop the old transport first. The mediator permits one websocket per DID,
     // rejecting a second with `duplicate-channel`, so adding before removing would
     // leave two sockets racing on the same identity — the duelling-reconnect
-    // failure this codebase has already been bitten by (#132).
+    // failure (#132).
     service.remove_listener(&listener_id).await;
     if let Err(e) = add_listener(service, &new_config).await {
         return ReconnectOutcome::Failed {
@@ -1503,9 +1486,9 @@ async fn dispatch_inbound(
         ) {
             // Unbounded: `send` fails only when the receiver is gone, which means
             // the state handler has shut down and there is nothing left to
-            // deliver to. It can no longer fail because the channel is full —
-            // see `DIDCOMM_EVENT_CHANNEL_CAPACITY` for why dropping there was
-            // destroying messages the mediator had already deleted.
+            // deliver to. It cannot fail because the channel is full — see
+            // `DIDCOMM_EVENT_CHANNEL_CAPACITY` for why dropping there would
+            // destroy messages the mediator has already deleted.
             if event_tx.send(event).is_err() {
                 tracing::debug!("state handler has gone away — ending inbound dispatch");
                 return;
@@ -1810,8 +1793,8 @@ fn is_openvtc_protocol_type(typ: &str) -> bool {
 ///
 /// `body` being the whole document is what makes the handlers work unchanged:
 /// they read their payload through `messaging::trust_task_reply_payload`, which
-/// unwraps `payload` (#200). Had that fix not landed first, every TSP reply
-/// would have parsed at the wrong nesting.
+/// unwraps `payload`; without that, every TSP reply would parse at the wrong
+/// nesting (#200).
 ///
 /// A frame that is not a JSON object, or carries no `type`, is dropped with a
 /// warning rather than guessed at: unlike DIDComm there is no envelope to fall
@@ -1972,13 +1955,10 @@ pub fn open_didcomm_envelope(message: &Message) -> Option<Message> {
 /// The gate itself, derived from the inbound registry
 /// ([`crate::inbound::registry::ROUTES`]): a type is admitted exactly when a
 /// handler claims it, and the dispatcher routes on the same classification.
-/// The two used to be separate lists — a hand-written regex here and a chain
-/// of branches in the dispatcher — and a branch added without its prefix here
-/// was a verb that failed totally and silently: a `type` refused here is
-/// dropped at `classify_inbound` with no reply, and the sender waits out its
-/// timeout. That happened (`capabilities::send_capability_document` sent the
-/// binding envelope, the dispatcher had a branch for the reply, and every
-/// reply was dropped in between).
+/// One list, not two: a `type` refused here is dropped at `classify_inbound`
+/// with no reply and the sender waits out its timeout, so a dispatcher branch
+/// whose type this gate did not also admit would be a verb that fails totally
+/// and silently.
 #[must_use]
 pub fn routes_inbound_type(type_uri: &str) -> bool {
     // Mirrors [`classify_inbound`]'s admission order exactly. The two
@@ -3112,10 +3092,10 @@ mod supervisor_policy_tests {
     /// Bringing listeners up must not block the caller.
     ///
     /// This is the whole point of the split: each listener costs a mediator
-    /// auth handshake and a websocket connect, in series, and startup used to
-    /// await that on the state-handler thread — the one thread that services UI
-    /// actions. The loading screen offered "Press Enter to continue" and then
-    /// could not read the keypress until the last socket was up.
+    /// auth handshake and a websocket connect, in series. Awaited on the
+    /// state-handler thread — the one thread that services UI actions — the
+    /// loading screen would offer "Press Enter to continue" and then could not
+    /// read the keypress until the last socket was up.
     ///
     /// The spec here names a mediator that cannot resolve, so the install is
     /// still in flight when the assertion runs: what is being pinned is that
@@ -3513,8 +3493,7 @@ mod tsp_carriage_tests {
 mod persona_listener_id_tests {
     use super::{PERSONA_LISTENER_ID, persona_listener_id};
 
-    /// The contract: the id *is* the DID. Stated as a test because the doc
-    /// comment previously promised a slug and the code silently did this.
+    /// The contract: the id *is* the DID, not a shortened slug.
     #[test]
     fn the_id_is_the_did_verbatim() {
         let did = "did:webvh:QmR6e4:webvh.storm.ws:magic-depart";

@@ -573,14 +573,14 @@ pub struct SecuredConfig {
     ///
     /// # Why this is not derived from the admin credential
     ///
-    /// It used to be: `HKDF(admin_credential_private_key,
-    /// "openvtc-protected-config-seed-v1")`. That made one value serve two
+    /// The legacy derivation, `HKDF(admin_credential_private_key,
+    /// "openvtc-protected-config-seed-v1")`, makes one value serve two
     /// irreconcilable roles — an **authorisation grant** designed to rotate
     /// (`acl/swap-key`) and be re-issued to a recovering install, and a
     /// **data-at-rest key** that must never change. Rotating the credential
-    /// would have made the on-disk config undecryptable, and a recovered
-    /// install necessarily holds a *different* credential, so recovery and
-    /// existing local state were mutually exclusive.
+    /// would make the on-disk config undecryptable, and a recovered install
+    /// necessarily holds a *different* credential, so recovery and existing
+    /// local state would be mutually exclusive.
     ///
     /// Generated on first save. `None` on configs written before this field
     /// existed; [`Config::load_step2`] falls back to the legacy derivation and
@@ -654,9 +654,9 @@ impl From<&Config> for SecuredConfig {
 // Skipping redundant keyring writes (#564)
 //
 // The secured tier (key material) changes far less often than the rest of the
-// config, but every `Config::save` used to rewrite it — and the keyring write
-// is the slowest, most failure-prone step (Secret Service over D-Bus, a
-// Keychain prompt, a card touch on token profiles).
+// config, so rewriting it on every `Config::save` is mostly waste — and the
+// keyring write is the slowest, most failure-prone step (Secret Service over
+// D-Bus, a Keychain prompt, a card touch on token profiles).
 //
 // The skip compares a fingerprint of what *would* be sealed with what this
 // process last wrote. Not the ciphertext: its nonce changes on every write.
@@ -1328,8 +1328,7 @@ mod tests {
 
     const PROFILE: &str = "default";
 
-    /// A blob in the legacy fixed-salt passphrase format, as releases before
-    /// #566 wrote it.
+    /// A blob in the legacy fixed-salt passphrase format (#566).
     fn legacy_blob(code: &str, plaintext: &[u8]) -> SecuredConfigFormat {
         let key = derive_passphrase_key_for_test(code);
         SecuredConfigFormat::PasswordEncrypted {
@@ -1387,8 +1386,8 @@ mod tests {
         }
     }
 
-    /// #569: the sealed blob is bound to its profile. Copied into another
-    /// profile's keyring entry, it does not open even with the right code.
+    /// The sealed blob is bound to its profile. Copied into another profile's
+    /// keyring entry, it does not open even with the right code (#569).
     #[test]
     fn a_sealed_blob_does_not_open_under_another_profile() {
         let blob = sealed_blob("correct horse", "alice", b"{}");
@@ -1403,8 +1402,8 @@ mod tests {
         );
     }
 
-    /// #566: the salt is the profile's own, stored beside the ciphertext, and
-    /// the sealed envelope round-trips into a `SecuredConfig`.
+    /// The salt is the profile's own, stored beside the ciphertext, and the
+    /// sealed envelope round-trips into a `SecuredConfig` (#566).
     #[test]
     fn a_sealed_blob_round_trips_and_carries_its_salt() {
         let sc = SecuredConfig {

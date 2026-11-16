@@ -7,8 +7,8 @@
 //! view — is reported up in [`InboundEffects`] for the caller (the TUI's
 //! runtime loop, or a headless command via [`apply_inline`]) to act on.
 //!
-//! Moved here from the CLI crate (issue #530) so it has no TUI dependency and
-//! core's end-to-end harness can drive it.
+//! It lives in core, not the CLI crate, so it has no TUI dependency and core's
+//! end-to-end harness can drive it (#530).
 
 use std::sync::Arc;
 
@@ -1527,7 +1527,7 @@ async fn credential_issue(
         // Snapshot before, so the log can say what *changed* rather than that a
         // message arrived. An issued membership credential is the moment a join
         // completes — the single most consequential inbound message there is,
-        // and it used to be indistinguishable from any other in the log.
+        // and it must not read like any other in the log.
         let was_active = config
             .account
             .memberships_for(&from_did)

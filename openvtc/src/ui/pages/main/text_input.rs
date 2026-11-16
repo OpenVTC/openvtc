@@ -1,10 +1,9 @@
 //! One text-input behaviour for the main page's forms (#578).
 //!
 //! The main page's forms keep their text in `State` as plain strings and set
-//! it through actions. They used to edit it append-only: no cursor, ←/→ fell
-//! through to the panel switch, and a Ctrl chord typed its letter. Every such
-//! field is now edited here, through `tui_input` — the same editor the setup
-//! and join screens use — with a cursor kept on the page:
+//! it through actions. Every such field is edited here, through `tui_input` —
+//! the same editor the setup and join screens use — with a cursor kept on the
+//! page:
 //!
 //! - typing inserts at the cursor; Backspace/Del delete either side of it;
 //! - ←/→ move within the field, Ctrl+←/→ by word, Home/End (and Ctrl+A/E) to

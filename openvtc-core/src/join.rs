@@ -39,10 +39,10 @@ pub mod status_poll;
 ///
 /// Mirrors the inbound `MAX_MESSAGE_BODY_SIZE` (1 MiB): a submit larger than the
 /// size we ourselves refuse to *receive* will not be handled by a conformant
-/// peer either. A mediator/bridge forward limit silently dropped an oversized
-/// submit once — the join sat `Pending` with no error anywhere (PR #137). Guard
-/// it at the source so an oversized submit fails loudly and actionably instead
-/// of vanishing.
+/// peer either. A mediator/bridge forward limit can silently drop an oversized
+/// submit, leaving the join `Pending` with no error anywhere (PR #137). Guard it
+/// at the source so an oversized submit fails loudly and actionably instead of
+/// vanishing.
 pub const MAX_JOIN_SUBMIT_BYTES: usize = 1_048_576;
 
 /// The `vtc/community/profile/show` request type, sourced from the spec crate so
@@ -698,8 +698,8 @@ pub fn validate_invitation_credential(vic: &Value) -> Result<(), String> {
 
     // @context — an array whose first element is the W3C v2 base URL, and
     // which carries the DTG context. Both are REQUIRED of every DTG credential
-    // by §Common Structure; only the W3C half was checked until now, so a
-    // credential that was not a DTG credential at all could pass as a VIC.
+    // by §Common Structure; checking only the W3C half would let a credential
+    // that is not a DTG credential at all pass as a VIC.
     let ctx = vic.get("@context").and_then(Value::as_array);
     match ctx {
         Some(c) if c.first().and_then(Value::as_str) == Some(W3C_VC_V2_CONTEXT) => {}
@@ -966,8 +966,8 @@ mod tests {
 
     /// The document a status poll puts on the wire. The VTC dispatches on the
     /// document, not the payload — a bare payload is rejected as
-    /// `malformedRequest` ("missing field `id`"), which is exactly how the join
-    /// submit failed before #138 — so the envelope members are the contract:
+    /// `malformedRequest` ("missing field `id`") (#138) — so the envelope
+    /// members are the contract:
     /// `id`, `type`, and the audience binding (`issuer` = us, `recipient` = the
     /// community). The `requestId` must be the community's, and must ride in
     /// `payload` where `parse_payload` reads it.
@@ -1279,10 +1279,9 @@ mod tests {
     /// requires. Distinct from [`sample_vic`], which is intentionally minimal.
     fn complete_vic() -> Value {
         json!({
-            // The DTG wire form, as `dtg-credentials` mints it. This fixture
-            // previously carried only the W3C half and still called itself
-            // complete — the validator agreed, because it checked only the
-            // same half.
+            // The DTG wire form, as `dtg-credentials` mints it — both halves:
+            // a fixture with only the W3C half would pass a validator that
+            // checks only that half.
             "@context": [W3C_VC_V2_CONTEXT, DTG_CONTEXT],
             "id": "urn:uuid:vic-1",
             "type": ["VerifiableCredential", "DTGCredential", "InvitationCredential"],
@@ -1465,11 +1464,10 @@ mod tests {
             doc.recipient.as_deref(),
             Some("did:webvh:example.com:community")
         );
-        // The submit is signed. It used to be unsigned deliberately — the
-        // authcrypt sender authenticated the applicant — and this assertion
-        // said so. But `join-requests/submit/0.2` declares `proof` REQUIRED,
-        // and transport attribution says who handed the document over, not who
-        // wrote it: only one of the two survives being relayed, and `issuer` is
+        // The submit is signed: `join-requests/submit/0.2` declares `proof`
+        // REQUIRED, and transport attribution (the authcrypt sender) says who
+        // handed the document over, not who wrote it: only one of the two
+        // survives being relayed, and `issuer` is
         // what a community reads downstream (VTI #1641).
         assert!(
             doc.proof.is_some(),

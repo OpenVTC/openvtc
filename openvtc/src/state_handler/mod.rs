@@ -120,8 +120,8 @@ pub(crate) fn format_lifecycle_log(
             detail: Some(detail_for(config, listener_id)),
         },
         LifecycleLog::Disconnected { listener_id, error } => {
-            // An absent error is not the same as an unexplained drop, and the
-            // line used to render both as a bare "disconnected". Saying which
+            // An absent error is not the same as an unexplained drop, so the
+            // line never renders both as a bare "disconnected". Saying which
             // one it was is the difference between "the peer closed the socket"
             // and "we lost it and do not know why" (VTI R6.4).
             let reason = match error {
@@ -281,14 +281,14 @@ pub(crate) mod repos_workspace;
 mod rooms_actions;
 mod runtime;
 mod signing_health;
-/// The DIDComm transport module, which now lives in `openvtc-core`.
+/// The DIDComm transport module, which lives in `openvtc-core`.
 ///
-/// Re-exported under its former path so every `didcomm::…` / `super::didcomm::…`
-/// call site in `state_handler` keeps resolving. It moved because `openvtc` is a
+/// Re-exported here so every `didcomm::…` / `super::didcomm::…` call site in
+/// `state_handler` resolves. It lives in core because `openvtc` is a
 /// binary-only crate and nothing there can be integration-tested — see
-/// [`openvtc_core::didcomm`] for the full rationale (#189). Keeping the shim
-/// means the move itself changed no call sites, so a regression in the messaging
-/// layer cannot hide inside an import churn diff.
+/// [`openvtc_core::didcomm`] for the full rationale (#189). The shim keeps the
+/// call sites unchanged, so a regression in the messaging layer cannot hide
+/// inside an import churn diff.
 pub use openvtc_core::didcomm;
 mod community_profile_poll;
 mod device_presence;
@@ -996,12 +996,12 @@ impl StateHandler {
         // empty: `Messaging::start` runs its dispatcher before the first
         // transport exists, so a service with no listeners is a supported state.
         //
-        // The ordering is the point. A State-A join used to run with no messaging
-        // at all, so the applicant persona had no socket while the community
-        // decided — and a community auto-admitting an invited join answers in
-        // under a second. Its reply was therefore stored, not streamed, and the
+        // The ordering is the point. A State-A join run with no messaging at
+        // all leaves the applicant persona with no socket while the community
+        // decides — and a community auto-admitting an invited join answers in
+        // under a second. Its reply is then stored, not streamed, and the
         // mediator only ever redelivers a stored inbox to a socket that
-        // *displaces* another one, so the hot-start below never heard about it.
+        // *displaces* another one, so the hot-start below never hears about it.
         // That is the first join a new operator makes, which is the worst
         // possible place for it. Starting the runtime first lets `join_flow`
         // connect the applicant before it submits, exactly as the runtime-loop
@@ -1010,7 +1010,7 @@ impl StateHandler {
         // Unbounded, deliberately: by the time an event reaches this channel the
         // delivery layer has already acked the message, so a bounded channel's
         // overflow drop destroys a membership credential or join verdict rather
-        // than deferring it (#221, fixed in #224). Full rationale on
+        // than deferring it (#221). Full rationale on
         // `didcomm::DIDCOMM_EVENT_CHANNEL_CAPACITY`.
         let (didcomm_event_tx, didcomm_event_rx) = mpsc::unbounded_channel();
         let shutdown_token = tokio_util::sync::CancellationToken::new();
@@ -1090,9 +1090,9 @@ impl StateHandler {
             (tdk, config, admin_vta)
         };
 
-        // Everything from here on is the runtime loop's (#528): its fields are
-        // what used to be this function's locals, and each `select!` arm is a
-        // method on it.
+        // Everything from here on is the runtime loop's: its fields hold the
+        // state the loop carries, and each `select!` arm is a method on it
+        // (#528).
         runtime::Runtime::assemble(runtime::Startup {
             handler: self,
             terminator,
@@ -1220,10 +1220,10 @@ impl StateHandler {
                             break outcome;
                         }
                     }
-                    // Shared nav reducer first — degraded mode now routes the exact
-                    // same pure-state nav set as the runtime loop (previously these
-                    // arms were duplicated here and the VTA DID-manager nav arms were
-                    // silently dropped by the trailing `_ => {}`).
+                    // Shared nav reducer first — degraded mode routes the exact
+                    // same pure-state nav set as the runtime loop, so a nav arm
+                    // cannot exist in one loop and be silently missing from the
+                    // other.
                     _ if handle_nav_action(state, &action) => {}
                     Action::Exit => {
                         if let Err(e) = terminator.terminate(Interrupted::UserInt) {
@@ -1510,32 +1510,30 @@ impl StateHandler {
                     // Messaging-only actions (Inbox / Relationship / Credential /
                     // Settings / Contact) are intentionally inert in the
                     // degraded loop — there's no live messaging/admin context to
-                    // service them. The pure nav arms they previously shared this
-                    // catch-all with now go through `handle_nav_action` above.
+                    // service them. The pure nav arms go through
+                    // `handle_nav_action` above.
                     //
                     // Leaves a breadcrumb, because this arm is also where an
                     // action lands that *should* have been serviced and simply
-                    // has no arm yet — the agent-name verbs sat here, and the
-                    // only symptom was a key that did nothing. A dropped action
-                    // is now visible in a debug log instead of being inferred
-                    // from silence. (The action is not named: `Action` carries
+                    // has no arm yet — and there the only other symptom is a
+                    // key that does nothing. A dropped action is visible in a
+                    // debug log instead of being inferred from silence.
+                    // (The action is not named: `Action` carries
                     // credential and key material in some variants and
                     // deliberately has no `Debug`.)
                     // ---- Everything below is listed so this match stays EXHAUSTIVE ----
                     //
-                    // There is deliberately no `_` arm. This loop's coverage was
-                    // a hand-written list next to a silent catch-all, and three
-                    // surfaces were quietly missing from it (#235): the
-                    // agent-name verbs, `DeleteDid`, and every setting. Each one
-                    // presented as a key that did nothing. Without a catch-all a
-                    // new `Action` variant cannot be added without deciding,
-                    // here, what an account with no community does with it — the
-                    // compiler asks, instead of a user reporting a dead key.
+                    // There is deliberately no `_` arm: a hand-written list next
+                    // to a silent catch-all lets whole surfaces go missing, each
+                    // presenting as a key that does nothing (#235). Without a
+                    // catch-all a new `Action` variant cannot be added without
+                    // deciding, here, what an account with no community does
+                    // with it — the compiler asks, instead of a user reporting a
+                    // dead key.
                     //
                     // The `openpgp-card` arms are split out because those
                     // variants do not exist in a default build: one flat list
-                    // compiles under a single feature set and breaks the other,
-                    // which is what CI caught the first time round.
+                    // compiles under a single feature set and breaks the other.
 
                     // Serviced by `handle_nav_action` in the guard arm above.
                     // Unreachable here; listed for exhaustiveness only.
@@ -1850,16 +1848,14 @@ impl StateHandler {
                 // Back on the main page; resume the degraded loop.
                 state.active_page = state::ActivePage::Main;
                 // Gated on the *join*, never on whether it minted the account's
-                // first identity. This used to read `!had_identity && …`, on the
-                // assumption that the only way to already hold an identity here
-                // was the messaging-startup-failure path. It is not: the
-                // `CreatePersonaSubmit` arm mints one in this very loop, and
-                // `active_identity()` falls back to the first persona in the map
-                // — so the ordinary first-run order (create persona, *then*
-                // join) left `had_identity` true, skipped the hand-off, and
-                // stranded the account in a loop that has no inbound arm. The
-                // community's reply was ACKed by the SDK, deleted at the
-                // mediator, and dropped.
+                // first identity. Holding an identity here is not limited to
+                // the messaging-startup-failure path: the `CreatePersonaSubmit`
+                // arm mints one in this very loop, and `active_identity()` falls
+                // back to the first persona in the map. So in the ordinary
+                // first-run order (create persona, *then* join) a gate on
+                // `!had_identity` would skip the hand-off and strand the account
+                // in a loop that has no inbound arm — the community's reply
+                // ACKed by the SDK, deleted at the mediator, and dropped.
                 joined.is_some()
                     && join_ctx
                         .as_ref()
@@ -2159,8 +2155,7 @@ async fn settle_after_apply(
 /// The path mode the overlay's path phase is asking for, or why what was typed
 /// cannot be sent.
 ///
-/// The server-assigned row is `WebvhPathMode::AutoAssign` — the behaviour
-/// every persona had before this choice existed, and still the default. A typed
+/// The server-assigned row is `WebvhPathMode::AutoAssign`, the default. A typed
 /// path goes through
 /// [`openvtc_core::config::did::explicit_path_mode`], which maps it with the
 /// SDK and checks it against the hosting server's naming rules.
@@ -2534,12 +2529,12 @@ fn spawn_agent_name_job(
 
 /// Start a background VIC-list refresh, shared by both loops.
 ///
-/// The vault query is a trust task with a 30 s SDK timeout. It used to run
-/// inline in the action arm, which meant a key pressed behind it — a two-line
-/// in-memory change — could not be applied until the network answered: asking
-/// for the Invitation Credentials list took as long as the round trip, with
-/// nothing on screen to say why. Here the loop only *starts* the query, so the
-/// keypress lands on the next frame and the list fills in when it arrives.
+/// The vault query is a trust task with a 30 s SDK timeout. Run inline in the
+/// action arm, it would hold a key pressed behind it — a two-line in-memory
+/// change — until the network answered: asking for the Invitation Credentials
+/// list would take as long as the round trip, with nothing on screen to say
+/// why. So the loop only *starts* the query, the keypress lands on the next
+/// frame, and the list fills in when it arrives.
 ///
 /// Guarding rules, in the order they apply:
 ///
@@ -2792,11 +2787,11 @@ fn remove_community(
     state.main_page.content_panel.communities.confirm_delete = None;
     // Delete is inactive-only (R-C-8): an Active/Pending community must be
     // left first (the `d` key is gated to inactive rows, and `delete_membership`
-    // re-checks). We no longer silently `leave()` here — that conflated leave
-    // with delete and skipped the protocol self-removal.
+    // re-checks). This never silently `leave()`s — that would conflate leave
+    // with delete and skip the protocol self-removal.
     match config.account.delete_membership(&vtc, persona) {
         Ok(_) => {
-            // R11: coalesced save (was an inline `config.save`). The
+            // R11: coalesced save. The
             // Exit/shutdown force-flush guarantees the deletion is persisted
             // even if the user quits within the debounce window.
             save.mark_dirty();
@@ -3206,9 +3201,9 @@ fn reconcile_sessions(
 /// `Connecting`: "no community" is not "not connected", and with nothing to
 /// connect *to* no connection attempt is in progress. This is the state of an
 /// applicant still being vetted: their persona listener is up (the activity
-/// log says so), but they hold no membership yet. The startup seed used to
-/// leave such an account on `Connecting` for the life of the process, because
-/// no session would ever produce the edge that moved it.
+/// log says so), but they hold no membership yet. Seeded as `Connecting`, such
+/// an account would stay there for the life of the process, because no session
+/// would ever produce the edge that moves it.
 fn apply_session_aggregate(session_manager: &session_manager::SessionManager, state: &mut State) {
     state.connection.status = aggregate_status(
         session_manager,
@@ -4124,10 +4119,10 @@ mod tests {
         assert_ne!(one.detail, two.detail);
     }
 
-    /// A drop with no transport error is reported as such. It used to render as
-    /// a bare "disconnected", identical to a drop whose error was simply not
+    /// A drop with no transport error is reported as such. A bare
+    /// "disconnected" would be identical to a drop whose error was simply not
     /// captured — so "the socket closed cleanly" and "we lost it and cannot say
-    /// why" were the same line.
+    /// why" would be the same line.
     #[test]
     fn a_drop_without_an_error_says_so() {
         const DID: &str = "did:webvh:QmScidCCCCCCCCCCCCCCCCCCCCCCCC:example.com:quiet";
@@ -4154,10 +4149,10 @@ mod tests {
         );
     }
 
-    /// The routine reconnect gets one calm line. It used to arrive as a
-    /// disconnect *plus* a recovery every ~12 minutes — making the log's most
-    /// alarming line the one it printed most often, which is how a real
-    /// disconnect loses its meaning.
+    /// The routine reconnect gets one calm line. As a disconnect *plus* a
+    /// recovery every ~12 minutes it would make the log's most alarming line
+    /// the one it printed most often, which is how a real disconnect loses its
+    /// meaning.
     #[test]
     fn a_brief_reconnect_reads_as_one_event_not_a_fault() {
         const DID: &str = "did:webvh:QmScidDDDDDDDDDDDDDDDDDDDDDDDD:example.com:brief";

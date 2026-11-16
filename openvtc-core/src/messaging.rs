@@ -274,7 +274,7 @@ pub struct StatusOutcome {
     /// When the membership transitioned to an inactive (read-only) status, the
     /// persona whose session for this community must be deregistered (R-S-3 /
     /// D15) — `None` when nothing inactivated. Carrying the persona (not just a
-    /// bool) is required for multi-membership: the VTC alone no longer identifies
+    /// bool) is required for multi-membership: the VTC alone does not identify
     /// which session to tear down.
     pub inactivated: Option<PersonaId>,
 }
@@ -443,7 +443,7 @@ pub fn handle_join_status_response(
         "rejected" => {
             // The poll is the recovery path for a rejection whose correlated
             // verdict was missed (dropped socket, decision taken while offline).
-            // It now carries the decision's own code/reason/time — so a
+            // It carries the decision's own code/reason/time — so a
             // re-fetched rejection persists the same evidence a live verdict
             // would have (issue #240). A rejection decided before the VTC
             // exposed these leaves them absent → "no reason given".
@@ -561,7 +561,7 @@ pub fn handle_join_verdict(
         VerdictEffect::Deny => {
             // Adopt the VTC's request id and stamp acknowledgement, as the
             // Refer/RequestMore arms do — a denial is just as much a correlated
-            // response, and leaving `receipt_at` unset made it read like a
+            // response, and with `receipt_at` unset it would read like a
             // dropped submit. Persist the policy's own code + reason as the
             // decision evidence (issue #240). No decision time on the verdict
             // wire, so `decided_at` stays absent here.
@@ -589,9 +589,9 @@ pub fn handle_join_verdict(
             // The VTC responded — submit acknowledged — but the decision is
             // deferred to human review; stays Pending.
             //
-            // The verdict envelope carries the VTC's own `requestId`, which this
-            // used to read past: correlation is by `thid`, so nothing needed it.
-            // A referred join is precisely the one that then sits Pending for as
+            // The verdict envelope carries the VTC's own `requestId`. Correlation
+            // is by `thid`, so the exchange itself does not need it, but a
+            // referred join is precisely the one that then sits Pending for as
             // long as a human takes, and without adopting the id here there is
             // no handle to ask about it with — the answer arrives only if the
             // VTC volunteers it.
@@ -1398,12 +1398,12 @@ pub fn vet_vrc_issued(
     // relationship* — their R-DID, or their persona DID for a relationship
     // established without one (`remote_did` equals `remote_p_did` there).
     //
-    // This used to demand the persona DID, which forced the durable credential
-    // to name an identity shared across every one of the sender's
-    // relationships. Binding it to `remote_did` is also strictly tighter:
-    // Gate 1 matched `from_did` — the authenticated DIDComm sender — against
-    // this same field, so the credential is now pinned to the channel it
-    // arrived on rather than to a persona that could have issued it anywhere.
+    // Demanding the persona DID would force the durable credential to name an
+    // identity shared across every one of the sender's relationships. Binding
+    // it to `remote_did` is also strictly tighter: Gate 1 matched `from_did` —
+    // the authenticated DIDComm sender — against this same field, so the
+    // credential is pinned to the channel it arrived on rather than to a
+    // persona that could have issued it anywhere.
     if !vta_sdk::did_scid::same_reference(vrc.issuer(), &relationship.remote_did) {
         return Err(format!(
             "credential issuer ({}) is not the DID the sender uses in this \
@@ -1668,7 +1668,7 @@ pub fn create_finalize_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Asserted on throughout, but no longer named by the handlers themselves:
+    // Asserted on throughout, but not named by the handlers themselves:
     // they go through `CommunityRecord`'s transitions rather than assigning a
     // status directly.
     use crate::config::account::CommunityStatus;
@@ -2136,7 +2136,7 @@ mod tests {
 
     // ----- decision evidence on the four reject paths (issue #240) -----------
 
-    /// A polled rejection now carries code/reason/decidedAt (VTI #1058); the
+    /// A polled rejection carries code/reason/decidedAt (VTI #1058); the
     /// recovery path must persist them, so a rejection whose live verdict was
     /// missed is still explained.
     #[test]
@@ -2720,7 +2720,7 @@ mod tests {
     /// community's own request id matters later: the join outlives the exchange
     /// that produced it, and the id is the only handle
     /// `join-requests/status` can name it by. Correlation here is by `thid`, so
-    /// nothing *needed* the id — which is exactly why it used to be read past.
+    /// nothing else *needs* the id, which makes it easy to read past.
     #[test]
     fn a_verdict_that_stays_pending_adopts_the_communitys_request_id() {
         for effect in ["refer", "request_more"] {
@@ -3206,9 +3206,9 @@ mod tests {
 
     /// The stuck join (#221 / #226): the submit's replies were all lost, so we
     /// hold only our placeholder and poll id-less. The VTC answers with its own
-    /// id — which matched nothing, so the answer was dropped and the join sat
-    /// Pending for good while the community already counted a member. It must
-    /// land, adopt the id, and set the record up to ask for its credentials.
+    /// id, which matches nothing we hold; dropped, the join would sit Pending
+    /// for good while the community already counts a member. It must land,
+    /// adopt the id, and set the record up to ask for its credentials.
     #[test]
     fn an_id_less_poll_answer_resolves_the_join_that_never_got_a_reply() {
         let vtc = "did:webvh:example:vtc";
@@ -3861,11 +3861,11 @@ mod tests {
         assert!(validate_did("did:web:exam\u{200E}ple.com").is_err()); // LRM
     }
 
-    /// OVTC-01: the error path used to truncate the rejected input with a
-    /// *byte* slice, so an invalid DID longer than the cap whose cut landed
-    /// inside a multi-byte scalar panicked instead of returning `Err`. The
-    /// input here is attacker-controlled (an inbound `RelationshipRequest`
-    /// body), so the panic was a remote crash of the whole client.
+    /// OVTC-01: the error path truncates the rejected input. Done with a
+    /// *byte* slice, an invalid DID longer than the cap whose cut lands inside
+    /// a multi-byte scalar panics instead of returning `Err`. The input here is
+    /// attacker-controlled (an inbound `RelationshipRequest` body), so such a
+    /// panic is a remote crash of the whole client.
     #[test]
     fn validate_did_rejects_oversized_multibyte_input_without_panicking() {
         // Each case puts a 2-, 3- and 4-byte scalar across the 64-byte cut.

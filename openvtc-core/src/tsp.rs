@@ -141,7 +141,7 @@ pub async fn send_trust_task(
     to_did: &str,
     tsp_mediator_did: &str,
 ) -> Result<(), OpenVTCError> {
-    // Not best-effort any more: our mediator is the first hop, so a profile that
+    // Not best-effort: our mediator is the first hop, so a profile that
     // cannot name it has no route to build and must fail before the send.
     let our_mediator = profile
         .dids()

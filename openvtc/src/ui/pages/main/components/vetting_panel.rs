@@ -542,9 +542,9 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                     ),
                 ]));
                 // What it would actually disclose, under the name. This is the
-                // whole basis for choosing between two faces, and the picker
-                // used to withhold it — so a face short of a required claim
-                // looked like any other until the card preview refused it.
+                // whole basis for choosing between two faces: without it a face
+                // short of a required claim looks like any other until the card
+                // preview refuses it.
                 if face.claim_types.is_empty() {
                     lines.push(Line::from(Span::styled(
                         "      could not read what it shows",
@@ -2689,8 +2689,8 @@ mod desk_tests {
     }
 
     /// A community known only by its DID is shortened to 48 characters, wider
-    /// than the fixed 30-column pad the header used to have, and the grant ran
-    /// straight into it: `…:pcs-vtcuntil 2027-09-23`.
+    /// than a fixed 30-column pad, which would run the grant straight into it:
+    /// `…:pcs-vtcuntil 2027-09-23`.
     #[test]
     fn the_desk_header_keeps_a_long_name_apart_from_its_grant() {
         let did = "did:webvh:QmZM…VxW1:webvh.storm.ws:pcs-vtc";

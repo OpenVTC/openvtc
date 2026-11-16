@@ -5,7 +5,7 @@
 //! [`plan_relationship_did`] is the only step that touches [`Config`] (it
 //! reserves BIP32 paths), so it runs where `Config` lives;
 //! [`RDidPlan::create_io`] does the I/O and returns the `key_info` entries for
-//! the caller to record. Moved from the CLI (issue #530).
+//! the caller to record.
 
 use affinidi_tdk::{
     TDK,
@@ -136,7 +136,7 @@ impl RDidPlan {
     /// to record. Never touches `Config`.
     ///
     /// `service` + `remote_p_did` are only used to register the post-establishment
-    /// R-DID listener, exactly as the old inline path did right after key creation.
+    /// R-DID listener, right after key creation.
     pub async fn create_io(
         self,
         tdk: &TDK,

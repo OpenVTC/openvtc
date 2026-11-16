@@ -404,12 +404,11 @@ pub async fn list(
 /// reveal (`s`) — so the holder gets the one value they asked for without the
 /// bulk [`list`] having carried every sensitive value into memory.
 ///
-/// One task, one attribute. This used to be a `typePrefix`-scoped listing
-/// filtered here to `attribute_id`, because the family had no by-id read: to
-/// show one email address the agent decrypted every email address the holder
-/// has and sent them all, and its audit trail recorded a listing of the pool
-/// rather than a decision about one value. `persona/attribute/get` is that
-/// read, and the claim type is no longer a parameter because nothing needs it.
+/// One task, one attribute: `persona/attribute/get`, not a `typePrefix`-scoped
+/// listing filtered here to `attribute_id`. A listing would have the agent
+/// decrypt and send every email address the holder has to show one, and its
+/// audit trail would record a listing of the pool rather than a decision about
+/// one value. The claim type is not a parameter because nothing needs it.
 ///
 /// Returns `Ok(None)` when the store no longer has it — deleted, or renamed
 /// out from under the pane.

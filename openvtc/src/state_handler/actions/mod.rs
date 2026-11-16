@@ -929,8 +929,8 @@ pub enum Action {
     ///
     /// Not a paste. `[Ctrl+V]` reads the clipboard where the input lives and
     /// applies the text itself, so only the *failure* needs the loop — which
-    /// is the whole point: the key used to hand its text to a VIC loader
-    /// whatever it was, and a pasted DID came back "not valid JSON".
+    /// is the whole point: a key that handed its text to a VIC loader whatever
+    /// it was would answer a pasted DID with "not valid JSON".
     ///
     /// Reading the clipboard is arboard-only and so fails over SSH, where the
     /// terminal's own bracketed paste still works; the message says that.

@@ -18,7 +18,7 @@
 //!
 //! - an **attribute** stays an **attribute** — *something you say about
 //!   yourself, held once*. This row is the one the table does not translate:
-//!   the friendlier word it used to carry, *fact*, claimed a truth a
+//!   the friendlier word *fact* would claim a truth a
 //!   self-asserted value does not have, and `Facts` already means a verified
 //!   policy input in `vtc-service`. Truth is carried by the provenance line
 //!   beneath the value, never by the noun;
@@ -2697,13 +2697,13 @@ mod tests {
     /// agreed phrase for a generated value — the table bans *"verifier" in
     /// prose*, not that phrase.
     ///
-    /// **"attribute"** came *off* this list on 2026-09-08, and **"fact"** went
-    /// on in its place. The screen used to translate an attribute to a *fact*,
-    /// which asserted a truth the model cannot promise — everything in the pool
-    /// is self-asserted until a credential backs it, and a face exists so a
-    /// person may show an old, pinned, overridden or untrue value — while
-    /// `Facts` already named a *verified* policy input in `vtc-service`. The
-    /// spec word came to the screen instead; provenance carries the truth.
+    /// **"fact"** is on this list and **"attribute"** is not. Translating an
+    /// attribute to a *fact* would assert a truth the model cannot promise —
+    /// everything in the pool is self-asserted until a credential backs it, and
+    /// a face exists so a person may show an old, pinned, overridden or untrue
+    /// value — while `Facts` already names a *verified* policy input in
+    /// `vtc-service`. The screen uses the spec word; provenance carries the
+    /// truth.
     #[test]
     fn the_pane_speaks_the_agreed_vocabulary() {
         const BANNED: &[&str] = &[
@@ -3556,10 +3556,10 @@ mod tests {
 
     /// The history says who a release went to, so that DID has to be one you
     /// can compare against another. A real `did:webvh` is about ninety
-    /// characters and the column holds forty-four, and the cut used to take the
-    /// tail and mark nothing — leaving
+    /// characters and the column holds forty-four, and a cut that takes the
+    /// tail and marks nothing leaves
     /// `did:webvh:QmX38g7H85V9zYdkEucGMcRZbJgyBBWBic`, which has no host, no
-    /// path, and no sign that it had been cut at all.
+    /// path, and no sign that it has been cut at all.
     #[test]
     fn a_disclosure_names_a_verifier_you_can_still_recognise() {
         use openvtc_core::persona::disclosure::DisclosureRow;
@@ -3683,11 +3683,9 @@ mod tests {
     /// A face's masked claims say they are masked, and say which key opens the
     /// selected one — rather than sending the holder to another tab.
     ///
-    /// This is the half the view used to be missing. A face was read as a whole
-    /// with no cursor, so it could offer no per-claim reveal and told the reader
-    /// to go and find the value among their attributes instead. That is a real
-    /// answer to a question nobody asked: the holder is looking at *this* face
-    /// because they want to know what *this* face shows.
+    /// Telling the reader to go and find the value among their attributes
+    /// instead would be a real answer to a question nobody asked: the holder is
+    /// looking at *this* face because they want to know what *this* face shows.
     #[test]
     fn a_face_says_which_key_opens_the_selected_masked_claim() {
         let state = face_with_two_masked_claims();
@@ -3880,10 +3878,8 @@ mod tests {
 
     /// A face masks what it shows too, and a claim left unselected stays masked.
     ///
-    /// This used to assert that the view sent the reader "among your
-    /// attributes" to read a value, because the detail had no cursor of its own
-    /// to reveal from. It has one now, so the pointer to another tab is gone
-    /// and what is left to check is the masking itself.
+    /// The detail has a cursor of its own to reveal from, so what is left to
+    /// check is the masking itself.
     #[test]
     fn a_face_masks_its_values_and_says_where_to_read_one() {
         use openvtc_core::persona::profile::{ProfileDetail, ProfileSummary, ResolvedClaim};

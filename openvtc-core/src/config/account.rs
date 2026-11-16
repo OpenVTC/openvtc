@@ -364,9 +364,8 @@ pub struct CommunityRecord {
     /// Recorded so an unacknowledged join can say *which* transport went
     /// unanswered. Without it the warning reads identically whether the VTC
     /// ignored us, the mediator dropped the frame, or the peer could not
-    /// decode the transport it advertised — which is exactly the ambiguity
-    /// that cost a night of log-reading against a VTC advertising `#tsp` that
-    /// its binary could not speak.
+    /// decode the transport it advertised (a VTC advertising `#tsp` that its
+    /// binary cannot speak looks like the other two).
     ///
     /// `None` on records written before this existed, and on any future path
     /// that submits without going through the join flow.
@@ -952,21 +951,18 @@ impl CommunityRecord {
     /// Whether the community can be asked about this join. Any `Pending` record
     /// qualifies.
     ///
-    /// This used to also require [`Self::request_id_confirmed`], because the
-    /// poll had to quote the community's own id and our placeholder would be
-    /// answered `not found`. That made the mechanism unusable in the one case it
-    /// exists for: a join whose first correlated reply was lost is exactly the
-    /// join whose id we never learned, so it could never be asked about and sat
-    /// `Pending` for good. The other recovery — collecting stored mail — is
-    /// empty once that mail has been acked and deleted, so both failed together
-    /// (#221).
+    /// It does not require [`Self::request_id_confirmed`]: a join whose first
+    /// correlated reply was lost is exactly the join whose id we never learned,
+    /// and it is the one case polling exists for. The other recovery —
+    /// collecting stored mail — is empty once that mail has been acked and
+    /// deleted, so an unconfirmed join that could not be asked about would sit
+    /// `Pending` for good (#221).
     ///
-    /// The community now answers an id-less poll from the authenticated
-    /// applicant (`join-requests/status/0.1` with no `requestId`), and its reply
-    /// carries the id, so an unconfirmed record repairs itself on the first
-    /// answer. `request_id_confirmed` still decides *what we send* — see
-    /// [`Account::pollable_pending`] — it just no longer decides whether we may
-    /// ask at all.
+    /// The community answers an id-less poll from the authenticated applicant
+    /// (`join-requests/status/0.1` with no `requestId`), and its reply carries
+    /// the id, so an unconfirmed record repairs itself on the first answer.
+    /// `request_id_confirmed` decides *what we send* — see
+    /// [`Account::pollable_pending`] — not whether we may ask at all.
     ///
     /// [`Account::pollable_pending`]: crate::config::account::Account::pollable_pending
     pub fn is_pollable_pending(&self) -> bool {
@@ -1132,10 +1128,9 @@ pub struct Account {
     pub vta_url: String,
     /// The top-level context this account administers.
     pub top_context_id: String,
-    // There is no `org_did` any more. Setup used to stamp one operator's own
-    // organisation DID into every account, and nothing but a Settings row ever
-    // read it. A config written before its removal still loads: the key lands
-    // in `extra` below and is carried verbatim, so a downgrade still finds it.
+    // There is no `org_did` field. A config that carries one still loads: the
+    // key lands in `extra` below and is carried verbatim, so a downgrade still
+    // finds it.
     /// Account personas, keyed by stable id.
     #[serde(default)]
     pub personas: HashMap<PersonaId, PersonaRecord>,
@@ -2311,9 +2306,8 @@ mod tests {
 
     /// Every `Pending` join is askable; only what we *quote* differs.
     ///
-    /// This used to list confirmed records only, which meant the joins most in
-    /// need of reconciling — the ones whose reply was lost, so whose id we never
-    /// learned — were the exact ones never polled (#221).
+    /// Unconfirmed records are the joins most in need of reconciling — the ones
+    /// whose reply was lost, so whose id we never learned (#221).
     #[test]
     fn pollable_pending_covers_unconfirmed_joins_and_omits_their_id() {
         let mut acct = Account::default();
@@ -2777,7 +2771,7 @@ mod forward_compat_tests {
         );
     }
 
-    /// A new account no longer writes an `org_did` at all.
+    /// A new account writes no `org_did` at all.
     #[test]
     fn a_new_account_writes_no_org_did() {
         let back = serde_json::to_value(Account::default()).expect("serialize");

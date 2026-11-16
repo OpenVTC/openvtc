@@ -333,7 +333,7 @@ pub fn render(
                 lines.push(Line::from(format!("⚠ {note}")).fg(COLOR_ORANGE));
             }
             // Why a Rejected/Removed membership ended, as the community stated it
-            // (issue #240). The reason always renders — "no reason given" when
+            // (#240). The reason always renders — "no reason given" when
             // none travelled — so a terminal row never silently omits its cause;
             // authority, code, time and disposition appear only when carried.
             if let Some(d) = &c.decision {
@@ -881,17 +881,18 @@ fn push_personhood_challenge(lines: &mut Vec<Line<'static>>, state: &Communities
 /// The key hints for the selected row, gated exactly as the key handler gates
 /// the keys themselves (`ui::pages::main::handle_communities_key`).
 ///
-/// This used to be one unconditional string listing every binding, which
-/// advertised `c` twice — `c: capabilities` and `c: cancel` — and read as a
-/// collision. It never was one: `c` is capabilities on an Active row and cancel
-/// on a Pending one, and the two states are mutually exclusive. The footer was
-/// simply describing a keymap that does not exist.
+/// One unconditional string listing every binding would advertise `c` twice —
+/// `c: capabilities` and `c: cancel` — and read as a collision. It is not one:
+/// `c` is capabilities on an Active row and cancel on a Pending one, and the two
+/// states are mutually exclusive. Such a footer describes a keymap that does
+/// not exist.
 ///
-/// `c` was the visible symptom; every state-gated key had the same defect.
-/// `l`/`m` do nothing on a Pending or Inactive row and `x`/`d` do nothing on an
-/// Active one, yet all four were offered on all three. Showing what the current
-/// row actually accepts fixes the duplicate and the four silent no-ops together,
-/// which is why this is gated per row rather than by special-casing `c`.
+/// `c` is only the visible case; every state-gated key is the same. `l`/`m` do
+/// nothing on a Pending or Inactive row and `x`/`d` do nothing on an Active one,
+/// so offering all four on all three rows would be four silent no-ops. Showing
+/// what the current row actually accepts avoids the duplicate and the no-ops
+/// together, which is why this is gated per row rather than by special-casing
+/// `c`.
 ///
 /// The two ungated keys (`j: join`, `v: show/hide archived`) are always listed:
 /// they act on the panel, not the selection, and stay available when nothing is
@@ -1317,7 +1318,7 @@ mod key_hint_tests {
         );
     }
 
-    // ─── decision evidence (issue #240) ─────────────────────────────────
+    // ─── decision evidence (#240) ───────────────────────────────────────
 
     /// A rejected/removed row spells out why it ended: authority, reason and
     /// timestamp all reach the expanded detail block.

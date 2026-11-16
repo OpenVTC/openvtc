@@ -3,10 +3,10 @@
 //! # Why this exists
 //!
 //! A `MembershipCredential` arrives over DIDComm and is stored in the local
-//! `CommunityRecord` — and, until now, nowhere else. Invitations were pushed to
-//! the VTA's credential vault on receipt; membership credentials were not.
+//! `CommunityRecord`. Invitations are pushed to the VTA's credential vault on
+//! receipt; membership credentials reach it through this sync.
 //!
-//! That is what made membership recovery restore nothing. [`crate::rebuild`]
+//! Without it, membership recovery restores nothing. [`crate::rebuild`]
 //! reconstructs a membership *from* its credential, which is the right design —
 //! the credential is what the community signed, and it names both the community
 //! and the persona. But the credential has to be somewhere a rebuild can find
@@ -15,7 +15,7 @@
 //!
 //! A VMC also simply *belongs* in the credential store. It is a signed artifact
 //! of exactly the kind that vault holds, and keeping it only in a config file
-//! was the anomaly.
+//! would be the anomaly.
 //!
 //! # One pass, run on connect
 //!
@@ -23,7 +23,7 @@
 //! rather than threading one through, this runs as a sync: everything held
 //! locally that the vault does not have is pushed. That covers a fresh join, a
 //! credential received while the VTA was unreachable, and the back-fill of
-//! every membership from before this existed — one mechanism instead of three.
+//! every membership held only in the config — one mechanism instead of three.
 //!
 //! # Published Trust Tasks only
 //!
