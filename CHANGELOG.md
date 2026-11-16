@@ -192,6 +192,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Headless commands say what the `OPENVTC_*` trust-anchor overrides did**
+  ([#611](https://github.com/OpenVTC/openvtc/issues/611)). `community join`, `repo …`,
+  `signing …` and `setup --vta-did` applied the overrides silently; they now print each
+  ignored variable (release builds refuse trust-anchor overrides) and any applied
+  override to stderr, as the TUI shows them in its activity log.
 - **The identity forms draw the caret where the cursor is**
   ([#578](https://github.com/OpenVTC/openvtc/issues/578)). It was always drawn at the end
   of the text, though ←/→ moved the cursor; a choice (the value type) shows none.

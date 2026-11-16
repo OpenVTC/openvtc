@@ -165,7 +165,7 @@ supervision, inbound messages and timers carry on while the join screen is up
    `apply_outcome`, and the driver ignores any that are not for the job it is
    waiting on (an aborted one).
 3. Join actions that arrive while a job is in flight are queued and replayed
-   in order when it finishes. `JoinCancel`, `Exit` and `UXError` are not: they
+   in order when it finishes. `JoinCancel` and `Exit` are not: they
    abort the job at once (`AbortHandle`; the driver frees the domain).
 4. A launch is a saga (`openvtc_core::join::saga::JoinSaga`): context
    registered → persona minted → listener up → submitted → persisted, with

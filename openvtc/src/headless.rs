@@ -71,7 +71,10 @@ pub async fn load_account(
             redact_paths(&e.to_string())
         )
     })?;
-    let _ = crate::env_overrides::apply_env_overrides(&mut config);
+    // No activity log here: what the trust-anchor overrides did goes to stderr.
+    for notice in crate::env_overrides::apply_env_overrides(&mut config).notices() {
+        eprintln!("{}", style(notice).themed(CLI_CAUTION));
+    }
 
     let session = match (admin, session) {
         (Admin::Drop, Some(s)) => {

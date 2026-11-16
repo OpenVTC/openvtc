@@ -48,9 +48,6 @@ impl StateHandler {
                 Action::Exit => {
                      break SetupWizardExit::Interrupted(Interrupted::UserInt);
                 },
-                Action::UXError(interrupted) => {
-                    break  SetupWizardExit::Interrupted(interrupted);
-                },
                 Action::ImportConfig(filename, import_unlock_passphrase, new_unlock_passphrase) => {
                     // Import a configuration backup
                     state.setup.active_page = SetupPage::ConfigImport;

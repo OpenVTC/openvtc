@@ -674,7 +674,7 @@ async fn main() -> Result<()> {
     if let StartingMode::NotSet = starting_mode {
         match load_fast(&profile, unlock_code_arg.as_ref()) {
             Ok(deferred) => {
-                starting_mode = StartingMode::MainPageDeferred(deferred);
+                starting_mode = StartingMode::MainPageDeferred(Box::new(deferred));
             }
             Err(OpenVTCError::ConfigNotFound(_, _)) => {
                 // Configuration not found, start in setup mode

@@ -39,15 +39,6 @@ impl Runtime {
                 return Flow::Exit(Interrupted::UserInt);
             }
 
-            Action::UXError(interrupted) => {
-                // An error has occurred on the UX side
-                if let Err(e) = terminator.terminate(interrupted.clone()) {
-                    debug!("Failed to send terminate signal: {e}");
-                }
-
-                return Flow::Exit(interrupted);
-            }
-
             Action::StartJoin => {
                 // State-B join from the live runtime: reuse the always-on
                 // admin VTA session. The DIDComm service keeps running, and
