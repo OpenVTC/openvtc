@@ -658,9 +658,11 @@ pub(super) fn plan_followup(
     match followup {
         Followup::Started { application_id } => plan_started(state, config, busy, &application_id),
         // desk and tickets
-        Followup::SessionKept { request_id, known } => {
-            plan_session_kept(state, config, &request_id, known)
-        }
+        Followup::SessionKept {
+            request_id,
+            known,
+            previous,
+        } => plan_session_kept(state, config, &request_id, known, previous),
         Followup::AskManifest { community, persona } => {
             plan_ask_manifest(config, &community, persona)
         }

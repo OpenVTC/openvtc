@@ -2571,7 +2571,11 @@ mod tests {
 
         view_mut(&mut state).unwrap().status = None;
         lose(&mut state, later);
-        plan_tick(&mut state, later + REPLY_WINDOW + Duration::from_secs(1), Utc::now());
+        plan_tick(
+            &mut state,
+            later + REPLY_WINDOW + Duration::from_secs(1),
+            Utc::now(),
+        );
         let v = view(&state);
         assert_eq!(v.link.as_ref().unwrap().failures, 2);
         assert!(v.status.is_none(), "the same failure is not said again");

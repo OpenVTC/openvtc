@@ -205,8 +205,13 @@ pub(super) enum Followup {
     Started { application_id: String },
     // desk and tickets
     /// A session's signed document is kept: close the form, save saying the
-    /// match code, and send it.
-    SessionKept { request_id: String, known: bool },
+    /// match code, and send it — a send that cannot start puts the request
+    /// back to `previous`.
+    SessionKept {
+        request_id: String,
+        known: bool,
+        previous: DeskSnapshot,
+    },
     /// Ask `community` for its manifest as `persona`, unless the questions
     /// before this one just did.
     AskManifest {
@@ -246,7 +251,12 @@ impl Abort {
     /// Undo, then say why. A plan whose own build fails after it changed the
     /// book gives up through this too, so a failure takes back exactly what
     /// was changed for the attempt, whichever step it fails at.
-    pub(super) fn apply(self, state: &mut State, config: &mut Config, error: impl std::fmt::Display) {
+    pub(super) fn apply(
+        self,
+        state: &mut State,
+        config: &mut Config,
+        error: impl std::fmt::Display,
+    ) {
         for undo in self.undo {
             undo.apply(state, config);
         }
@@ -281,6 +291,9 @@ pub(super) enum Undo {
     },
     /// The withdrawal of statement `0` was never sent.
     NotWithdrawn(String),
+    /// The page has not asked community `0` what it requires: the question
+    /// never went, so the next session asks again.
+    NotRequested(String),
 }
 
 impl Undo {
@@ -322,6 +335,11 @@ impl Undo {
                 if let Some(s) = book.issued.iter_mut().find(|s| s.id == statement_id) {
                     s.withdrawal = None;
                 }
+            }
+            Undo::NotRequested(community) => {
+                panel(state)
+                    .requirements_requested
+                    .retain(|c| *c != community);
             }
         }
     }

@@ -1662,9 +1662,9 @@ async fn opening_a_session_before_the_requirements_without_keys_gives_up_unsent(
 
     assert_abandoned(&rt, "Could not ask the community");
     assert!(!asked(&rt, QueryKind::Manifest));
-    // Marked as asked although nothing went: the next Enter opens the session
-    // without the requirements.
-    assert_eq!(page(&rt).requirements_requested, vec![VTC.to_string()]);
+    // Not marked as asked, since nothing went: the next Enter asks again
+    // rather than opening the session without the requirements.
+    assert!(page(&rt).requirements_requested.is_empty());
     assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
     assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
     assert!(!rt.save.is_pending());
@@ -1751,7 +1751,7 @@ async fn opening_a_session_while_busy_opens_nothing() {
 }
 
 #[tokio::test]
-async fn opening_a_session_without_keys_leaves_it_open_and_unsaved() {
+async fn opening_a_session_without_keys_puts_the_request_back() {
     let (mut rt, _h) = runtime().await;
     let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
     let id = desk_request(&mut rt, persona);
@@ -1761,12 +1761,9 @@ async fn opening_a_session_without_keys_leaves_it_open_and_unsaved() {
     act(&mut rt, VettingAction::Submit).await;
 
     assert_abandoned(&rt, "Could not send the session");
-    // The session the book opened before the signing stays open, its document
-    // never kept, and nothing is saved.
-    let DeskState::Session { session } = desk_state(&rt, &id) else {
-        panic!("the session stays open");
-    };
-    assert!(session.document.is_none());
+    // The session the book opened before the signing is undone: the request
+    // stands where it stood, as on disk, and nothing is saved.
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
     assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
     assert!(!rt.save.is_pending());
 }
