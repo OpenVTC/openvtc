@@ -141,13 +141,15 @@ pub(super) enum Step {
     },
     // Hidden vetting
     /// Sign `document` as `persona` and send it as the client's own step
-    /// ([`Claim::Unheld`]). A failure is said as `"{failed}: {error}"` in the
-    /// status line, and the steps after it still run.
+    /// ([`Claim::Unheld`]). A failure applies `undo` in order, is said as
+    /// `"{failed}: {error}"` in the status line, and the steps after it still
+    /// run.
     SendOrSay {
         persona: PersonaId,
         document: Box<Document>,
         sent: Box<Sent>,
         failed: &'static str,
+        undo: Vec<Undo>,
     },
     /// Hand an unsigned `message` from `from` to `to` to a background job,
     /// held as `claim` says ([`spawn_send`]).
@@ -291,6 +293,8 @@ pub(super) enum Undo {
     },
     /// The withdrawal of statement `0` was never sent.
     NotWithdrawn(String),
+    /// The draw `0` was never sent, so it is not in flight.
+    NotDrawing(String),
     /// The page has not asked community `0` what it requires: the question
     /// never went, so the next session asks again.
     NotRequested(String),
@@ -335,6 +339,9 @@ impl Undo {
                 if let Some(s) = book.issued.iter_mut().find(|s| s.id == statement_id) {
                     s.withdrawal = None;
                 }
+            }
+            Undo::NotDrawing(document_id) => {
+                book.draws_in_flight.remove(&document_id);
             }
             Undo::NotRequested(community) => {
                 panel(state)
@@ -431,8 +438,12 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                 document,
                 sent,
                 failed,
+                undo,
             } => {
                 if let Err(e) = sign_and_send(ctx, persona, *document, *sent, Claim::Unheld).await {
+                    for undo in undo {
+                        undo.apply(ctx.state, ctx.config);
+                    }
                     show(ctx.state, Status::error(format!("{failed}: {e}")));
                 }
             }

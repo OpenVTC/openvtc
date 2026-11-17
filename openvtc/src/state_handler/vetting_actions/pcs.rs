@@ -19,7 +19,7 @@ use openvtc_core::vetting::wire;
 use serde_json::Value;
 
 use super::dispatch::show;
-use super::effect::{Step, VettingEffect, run};
+use super::effect::{Step, Undo, VettingEffect, run};
 use super::faces::application_context;
 use super::hidden::{cannot_attest_hidden, vetter_context};
 use super::jobs::Sent;
@@ -512,8 +512,10 @@ fn plan_recovery(
 }
 
 /// Plan sending the community the enrolment request the VTA built: recorded as asked and its
-/// question filed, then signed and sent as the client's own step. Both stay when the send
-/// fails; the failure is said.
+/// question filed, then signed and sent as the client's own step. A signing that fails un-files
+/// the question, as a send that fails off the loop does, and is said. The time asked stays: the
+/// VTA holds the request it built either way, and asking again within
+/// [`ENROLMENT_ANSWER_WAIT`](openvtc_core::vetting::book::ENROLMENT_ANSWER_WAIT) would replace it.
 fn plan_enrolment(
     state: &mut State,
     config: &mut Config,
@@ -549,7 +551,7 @@ fn plan_enrolment(
         )),
     );
     let sent = Sent::Query {
-        document_id,
+        document_id: document_id.clone(),
         community: community.to_string(),
         kind: QueryKind::PcsRoot,
     };
@@ -558,12 +560,13 @@ fn plan_enrolment(
         document: Box::new(document),
         sent: Box::new(sent),
         failed: "Could not ask to enrol",
+        undo: vec![Undo::ForgetQuery(document_id)],
     }])
 }
 
 /// Plan sending the community a draw the VTA built: its question filed and the draw recorded
-/// in flight, then signed and sent as the client's own step. Both stay when the send fails;
-/// the failure is said.
+/// in flight, then signed and sent as the client's own step. A signing that fails takes both
+/// back and is said; the schedule owes the draw again on its next pass.
 fn plan_draw(
     state: &mut State,
     config: &mut Config,
@@ -594,7 +597,7 @@ fn plan_draw(
         .draws_in_flight
         .insert(document_id.clone(), (request.label.clone(), request.tick));
     let sent = Sent::Query {
-        document_id,
+        document_id: document_id.clone(),
         community: community.to_string(),
         kind: QueryKind::PcsTokens,
     };
@@ -603,6 +606,10 @@ fn plan_draw(
         document: Box::new(document),
         sent: Box::new(sent),
         failed: "Could not draw tokens",
+        undo: vec![
+            Undo::ForgetQuery(document_id.clone()),
+            Undo::NotDrawing(document_id),
+        ],
     }])
 }
 
@@ -1041,6 +1048,7 @@ mod tests {
             Step::SendOrSay {
                 persona: signer,
                 failed,
+                undo,
                 ..
             },
         ] = effect.0.as_slice()
@@ -1049,6 +1057,14 @@ mod tests {
         };
         assert_eq!(*signer, persona);
         assert_eq!(*failed, "Could not ask to enrol");
+        let filed = config
+            .private
+            .vetting
+            .waiting_on(FIRST, QueryKind::PcsRoot)
+            .unwrap()
+            .document_id
+            .clone();
+        assert_eq!(undo, &vec![Undo::ForgetQuery(filed)]);
     }
 
     #[test]

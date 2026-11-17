@@ -261,6 +261,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   document failed to build, the request stayed declined, or the statement marked
   withdrawn, in memory with nothing sent. Both are now put back, as they already were
   when the signing or the send failed.
+- **Hidden vetting: an enrolment or draw that cannot be signed is un-filed**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). When the persona's key lookup or
+  signing failed, the enrolment question, and a draw's question and in-flight record,
+  stayed in the book as though sent until the reply window ran out. They are now taken
+  back, as a failed send already did, so the schedule asks again on its next pass.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

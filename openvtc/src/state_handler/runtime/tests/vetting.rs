@@ -3134,7 +3134,7 @@ mod hidden {
     }
 
     #[tokio::test]
-    async fn an_enrolment_without_keys_is_said_and_left_filed() {
+    async fn an_enrolment_without_keys_is_said_and_unfiled() {
         let (mut rt, _h) = runtime().await;
         let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
         engine(&mut rt, persona);
@@ -3148,9 +3148,10 @@ mod hidden {
             !logged(&rt.state, "Could not ask to enrol"),
             "said, not logged"
         );
-        // Recorded as asked, and left so: the question expires on its window.
+        // The question is un-filed, as a failed send's is; the time asked
+        // stays, since the VTA holds the request it built either way.
         assert!(held(&rt).enrol_asked_at.is_some());
-        assert!(asked(&rt, QueryKind::PcsRoot));
+        assert!(!asked(&rt, QueryKind::PcsRoot));
         assert!(rt.save.is_pending());
     }
 
@@ -3181,7 +3182,7 @@ mod hidden {
     }
 
     #[tokio::test]
-    async fn a_draw_without_keys_is_said_and_left_in_flight() {
+    async fn a_draw_without_keys_is_said_and_not_left_in_flight() {
         let (mut rt, _h) = runtime().await;
         let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
         engine(&mut rt, persona);
@@ -3191,8 +3192,8 @@ mod hidden {
         let s = status(&rt);
         assert_eq!(s.severity, Severity::Error);
         assert!(s.text.starts_with("Could not draw tokens: "), "{}", s.text);
-        assert!(asked(&rt, QueryKind::PcsTokens));
-        assert_eq!(rt.config.private.vetting.draws_in_flight.len(), 1);
+        assert!(!asked(&rt, QueryKind::PcsTokens));
+        assert!(rt.config.private.vetting.draws_in_flight.is_empty());
     }
 
     #[tokio::test]
@@ -3211,8 +3212,10 @@ mod hidden {
         )
         .await;
 
-        assert!(asked(&rt, QueryKind::PcsRoot));
-        assert!(asked(&rt, QueryKind::PcsTokens));
+        // Each failure undoes its own question; the second still ran.
+        assert!(!asked(&rt, QueryKind::PcsRoot));
+        assert!(!asked(&rt, QueryKind::PcsTokens));
+        assert!(held(&rt).enrol_asked_at.is_some(), "the enrolment ran");
         assert!(
             status(&rt).text.starts_with("Could not draw tokens: "),
             "the last word stands"
