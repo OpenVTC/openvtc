@@ -160,7 +160,7 @@ fn a_vote_reads_the_election_again_then_registers() {
     view(&mut state).flow = Some(Flow {
         election: "agm".into(),
         intent: Intent::Vote,
-        step: Step::Reading,
+        step: FlowStep::Reading,
     });
     arm(
         &mut state,
@@ -176,7 +176,7 @@ fn a_vote_reads_the_election_again_then_registers() {
     );
     let v = view(&mut state);
     assert!(matches!(v.next, Some(Next::Register)));
-    assert_eq!(v.flow.as_ref().unwrap().step, Step::Registering);
+    assert_eq!(v.flow.as_ref().unwrap().step, FlowStep::Registering);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn a_closed_election_takes_no_ticket() {
     view(&mut state).flow = Some(Flow {
         election: "agm".into(),
         intent: Intent::Ticket,
-        step: Step::Reading,
+        step: FlowStep::Reading,
     });
     arm(
         &mut state,
@@ -213,7 +213,7 @@ fn voting_without_a_ticket_takes_it_and_stops() {
     view(&mut state).flow = Some(Flow {
         election: "agm".into(),
         intent: Intent::Vote,
-        step: Step::Registering,
+        step: FlowStep::Registering,
     });
     let ticket = TicketRequest {
         election_id: "agm".into(),
@@ -269,7 +269,7 @@ fn voting_with_a_ticket_held_opens_the_ballot() {
     view(&mut state).flow = Some(Flow {
         election: "agm".into(),
         intent: Intent::Vote,
-        step: Step::Registering,
+        step: FlowStep::Registering,
     });
     vta(
         &mut state,
@@ -309,7 +309,7 @@ fn a_cast_is_resent_unchanged_only_when_its_answer_was_lost() {
     view(&mut state).flow = Some(Flow {
         election: "agm".into(),
         intent: Intent::Vote,
-        step: Step::Building,
+        step: FlowStep::Building,
     });
     let cast = Cast {
         document: json!({ "id": "urn:uuid:cast-1", "issuer": "did:key:z6MkOnce" }),
@@ -364,7 +364,7 @@ fn a_community_refusal_ends_the_flow_in_words() {
     view(&mut state).flow = Some(Flow {
         election: "agm".into(),
         intent: Intent::Ticket,
-        step: Step::Issuing,
+        step: FlowStep::Issuing,
     });
     arm(
         &mut state,
@@ -526,7 +526,7 @@ fn signed_reads_and_claims_go_to_the_community_as_the_vta_signed_them() {
     view(&mut state).flow = Some(Flow {
         election: "agm".into(),
         intent: Intent::Ticket,
-        step: Step::Registering,
+        step: FlowStep::Registering,
     });
     let claim = json!({ "id": "urn:uuid:claim-1", "payload": { "presentation": {} } });
     vta(
@@ -535,7 +535,7 @@ fn signed_reads_and_claims_go_to_the_community_as_the_vta_signed_them() {
     );
     let v = view(&mut state);
     assert!(matches!(v.next, Some(Next::SendIssueDocument(ref d)) if *d == claim));
-    assert_eq!(v.flow.as_ref().unwrap().step, Step::Issuing);
+    assert_eq!(v.flow.as_ref().unwrap().step, FlowStep::Issuing);
 }
 
 /// An answer from the community a notified election is held by is taken while the view asks
@@ -603,4 +603,152 @@ fn an_answer_taken_or_failed_is_no_longer_awaited_at_the_gate() {
     );
     assert!(!pending.is_awaited(ReplyKind::ElectionAnswer, VTC, "t1"));
     assert!(view(&mut state).pending.is_none());
+}
+
+// ---- plan / plan_next / plan_notified: pure, nothing changed before a claim ----
+
+fn the_send(effect: &ElectionsEffect) -> &Send {
+    match effect.steps.last() {
+        Some(Step::Send(send)) => send,
+        _ => panic!("the last step is a send"),
+    }
+}
+
+fn with_listed() -> State {
+    let mut state = state_with_view();
+    view(&mut state).take_page(
+        vec![serde_json::from_value(item("agm", "registration")).unwrap()],
+        true,
+    );
+    state
+}
+
+/// Opening an election is planned as its read, the detail screen committed
+/// only once the read is under way.
+#[test]
+fn a_show_is_planned_with_the_detail_screen_as_the_commit() {
+    let mut state = with_listed();
+    let config = crate::state_handler::dispatch_util::test_config();
+    let effect = plan(&mut state, &config, false, Act::Show);
+    let send = the_send(&effect);
+    assert_eq!(send.to, VTC);
+    assert_eq!(
+        send.purpose,
+        Purpose::Show {
+            election: "agm".into(),
+            intent: Intent::View
+        }
+    );
+    assert_eq!(send.commit, Some(Commit::Showing));
+    assert_eq!(send.refusal, Some(super::Refusal::Busy));
+    let v = view(&mut state);
+    assert_eq!(v.screen, Screen::List);
+    assert!(v.status.is_none());
+}
+
+/// A ticket is planned as the election's read again, the flow committed only
+/// once it is under way.
+#[test]
+fn a_ticket_is_planned_with_its_flow_as_the_commit() {
+    let mut state = state_with_view();
+    let v = view(&mut state);
+    v.screen = Screen::Detail;
+    v.shown = Some(shown("registration"));
+    let config = crate::state_handler::dispatch_util::test_config();
+    let effect = plan(&mut state, &config, true, Act::TakeTicket);
+    let send = the_send(&effect);
+    assert_eq!(
+        send.commit,
+        Some(Commit::Reading(Flow {
+            election: "agm".into(),
+            intent: Intent::Ticket,
+            step: FlowStep::Reading,
+        }))
+    );
+    assert!(view(&mut state).flow.is_none());
+}
+
+/// A read presenting a membership is the VTA's to sign: the flow starts now
+/// and nothing is sent.
+#[test]
+fn a_ticket_presenting_a_membership_is_planned_with_nothing_to_send() {
+    let mut state = state_with_view();
+    let v = view(&mut state);
+    v.screen = Screen::Detail;
+    v.shown = Some(shown("registration"));
+    v.presenting = Some("did:key:zParty".into());
+    let config = crate::state_handler::dispatch_util::test_config();
+    let effect = plan(&mut state, &config, true, Act::TakeTicket);
+    assert!(effect.steps.is_empty());
+    let v = view(&mut state);
+    assert!(v.flow.is_some());
+    assert!(matches!(v.next, Some(Next::ReadPresenting { .. })));
+}
+
+/// The list is read from the panel's own community; an election, and a
+/// document the VTA signed, from the community holding it.
+#[test]
+fn the_list_goes_to_the_panels_community_and_an_election_to_its_holder() {
+    let mut state = state_with_view();
+    view(&mut state).target = "did:key:zHolder".into();
+    let page = plan_next(
+        &mut state,
+        false,
+        Next::ListPage {
+            cursor: "c1".into(),
+        },
+    );
+    assert_eq!(the_send(&page).to, VTC);
+    view(&mut state).shown = Some(shown("registration"));
+    let issue = plan_next(
+        &mut state,
+        false,
+        Next::SendIssueDocument(json!({ "id": "urn:uuid:x" })),
+    );
+    let send = the_send(&issue);
+    assert_eq!(send.to, "did:key:zHolder");
+    assert_eq!(
+        send.purpose,
+        Purpose::Issue {
+            election: "agm".into()
+        }
+    );
+    assert_eq!(issue.taken, Taken::ByLastStep);
+}
+
+/// A refresh step on a busy lane, or while the view waits, is not taken.
+#[test]
+fn a_refresh_step_on_a_busy_lane_is_planned_as_not_taken() {
+    let mut state = state_with_view();
+    let effect = plan_next(&mut state, true, Next::Refresh);
+    assert!(effect.steps.is_empty());
+    assert_eq!(effect.taken, Taken::No);
+    arm(&mut state, Purpose::List);
+    assert_eq!(plan_next(&mut state, false, Next::Refresh).taken, Taken::No);
+}
+
+/// The held notifications are asked only when due, with a VTA whose lane is
+/// free; no longer due only once asked — or at once with no VTA to ask.
+#[test]
+fn the_held_notifications_are_planned_only_when_due_and_free() {
+    let mut state = state_with_view();
+    assert!(plan_notified(&mut state, true, false).is_none(), "not due");
+
+    view(&mut state).notified_due = true;
+    assert!(plan_notified(&mut state, true, true).is_none(), "busy");
+    assert!(view(&mut state).notified_due);
+
+    assert!(matches!(
+        plan_notified(&mut state, true, false),
+        Some(Step::Ask {
+            ask: VtaAsk::Notified,
+            commit: Some(Commit::NotifiedAsked),
+        })
+    ));
+    assert!(view(&mut state).notified_due, "due until asked");
+
+    assert!(plan_notified(&mut state, false, false).is_none());
+    let v = view(&mut state);
+    assert!(!v.notified_due);
+    assert!(matches!(v.notified_phase, NotifiedPhase::Unavailable(_)));
 }
