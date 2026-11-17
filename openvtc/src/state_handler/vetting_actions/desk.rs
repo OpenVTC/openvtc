@@ -542,7 +542,7 @@ pub(super) enum Asked {
         now: DateTime<Utc>,
     },
     /// The client's own binding question `document_id` to `community`: a
-    /// failure un-files it and is said.
+    /// failure un-files it, and is said and logged.
     Binding {
         community: String,
         document_id: String,
@@ -587,13 +587,13 @@ impl Asked {
                 document_id,
             } => {
                 config.private.vetting.forget_query(&document_id);
-                show(
-                    state,
-                    Status::error(format!(
-                        "Could not ask {} which hidden-vetting key it holds for you: {error}",
-                        community_display(config, &community)
-                    )),
+                let message = format!(
+                    "Could not ask {} which hidden-vetting key it holds for you: {error}",
+                    community_display(config, &community)
                 );
+                tracing::warn!(community = %community, "{message}");
+                state.main_page.log(message.clone());
+                show(state, Status::error(message));
             }
             Asked::Ticket(pending) => ticket_unsent(state, config, pending, error),
         }

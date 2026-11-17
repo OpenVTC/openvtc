@@ -146,8 +146,8 @@ pub(super) enum Step {
     // Hidden vetting
     /// Sign `document` as `persona` and send it as the client's own step
     /// ([`Claim::Unheld`]). A failure applies `undo` in order, is said as
-    /// `"{failed}: {error}"` in the status line, and the steps after it still
-    /// run.
+    /// `"{failed}: {error}"` in the status line and the activity log, and the
+    /// steps after it still run.
     SendOrSay {
         persona: PersonaId,
         document: Box<Document>,
@@ -453,7 +453,10 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                     for undo in undo {
                         undo.apply(ctx.state, ctx.config);
                     }
-                    show(ctx.state, Status::error(format!("{failed}: {e}")));
+                    let message = format!("{failed}: {e}");
+                    tracing::warn!("{message}");
+                    ctx.state.main_page.log(message.clone());
+                    show(ctx.state, Status::error(message));
                 }
             }
             Step::SendMessage {

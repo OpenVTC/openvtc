@@ -2412,7 +2412,8 @@ async fn a_binding_question_without_keys_says_so_and_is_unfiled() {
         "{}",
         s.text
     );
-    assert!(!logged(
+    // Logged as well as said, so it outlives the status line (R6.5).
+    assert!(logged(
         &rt.state,
         "which hidden-vetting key it holds for you"
     ));
@@ -3183,8 +3184,8 @@ mod hidden {
         assert_eq!(s.severity, Severity::Error);
         assert!(s.text.starts_with("Could not ask to enrol: "), "{}", s.text);
         assert!(
-            !logged(&rt.state, "Could not ask to enrol"),
-            "said, not logged"
+            logged(&rt.state, "Could not ask to enrol"),
+            "logged as well as said, so it outlives the status line"
         );
         // The question is un-filed, as a failed send's is; the time asked
         // stays, since the VTA holds the request it built either way.
@@ -3230,6 +3231,7 @@ mod hidden {
         let s = status(&rt);
         assert_eq!(s.severity, Severity::Error);
         assert!(s.text.starts_with("Could not draw tokens: "), "{}", s.text);
+        assert!(logged(&rt.state, "Could not draw tokens"));
         assert!(!asked(&rt, QueryKind::PcsTokens));
         assert!(rt.config.private.vetting.draws_in_flight.is_empty());
     }

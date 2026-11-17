@@ -316,6 +316,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The warning that the settings
   could not be read (and the defaults are used) was cleared at once by the read the
   panel starts, so it was never seen. It is now shown after that read starts.
+- **Hidden vetting: enrolment, draw and key-binding failures are logged**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). A hidden-vetting enrolment or
+  token draw that could not be signed, and a key-binding question that could not be sent,
+  were shown only on the status line, so the next status replaced them. They now go to
+  the activity log too.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard
