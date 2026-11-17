@@ -1,9 +1,16 @@
 # Advisories to ignore (transitive dependencies we cannot directly update).
 #
+<<<<<<< HEAD
 # All entries below are in crates pulled transitively through affinidi-tdk,
 # vta-sdk, didwebvh-rs, and other third-party workspace dependencies — not
 # in anything openvtc depends on directly. Each entry is reviewed when a
 # fix becomes available upstream.
+=======
+# Keep this list and `deny.toml`'s `[advisories] ignore` in step: same IDs, same
+# reasons. The one deliberate difference is RUSTSEC-2026-0330/0331 below, which
+# cargo-deny never sees. Prune an entry as soon as it stops matching.
+# Last checked against `Cargo.lock`: 2026-11-17.
+>>>>>>> 886b259 (chore(deny): ignore the chrono, chrono-tz and humantime unmaintained notices (#617))
 [advisories]
 ignore = [
     # rsa: Marvin Attack timing sidechannel — no patch available yet.
@@ -36,6 +43,17 @@ ignore = [
     # paste: unmaintained build-time proc-macro via vta-service/vti-common
     # (utoipa-axum). No runtime code.
     "RUSTSEC-2024-0436",
+
+    # chrono / chrono-tz / humantime: "unmaintained" notices published
+    # 2026-11-17, no vulnerability and no safe upgrade. chrono is a direct
+    # dependency and is used throughout the SDK stack (affinidi-*, didwebvh-rs,
+    # dtg-credentials, did-git-sign); chrono-tz comes with it; humantime is dev
+    # graph only (affinidi-messaging-mediator, via the test mediator). Moving off
+    # chrono is an ecosystem change, not ours alone. Re-check on the next
+    # SDK bump, or when chronotope/chrono#1768 names a successor.
+    "RUSTSEC-2026-0542",
+    "RUSTSEC-2026-0543",
+    "RUSTSEC-2026-0555",
 
     # libcrux-kem 0.0.9: panics on short hybrid-KEM seeds / keys, fixed in
     # 0.0.10. Reached only through the vta-service *dev*-dependency (MockVta →

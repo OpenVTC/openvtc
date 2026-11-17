@@ -17,6 +17,14 @@ no-default-features = false
 [advisories]
 version = 2
 yanked = "deny"
+<<<<<<< HEAD
+=======
+# Keep this list and `.cargo/audit.toml` in step: same IDs, same reasons. The
+# one deliberate difference is RUSTSEC-2026-0330/0331 (libcrux-kem), which only
+# cargo-audit sees; see the note there. Prune an entry as soon as it stops
+# matching: cargo-deny warns `advisory-not-detected` when one never fires.
+# Last checked against the graph: 2026-11-17.
+>>>>>>> 886b259 (chore(deny): ignore the chrono, chrono-tz and humantime unmaintained notices (#617))
 ignore = [
     # RUSTSEC-2023-0071: Marvin Attack — timing sidechannel in the `rsa`
     # crate's RSA key operations. There is no upstream patch yet; the
@@ -45,6 +53,16 @@ ignore = [
     # elliptic-curve 0.13 and cx448. No 0.5.x patch exists. Falls off when
     # pgp moves to elliptic-curve 0.14 — re-check on the next pgp bump.
     "RUSTSEC-2026-0387",
+    # chrono / chrono-tz / humantime: "unmaintained" notices published
+    # 2026-11-17, no vulnerability and no safe upgrade. chrono is a direct
+    # dependency and is used throughout the SDK stack (affinidi-*, didwebvh-rs,
+    # dtg-credentials, did-git-sign); chrono-tz comes with it; humantime is dev
+    # graph only (affinidi-messaging-mediator, via the test mediator). Moving off
+    # chrono is an ecosystem change, not ours alone. Re-check on the next
+    # SDK bump, or when chronotope/chrono#1768 names a successor.
+    "RUSTSEC-2026-0542",
+    "RUSTSEC-2026-0543",
+    "RUSTSEC-2026-0555",
 ]
 # Removed with the vta-sdk 0.34 refresh: RUSTSEC-2025-0134 (rustls-pemfile
 # unmaintained) no longer matches anything in the graph, and cargo-deny warns
