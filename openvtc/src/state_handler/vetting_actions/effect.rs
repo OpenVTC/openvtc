@@ -202,9 +202,12 @@ impl PcsCommit {
 /// they changed — the page a save re-synced, or the domain a send claimed.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Followup {
-    /// An application was started and saved: select its row, then ask its
-    /// community what it requires.
-    Started { application_id: String },
+    /// An application was started and saved, saying `started`: select its
+    /// row, then ask its community what it requires.
+    Started {
+        application_id: String,
+        started: String,
+    },
     // desk and tickets
     /// A session's signed document is kept: close the form, save saying the
     /// match code, and send it — a send that cannot start puts the request

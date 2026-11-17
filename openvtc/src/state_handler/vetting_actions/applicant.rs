@@ -22,6 +22,7 @@ use super::effect::{Abort, Followup, Step, Undo, VettingEffect};
 use super::jobs::Sent;
 use super::send::{Claim, claimable, give_up, persona_did};
 use super::words::community_display;
+use crate::state_handler::background_dispatch::{DispatchDomain, InFlight};
 use crate::state_handler::main_page::content::{
     DIRECTORY_LABELS, DIRECTORY_METHODS, DirectoryView, VettingMode, VettingTab, row_of,
 };
@@ -276,19 +277,26 @@ pub(super) fn plan_start_application(
         v.mode = VettingMode::List;
         v.tab = VettingTab::Applications;
     }
+    let started = format!("Application started.{unadopted}");
     VettingEffect(vec![
-        Step::Persist(format!("Application started.{unadopted}")),
-        Step::Then(Followup::Started { application_id }),
+        Step::Persist(started.clone()),
+        Step::Then(Followup::Started {
+            application_id,
+            started,
+        }),
     ])
 }
 
 /// [`Followup::Started`]: the saved application's row is on the page now, so
-/// select it, then ask its community what it requires.
+/// select it, then ask its community what it requires. On a busy domain the
+/// question waits, and the status keeps `started` — the application is saved
+/// — with why its requirements were not asked for.
 pub(super) fn plan_started(
     state: &mut State,
     config: &Config,
     busy: bool,
     application_id: &str,
+    started: &str,
 ) -> VettingEffect {
     if let Some(i) = panel(state)
         .applications
@@ -297,7 +305,20 @@ pub(super) fn plan_started(
     {
         panel(state).selected = i;
     }
+    if busy {
+        show(state, Status::warning(started_while_busy(started)));
+        return VettingEffect::none();
+    }
     plan_refresh_requirements(state, config, busy, application_id)
+}
+
+/// What an application started while another vetting send holds the domain
+/// says: that it started, and that its requirements are still to be asked.
+fn started_while_busy(started: &str) -> String {
+    format!(
+        "{started} Its requirements were not asked for yet: {} Press m to ask once it finishes.",
+        InFlight::busy_message(DispatchDomain::Vetting)
+    )
 }
 
 /// Send a vetting request carrying the ticket from a `vetting-ticket:` link.
@@ -849,7 +870,8 @@ mod tests {
         assert_eq!(
             followup,
             &Followup::Started {
-                application_id: app.id.clone()
+                application_id: app.id.clone(),
+                started: message.clone(),
             }
         );
         assert!(matches!(panel(&mut state).mode, VettingMode::List));
@@ -872,11 +894,22 @@ mod tests {
             .id
             .clone();
         state.main_page.sync_from_config(&config);
-        let effect = plan_started(&mut state, &config, true, &second);
+        let effect = plan_started(&mut state, &config, true, &second, "Application started.");
         let v = panel(&mut state);
         assert_eq!(v.applications[v.selected].id, second);
-        assert!(effect.0.is_empty(), "the refresh is refused as busy");
-        assert_eq!(status(&mut state), busy_refusal());
+        assert!(effect.0.is_empty(), "the refresh waits on the busy domain");
+        // The start is still said, with why the requirements wait.
+        let said = status(&mut state);
+        assert_eq!(said.severity, Severity::Warning);
+        assert!(
+            said.text.starts_with("Application started. "),
+            "{}",
+            said.text
+        );
+        assert!(
+            said.text
+                .contains(&InFlight::busy_message(DispatchDomain::Vetting))
+        );
     }
 
     fn code_ticket() -> request::v0_1::Ticket {

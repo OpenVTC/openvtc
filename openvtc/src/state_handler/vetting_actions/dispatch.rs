@@ -656,7 +656,10 @@ pub(super) fn plan_followup(
     followup: Followup,
 ) -> VettingEffect {
     match followup {
-        Followup::Started { application_id } => plan_started(state, config, busy, &application_id),
+        Followup::Started {
+            application_id,
+            started,
+        } => plan_started(state, config, busy, &application_id, &started),
         // desk and tickets
         Followup::SessionKept {
             request_id,

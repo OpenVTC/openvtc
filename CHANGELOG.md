@@ -266,6 +266,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   signing failed, the enrolment question, and a draw's question and in-flight record,
   stayed in the book as though sent until the reply window ran out. They are now taken
   back, as a failed send already did, so the schedule asks again on its next pass.
+- **Vetting: starting an application while another vetting send runs says it started**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The application was saved, but
+  the busy warning replaced "Application started.", so it read as refused. The status
+  now says it started and that its requirements wait until the other send finishes (m
+  asks then).
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

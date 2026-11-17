@@ -201,7 +201,7 @@ async fn an_application_to_something_not_a_did_is_refused() {
 }
 
 #[tokio::test]
-async fn starting_an_application_while_busy_saves_it_and_asks_nothing() {
+async fn starting_an_application_while_busy_saves_it_and_says_its_requirements_wait() {
     let (mut rt, _h) = runtime().await;
     fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
     rt.state.main_page.sync_from_config(&rt.config);
@@ -215,8 +215,17 @@ async fn starting_an_application_while_busy_saves_it_and_asks_nothing() {
     assert!(logged(&rt.state, "Application started."));
     assert!(matches!(page(&rt).mode, VettingMode::List));
     assert_eq!(page(&rt).tab, VettingTab::Applications);
-    // The refresh that follows is what is refused.
-    assert_busy_refusal(&rt);
+    // The refresh that follows waits on the busy domain, and the status says
+    // both: the application started, and why its requirements wait.
+    let s = status(&rt);
+    assert_eq!(s.severity, Severity::Warning);
+    assert!(s.text.starts_with("Application started."), "{}", s.text);
+    assert!(
+        s.text
+            .contains(&InFlight::busy_message(DispatchDomain::Vetting)),
+        "{}",
+        s.text
+    );
     assert!(!asked(&rt, QueryKind::Manifest));
 }
 
