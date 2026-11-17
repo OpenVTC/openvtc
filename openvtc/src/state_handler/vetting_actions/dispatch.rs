@@ -7,9 +7,11 @@
 //! the book or sends is planned by [`plan`], which is pure: it decides, makes
 //! the state and book changes the action makes before anything is saved or
 //! signed, and returns a [`VettingEffect`] that [`run`] carries out. The
-//! actions [`plan`] does not take yet (the desk, tickets, faces and hidden
-//! vetting) come back as [`Planned::Loop`] and are handled on the loop by
-//! [`on_loop`].
+//! actions [`plan`] does not take yet (the desk, tickets and hidden vetting)
+//! come back as [`Planned::Loop`] and are handled on the loop by [`on_loop`];
+//! so do the faces and the card, whose plans also read whether a VTA session
+//! is connected, which [`plan`] is not given — [`on_loop`] plans and runs
+//! them.
 
 use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
@@ -27,7 +29,10 @@ use super::desk::{
     attest, decline, open_session, refresh_stale_modes, refresh_vetter_side, withdraw,
 };
 use super::effect::{Followup, VettingEffect, run};
-use super::faces::{create_face, list_faces, open_new_face, send_card, wear_face};
+use super::faces::{
+    on_loop_inputs, plan_choose_face, plan_create_face, plan_open_new_face, plan_send_card,
+    plan_wear_face,
+};
 use super::hidden::ask_for_challenge;
 use super::tickets::{delete_ticket, issue_ticket};
 use super::vetter::{
@@ -604,8 +609,9 @@ pub(super) fn plan_followup(
 }
 
 /// The actions [`plan`] hands back, handled on the loop: they await
-/// helpers — the desk's refreshes, the face jobs, hidden vetting — that are
-/// not planned yet.
+/// helpers — the desk's refreshes, hidden vetting — that are not planned yet,
+/// or are planned with what only the loop knows (the faces: whether a VTA
+/// session is connected).
 async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
     match action {
         VettingAction::SwitchTab => {
@@ -620,33 +626,12 @@ async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 refresh_stale_modes(ctx).await;
             }
         }
+        // Planned, with whether a VTA session is connected — what `plan` is
+        // not given.
         VettingAction::ChooseFace => {
-            let v = page(ctx);
-            // From a card, the card's application — not whichever row the list
-            // behind it last had selected — and the card is where it returns.
-            let id = match &v.mode {
-                VettingMode::SendCard {
-                    application_id,
-                    session_id,
-                    ..
-                } => {
-                    v.card_after_face = Some((application_id.clone(), session_id.clone()));
-                    Some(application_id.clone())
-                }
-                // A retry after granting access keeps whichever card sent it.
-                VettingMode::HolderGrant { .. } => v
-                    .card_after_face
-                    .as_ref()
-                    .map(|(application_id, _)| application_id.clone())
-                    .or_else(|| v.applications.get(v.selected).map(|row| row.id.clone())),
-                _ => {
-                    v.card_after_face = None;
-                    v.applications.get(v.selected).map(|row| row.id.clone())
-                }
-            };
-            if let Some(id) = id {
-                list_faces(ctx, &id);
-            }
+            let (busy, has_vta) = on_loop_inputs(ctx);
+            let effect = plan_choose_face(ctx.state, ctx.config, busy, has_vta);
+            run(ctx, effect).await;
         }
         VettingAction::RefreshRequirements => {
             let v = page(ctx);
@@ -938,19 +923,34 @@ pub(super) fn cycle(v: &mut VettingState, forward: bool) {
 async fn submit(ctx: &mut ActionCtx<'_>) {
     match page(ctx).mode.clone() {
         VettingMode::ConfirmDeleteTicket { ticket_id } => delete_ticket(ctx, &ticket_id),
+        // Planned, with whether a VTA session is connected — what
+        // `plan_submit` is not given.
         VettingMode::ChooseFace {
             application_id,
             faces,
             index,
             required,
         } => {
-            if index == faces.len() {
-                open_new_face(ctx, &application_id, required);
+            let (busy, has_vta) = on_loop_inputs(ctx);
+            let effect = if index == faces.len() {
+                plan_open_new_face(ctx.state, busy, has_vta, &application_id, required)
             } else {
-                wear_face(ctx, &application_id, faces.get(index).cloned());
-            }
+                plan_wear_face(
+                    ctx.state,
+                    ctx.config,
+                    busy,
+                    has_vta,
+                    &application_id,
+                    faces.get(index).cloned(),
+                )
+            };
+            run(ctx, effect).await;
         }
-        VettingMode::NewFace(form) => create_face(ctx, *form),
+        VettingMode::NewFace(form) => {
+            let (busy, has_vta) = on_loop_inputs(ctx);
+            let effect = plan_create_face(ctx.state, ctx.config, busy, has_vta, *form);
+            run(ctx, effect).await;
+        }
         // Enter is "draw now", as `d` is: the view's one verb.
         VettingMode::HiddenVetting { .. } => {
             status(
@@ -965,7 +965,19 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             application_id,
             session_id,
             preview,
-        } => send_card(ctx, &application_id, &session_id, preview).await,
+        } => {
+            let (busy, has_vta) = on_loop_inputs(ctx);
+            let effect = plan_send_card(
+                ctx.state,
+                ctx.config,
+                busy,
+                has_vta,
+                &application_id,
+                &session_id,
+                preview,
+            );
+            run(ctx, effect).await;
+        }
         VettingMode::NewTicket {
             membership_index,
             uses_index,
