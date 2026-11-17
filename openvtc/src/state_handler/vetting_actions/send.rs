@@ -25,16 +25,10 @@ use crate::state_handler::state::State;
 // ============================================================================
 
 /// Whether the vetting domain is free for a job a person starts, or say why
-/// not. Checked before any preparation, so nothing is prepared for a job that
+/// not. Decided before any preparation, so nothing is prepared for a job that
 /// would be refused; the job claims the domain when it is dispatched
-/// ([`Claim::Held`]).
-pub(super) fn begin(ctx: &mut ActionCtx<'_>) -> bool {
-    let busy = ctx.in_flight.is_busy(DispatchDomain::Vetting);
-    claimable(ctx.state, busy)
-}
-
-/// [`begin`] for a plan: `busy` is the vetting domain as the loop found it
-/// when the action arrived. The loop runs one arm at a time, so a domain free
+/// ([`Claim::Held`]). `busy` is the vetting domain as the loop found it when
+/// the action arrived. The loop runs one arm at a time, so a domain free
 /// here is still free when the effect's send claims it.
 pub(super) fn claimable(state: &mut State, busy: bool) -> bool {
     if !busy {
@@ -50,7 +44,7 @@ pub(super) fn claimable(state: &mut State, busy: bool) -> bool {
 /// Whether a vetting job holds the vetting domain while it runs.
 #[derive(Clone, Copy)]
 pub(super) enum Claim {
-    /// A job a person started, after [`begin`]: it holds the domain, so a
+    /// A job a person started, after [`claimable`]: it holds the domain, so a
     /// second one is refused until it finishes.
     Held,
     /// A send the client makes on its own — a refresh, a step of hidden

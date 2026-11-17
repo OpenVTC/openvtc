@@ -7,11 +7,11 @@
 //! the book or sends is planned by [`plan`], which is pure: it decides, makes
 //! the state and book changes the action makes before anything is saved or
 //! signed, and returns a [`VettingEffect`] that [`run`] carries out. The
-//! actions [`plan`] does not take yet (the desk, tickets and hidden vetting)
-//! come back as [`Planned::Loop`] and are handled on the loop by [`on_loop`];
-//! so do the faces and the card, whose plans also read whether a VTA session
-//! is connected, which [`plan`] is not given — [`on_loop`] plans and runs
-//! them.
+//! actions [`plan`] does not take come back as [`Planned::Loop`] and are
+//! handled on the loop by [`on_loop`]: the faces and the card, whose plans
+//! also read whether a VTA session is connected, which [`plan`] is not given;
+//! and the actions a loop-side helper follows (the attestation, the vetter
+//! pass, reading requirements again).
 
 use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
@@ -34,13 +34,14 @@ use super::faces::{
     on_loop_inputs, plan_choose_face, plan_create_face, plan_open_new_face, plan_send_card,
     plan_wear_face,
 };
-use super::hidden::ask_for_challenge;
+use super::hidden::{
+    ask_for_challenge, plan_check_hidden_key, plan_draw_now, plan_hidden_view_submit,
+};
 use super::tickets::{plan_delete_ticket, plan_issue_ticket};
 use super::vetter::{
     open_profile, plan_ask_event_mode, plan_ask_resend, plan_profile_submit, profile_form,
 };
 use super::view_sync::sync_journey;
-use super::words::{clause, community_display, get_tokens_words, hides_vetters};
 use crate::state_handler::actions::VettingAction;
 use crate::state_handler::background_dispatch::DispatchDomain;
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
@@ -68,11 +69,6 @@ pub(super) fn show(state: &mut State, message: Status) {
 
 pub(super) fn page<'a>(ctx: &'a mut ActionCtx<'_>) -> &'a mut VettingState {
     panel(ctx.state)
-}
-
-/// [`show`], from a loop-side handler.
-pub(super) fn status(ctx: &mut ActionCtx<'_>, message: Status) {
-    show(ctx.state, message);
 }
 
 /// Persist the book and show `message`.
@@ -488,11 +484,11 @@ pub(super) fn plan(
             Some(effect) => effect,
             None => return Planned::Loop(VettingAction::Submit),
         },
+        VettingAction::CheckHiddenKey => plan_check_hidden_key(state, config, Utc::now()),
+        VettingAction::DrawNow => plan_draw_now(config, Utc::now()),
         VettingAction::ChooseFace
         | VettingAction::RefreshRequirements
-        | VettingAction::RefreshVetterSide
-        | VettingAction::CheckHiddenKey
-        | VettingAction::DrawNow => return Planned::Loop(action),
+        | VettingAction::RefreshVetterSide => return Planned::Loop(action),
         // View-only: `reduce` handled these.
         VettingAction::OpenJourney
         | VettingAction::OpenApplication(_)
@@ -609,9 +605,9 @@ fn plan_submit(state: &mut State, config: &mut Config, busy: bool) -> Option<Vet
             statement_id,
             reason_index,
         } => plan_withdraw(state, config, busy, &statement_id, reason_index),
+        VettingMode::HiddenVetting { .. } => plan_hidden_view_submit(state),
         VettingMode::ChooseFace { .. }
         | VettingMode::NewFace(_)
-        | VettingMode::HiddenVetting { .. }
         | VettingMode::SendCard { .. }
         | VettingMode::Attest { .. } => return None,
     })
@@ -670,73 +666,6 @@ async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             refresh_vetter_side(ctx).await;
         }
         VettingAction::RefreshVetterSide => refresh_vetter_side(ctx).await,
-        VettingAction::CheckHiddenKey => {
-            let now = Utc::now();
-            let index = match page(ctx).mode {
-                VettingMode::HiddenVetting { index } => index,
-                _ => 0,
-            };
-            let Some(held) = ctx.config.private.vetting.hidden_vetter.get_mut(index) else {
-                return;
-            };
-            let community = held.community.clone();
-            let started = held.recheck_key(now);
-            let name = community_display(ctx.config, &community);
-            if started {
-                ctx.save.mark_dirty();
-                status(
-                    ctx,
-                    Status::progress(format!(
-                        "Asking {name} which hidden-vetting key it holds for you, to restore it \
-                         at your VTA…"
-                    )),
-                );
-                refresh_vetter_side(ctx).await;
-            } else {
-                status(
-                    ctx,
-                    Status::warning(format!(
-                        "Nothing to check at {name}: your hidden-vetting key is not in question, \
-                         or a check is already running."
-                    )),
-                );
-            }
-        }
-        VettingAction::DrawNow => {
-            // Get tokens, in one key: whatever the schedule owes, in order — enrol where not
-            // enrolled, then draw every window that has begun — and, per community, exactly
-            // what is happening or what blocks it and until when. Said from the book as it was
-            // before the pass, which is what the pass acts on.
-            let now = Utc::now();
-            // Asked by hand: a lost enrolment is worth one more ask — the community may now
-            // re-issue it to the same identifier, and it bounds how many times it will.
-            for held in &mut ctx.config.private.vetting.hidden_vetter {
-                held.lost_reasked = false;
-            }
-            let words: Vec<String> = {
-                let book = &ctx.config.private.vetting;
-                book.vetter_standing(now)
-                    .into_iter()
-                    .filter(|s| s.live && hides_vetters(book, &s.community))
-                    .map(|s| {
-                        let name = community_display(ctx.config, &s.community);
-                        let why = get_tokens_words(book, &s.community, s.persona, &name, now);
-                        format!("{name}: {}.", clause(&why))
-                    })
-                    .collect()
-            };
-            refresh_vetter_side(ctx).await;
-            status(
-                ctx,
-                Status::info(if words.is_empty() {
-                    "None of the communities you vet for proves vetting with PCS ZKP, so there \
-                     are no tokens to get — hand out tickets with t."
-                        .to_string()
-                } else {
-                    format!("Getting tokens — {}", words.join(" "))
-                }),
-            );
-        }
         VettingAction::Submit => submit(ctx).await,
         // Planned by `plan`, which never hands these back.
         VettingAction::SwitchTab
@@ -772,7 +701,9 @@ async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
         | VettingAction::StartAttest
         | VettingAction::ArmDecline
         | VettingAction::ArmAbandon
-        | VettingAction::ArmWithdraw => {}
+        | VettingAction::ArmWithdraw
+        | VettingAction::CheckHiddenKey
+        | VettingAction::DrawNow => {}
     }
 }
 
@@ -972,16 +903,6 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             let effect = plan_create_face(ctx.state, ctx.config, busy, has_vta, *form);
             run(ctx, effect).await;
         }
-        // Enter is "draw now", as `d` is: the view's one verb.
-        VettingMode::HiddenVetting { .. } => {
-            status(
-                ctx,
-                Status::progress(
-                    "Reading each community's requirements again and drawing what the schedule owes…",
-                ),
-            );
-            refresh_vetter_side(ctx).await;
-        }
         VettingMode::SendCard {
             application_id,
             session_id,
@@ -1017,7 +938,8 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
         | VettingMode::Directory(_)
         | VettingMode::Profile(_)
         | VettingMode::Resend { .. }
-        | VettingMode::EventMode { .. } => {}
+        | VettingMode::EventMode { .. }
+        | VettingMode::HiddenVetting { .. } => {}
     }
 }
 
@@ -1068,7 +990,10 @@ mod tests {
             "reduced: the empty directory is explained"
         );
 
-        for action in [VettingAction::RefreshRequirements, VettingAction::DrawNow] {
+        for action in [
+            VettingAction::RefreshRequirements,
+            VettingAction::RefreshVetterSide,
+        ] {
             let planned = plan(&mut state, &mut config, false, action);
             assert!(matches!(planned, Planned::Loop(_)));
         }

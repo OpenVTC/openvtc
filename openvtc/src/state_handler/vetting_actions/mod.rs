@@ -37,9 +37,15 @@
 //! applies its `Abort` — each `Undo` in order, then `give_up` with its
 //! `what` — and the run stops there.
 //!
+//! Hidden vetting's steps are the client's own: `SendOrSay` (signed and sent
+//! unheld; a failure is said and the run goes on), `SendMessage` (an unsigned
+//! message), `StartPcs` (a job at the VTA, its `PcsCommit` applied once it
+//! started), `RefreshVetterSide` (the vetter pass, awaited), and `PcsAnswer`
+//! (one of a PCS job's answers, planned when it is reached, like `Then`).
+//!
 //! # Planning a handler still on the loop
 //!
-//! The desk, tickets and hidden vetting are handled by `dispatch::on_loop`
+//! What stays on the loop is handled by `dispatch::on_loop`
 //! with the `send` helpers (`begin`, `abandon`, `sign_and_send`, `spawn`),
 //! which do the same things the plan and the runner do. To plan one:
 //!
@@ -66,10 +72,10 @@
 //!   document is kept by the runner from `Sign` to `Send`.
 //! - Work that is not a signed document send (a face job, a PCS job) is a new
 //!   step that spawns it with the same `Claim`, as `Step::Face` does for the
-//!   face and card jobs. A loop-side helper still
-//!   awaited after a plan (`refresh_vetter_side`, `ask_for_challenge`) is run
-//!   by the `on_loop` arm after `effect::run`, as `RefreshRequirements` does,
-//!   until it is planned in turn.
+//!   face and card jobs. A loop-side helper still awaited after a plan
+//!   (`refresh_vetter_side`) is run by the `on_loop` arm after `effect::run`,
+//!   as `RefreshRequirements` does, or as a `Step::RefreshVetterSide` among
+//!   the plan's steps.
 //! - Route the action (or the view's Enter, in `plan_submit`) to the plan, and
 //!   move its arm in `on_loop` / `submit` to the "planned" list.
 //!
