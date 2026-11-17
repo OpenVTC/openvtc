@@ -3,7 +3,7 @@
 # Keep this list and `deny.toml`'s `[advisories] ignore` in step: same IDs, same
 # reasons. The one deliberate difference is RUSTSEC-2026-0330/0331 below, which
 # cargo-deny never sees. Prune an entry as soon as it stops matching.
-# Last checked against `Cargo.lock`: 2026-11-15.
+# Last checked against `Cargo.lock`: 2026-11-17.
 [advisories]
 ignore = [
     # rsa: Marvin Attack timing side channel; no patched release. Reached only
@@ -20,6 +20,17 @@ ignore = [
     # Reached only through `pgp` 0.20 (cx448, elliptic-curve 0.13); no 0.5.x
     # patch exists. Re-check when `pgp` moves.
     "RUSTSEC-2026-0387",
+
+    # chrono / chrono-tz / humantime: "unmaintained" notices published
+    # 2026-11-17, no vulnerability and no safe upgrade. chrono is a direct
+    # dependency and is used throughout the SDK stack (affinidi-*, didwebvh-rs,
+    # dtg-credentials, did-git-sign); chrono-tz comes with it; humantime is dev
+    # graph only (affinidi-messaging-mediator, via the test mediator). Moving off
+    # chrono is an ecosystem change, not ours alone. Re-check on the next
+    # SDK bump, or when chronotope/chrono#1768 names a successor.
+    "RUSTSEC-2026-0542",
+    "RUSTSEC-2026-0543",
+    "RUSTSEC-2026-0555",
 
     # libcrux-kem 0.0.9: panics on short hybrid-KEM seeds / keys, fixed in
     # 0.0.10. Audit-only: it is in `Cargo.lock` as an optional dependency of
