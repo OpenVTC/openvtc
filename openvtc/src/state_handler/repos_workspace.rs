@@ -22,7 +22,12 @@
 //!   set up, enable, disable, remove. Each is one key, and does everything it
 //!   needs: `c` clones, sets did-git-sign up if it is not, and enables the new
 //!   checkout, so a member goes from "not here" to "commits are signed as me"
-//!   in one step.
+//!   in one step. A job is planned by [`plan`], which is pure and returns a
+//!   [`WorkspaceEffect`]; [`run`] claims the lane and only once claimed marks
+//!   the workspace busy.
+//!
+//! Opening ([`open`]) reads the profile's settings file and the persona's
+//! signing key on the loop, then starts the first probe.
 //!
 //! `f` chooses the forge account a repository (or every repository of the
 //! community on that forge) uses for clone, fetch and push
@@ -455,7 +460,7 @@ impl background_dispatch::Job for ProbeJob {
 // ****************************************************************************
 
 /// What a job does.
-enum Plan {
+enum Work {
     /// Clone into the workspace over `protocol`, then sign there; `warning`
     /// says why the checkout may not be able to push.
     Clone {
@@ -501,7 +506,7 @@ enum Plan {
 struct WorkspaceJob {
     vtc_did: String,
     persona: PersonaId,
-    plan: Plan,
+    work: Work,
     signer: Result<PersonaSigner, String>,
     endpoint: Option<VtaEndpoint>,
     client: Option<VtaClient>,
@@ -678,8 +683,8 @@ impl WorkspaceJob {
         let (vtc_did, persona) = (self.vtc_did.clone(), self.persona);
         let mut settings = None;
         let mut form = None;
-        let result = match &self.plan {
-            Plan::Fork {
+        let result = match &self.work {
+            Work::Fork {
                 coords,
                 path,
                 login,
@@ -698,7 +703,7 @@ impl WorkspaceJob {
                     )
                 })
             }
-            Plan::Accounts {
+            Work::Accounts {
                 coords,
                 linked_login,
             } => {
@@ -726,7 +731,7 @@ impl WorkspaceJob {
                     git_ns_short(&coords.resource())
                 ))
             }
-            Plan::Account {
+            Work::Account {
                 coords,
                 scope,
                 credential,
@@ -741,7 +746,7 @@ impl WorkspaceJob {
                 }
                 Err(e) => Err(e),
             },
-            Plan::Clone {
+            Work::Clone {
                 coords,
                 dest,
                 protocol,
@@ -753,7 +758,7 @@ impl WorkspaceJob {
                     Some(w) => format!("{done} ▲ {w}"),
                     None => done,
                 }),
-            Plan::RemotesToSsh { path } => {
+            Work::RemotesToSsh { path } => {
                 let p = path.clone();
                 blocking(move || git_workspace::switch_remotes_to_ssh(&p))
                     .await
@@ -769,22 +774,22 @@ impl WorkspaceJob {
                         )
                     })
             }
-            Plan::Sign { path } => self.sign(path).await,
-            Plan::Unsign { path } => {
+            Work::Sign { path } => self.sign(path).await,
+            Work::Unsign { path } => {
                 let path = path.clone();
                 blocking(move || git_signing::disable_in(&path))
                     .await
                     .and_then(|r| r)
                     .map(|()| "This checkout no longer signs with did-git-sign.".to_string())
             }
-            Plan::SetUp => self.set_up(true).await.map(|profile| {
+            Work::SetUp => self.set_up(true).await.map(|profile| {
                 format!(
                     "did-git-sign is set up for this persona (profile '{profile}'). Press e on a \
                      checkout to sign there."
                 )
             }),
-            Plan::Remove => self.remove().await,
-            Plan::Use { coords, path } => match self.adopt(coords, path).await {
+            Work::Remove => self.remove().await,
+            Work::Use { coords, path } => match self.adopt(coords, path).await {
                 Ok(updated) => {
                     settings = Some(updated);
                     self.sign(path).await.map(|done| {
@@ -800,8 +805,8 @@ impl WorkspaceJob {
         };
         // Whether the gh account can push here, once a clone or a choice
         // lands — said in words rather than as a 403 on the first push.
-        let push_target = match &self.plan {
-            Plan::Clone { coords, .. } | Plan::Account { coords, .. } if result.is_ok() => {
+        let push_target = match &self.work {
+            Work::Clone { coords, .. } | Work::Account { coords, .. } if result.is_ok() => {
                 let s = settings.as_ref().unwrap_or(&self.settings);
                 s.credential_for(&self.vtc_did, coords)
                     .credential
@@ -1169,20 +1174,52 @@ fn save_settings(ctx: &mut ActionCtx<'_>) {
     }
 }
 
-/// Service an action that runs git, did-git-sign or the VTA.
-pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
+// ****************************************************************************
+// Loop-side actions: the reducer
+// ****************************************************************************
+
+/// What a workspace action needs beyond the state change [`plan`] already made.
+pub(crate) enum WorkspaceEffect {
+    /// Nothing more: the action refused, or did nothing.
+    None,
+    /// Save the settings form, then probe if due. Saving checks the chosen
+    /// directory on disk and writes the profile's settings file, so the
+    /// runner does it ([`save_settings`]).
+    SaveSettings,
+    /// Run a job ([`JobRequest`]).
+    Job(Box<JobRequest>),
+}
+
+/// A job, resolved on the loop to everything but the VTA session and the
+/// settings file's path, which the runner adds.
+pub(crate) struct JobRequest {
+    vtc_did: String,
+    persona: PersonaId,
+    work: Work,
+    /// What the workspace is doing while it runs ("cloning acme/gadgets"),
+    /// shown only once the job has claimed its lane.
+    busy: String,
+    signer: Result<PersonaSigner, String>,
+    endpoint: Option<VtaEndpoint>,
+    top_context_id: String,
+    own_did: String,
+    settings: WorkspaceSettings,
+}
+
+/// Plan a workspace action. Pure: it reads `config`, makes only the changes
+/// the action makes before anything runs (spending a confirmation, marking a
+/// form, saying why it cannot run), and returns what the loop still owes.
+pub(crate) fn plan(state: &mut State, config: &Config, action: W) -> WorkspaceEffect {
     if action == W::SettingsSubmit {
-        save_settings(ctx);
-        probe_if_due(ctx.state, ctx.dispatch_tx, ctx.in_flight);
-        return;
+        return WorkspaceEffect::SaveSettings;
     }
-    let linked = ctx.state.main_page.content_panel.repos.linked.clone();
-    let Some(view) = view_mut(ctx.state) else {
-        return;
+    let linked = state.main_page.content_panel.repos.linked.clone();
+    let Some(view) = view_mut(state) else {
+        return WorkspaceEffect::None;
     };
     if let Some(what) = &view.workspace.busy {
         view.note(Severity::Warning, format!("Still {what} — please wait."));
-        return;
+        return WorkspaceEffect::None;
     }
     let target = target(view);
     let located = target
@@ -1194,11 +1231,11 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
         .map(git_ns_short)
         .unwrap_or_default()
         .to_string();
-    let plan = match action {
+    let (work, busy) = match action {
         W::Clone => {
             let Some(resource) = target.clone() else {
                 view.note(Severity::Warning, "Highlight a repository first.");
-                return;
+                return WorkspaceEffect::None;
             };
             if let Some(path) = located {
                 view.note(
@@ -1208,20 +1245,20 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
                         git_workspace::display_path(&path)
                     ),
                 );
-                return;
+                return WorkspaceEffect::None;
             }
             let coords = match RepoCoords::parse(&resource) {
                 Ok(c) => c,
                 Err(e) => {
                     view.note(Severity::Error, e.to_string());
-                    return;
+                    return WorkspaceEffect::None;
                 }
             };
             let dest = coords.default_path(&view.workspace.settings.root);
             let (protocol, _) = view.workspace.protocol_for(&view.vtc_did, &coords);
             let warning = view.workspace.https_clone_warning(&view.vtc_did, &coords);
             (
-                Plan::Clone {
+                Work::Clone {
                     coords,
                     dest,
                     protocol,
@@ -1240,10 +1277,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
                         "Highlight a repository first.".to_string()
                     },
                 );
-                return;
+                return WorkspaceEffect::None;
             };
             (
-                Plan::RemotesToSsh { path },
+                Work::RemotesToSsh { path },
                 format!("switching {short}'s remotes to SSH"),
             )
         }
@@ -1260,34 +1297,34 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
                         "Highlight a repository first.".to_string()
                     },
                 );
-                return;
+                return WorkspaceEffect::None;
             };
             if action == W::Sign {
-                (Plan::Sign { path }, format!("making {short} sign"))
+                (Work::Sign { path }, format!("making {short} sign"))
             } else {
                 (
-                    Plan::Unsign { path },
+                    Work::Unsign { path },
                     format!("turning signing off in {short}"),
                 )
             }
         }
-        W::SetUp => (Plan::SetUp, "setting did-git-sign up".to_string()),
+        W::SetUp => (Work::SetUp, "setting did-git-sign up".to_string()),
         W::Confirm => match view.workspace.confirm.take() {
             Some(WorkspaceChange::RemoveIdentity) => {
-                (Plan::Remove, "removing the signing identity".to_string())
+                (Work::Remove, "removing the signing identity".to_string())
             }
-            None => return,
+            None => return WorkspaceEffect::None,
         },
         W::UseSubmit => {
             let Some(WorkspaceForm::UsePath { resource, path, .. }) = view.workspace.form.clone()
             else {
-                return;
+                return WorkspaceEffect::None;
             };
             let coords = match RepoCoords::parse(&resource) {
                 Ok(c) => c,
                 Err(e) => {
                     view.note(Severity::Error, e.to_string());
-                    return;
+                    return WorkspaceEffect::None;
                 }
             };
             let path = git_workspace::expand_tilde(&path);
@@ -1295,30 +1332,30 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
                 if let Some(WorkspaceForm::UsePath { error, .. }) = view.workspace.form.as_mut() {
                     *error = Some("Use an absolute path, or one starting with ~/.".into());
                 }
-                return;
+                return WorkspaceEffect::None;
             }
             (
-                Plan::Use { coords, path },
+                Work::Use { coords, path },
                 format!("checking the checkout of {short}"),
             )
         }
         W::Fork => {
             let Some(resource) = target.clone() else {
                 view.note(Severity::Warning, "Highlight a repository first.");
-                return;
+                return WorkspaceEffect::None;
             };
             let Some(path) = located else {
                 view.note(
                     Severity::Warning,
                     format!("{short} is not checked out here — c clones it first."),
                 );
-                return;
+                return WorkspaceEffect::None;
             };
             let coords = match RepoCoords::parse(&resource) {
                 Ok(c) => c,
                 Err(e) => {
                     view.note(Severity::Error, e.to_string());
-                    return;
+                    return WorkspaceEffect::None;
                 }
             };
             let credential = view
@@ -1331,10 +1368,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
                     Severity::Warning,
                     "Forking needs a gh account chosen for this repository (f).",
                 );
-                return;
+                return WorkspaceEffect::None;
             };
             (
-                Plan::Fork {
+                Work::Fork {
                     coords,
                     path,
                     login: login.clone(),
@@ -1345,20 +1382,20 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
         W::AccountStart => {
             let Some(resource) = target.clone() else {
                 view.note(Severity::Warning, "Highlight a repository first.");
-                return;
+                return WorkspaceEffect::None;
             };
             let coords = match RepoCoords::parse(&resource) {
                 Ok(c) => c,
                 Err(e) => {
                     view.note(Severity::Error, e.to_string());
-                    return;
+                    return WorkspaceEffect::None;
                 }
             };
             let linked_login = view
                 .linked_on(&linked, &coords.host)
                 .map(|a| a.login.clone());
             (
-                Plan::Accounts {
+                Work::Accounts {
                     coords,
                     linked_login,
                 },
@@ -1367,7 +1404,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
         }
         W::AccountSubmit => {
             let Some(WorkspaceForm::Account(form)) = view.workspace.form.clone() else {
-                return;
+                return WorkspaceEffect::None;
             };
             let credential = match form.choice() {
                 Ok(c) => c,
@@ -1375,14 +1412,14 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
                     if let Some(WorkspaceForm::Account(f)) = view.workspace.form.as_mut() {
                         f.error = Some(e);
                     }
-                    return;
+                    return WorkspaceEffect::None;
                 }
             };
             let coords = match RepoCoords::parse(&form.resource) {
                 Ok(c) => c,
                 Err(e) => {
                     view.note(Severity::Error, e.to_string());
-                    return;
+                    return WorkspaceEffect::None;
                 }
             };
             // The located checkouts the choice covers: this one, or every one
@@ -1402,7 +1439,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
                 })
                 .collect();
             (
-                Plan::Account {
+                Work::Account {
                     coords,
                     scope: form.scope,
                     credential,
@@ -1411,33 +1448,84 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
                 "choosing the forge account".to_string(),
             )
         }
-        _ => return,
+        _ => return WorkspaceEffect::None,
     };
-    let (plan, busy) = plan;
-    let job = WorkspaceJob {
+    WorkspaceEffect::Job(Box::new(JobRequest {
         vtc_did: view.vtc_did.clone(),
         persona: view.persona,
-        plan,
+        work,
+        busy,
         signer: view
             .workspace
             .signer
             .clone()
             .unwrap_or_else(|| Err("the view has not finished opening".into())),
-        endpoint: VtaEndpoint::from_backend(&ctx.config.key_backend),
-        client: ctx.admin_vta.cloned(),
-        top_context_id: ctx.config.account.top_context_id.clone(),
-        own_did: own_did(ctx.config),
+        endpoint: VtaEndpoint::from_backend(&config.key_backend),
+        top_context_id: config.account.top_context_id.clone(),
+        own_did: own_did(config),
         settings: view.workspace.settings.clone(),
+    }))
+}
+
+// ****************************************************************************
+// Loop-side actions: the effect runner
+// ****************************************************************************
+
+/// Service an action that runs git, did-git-sign or the VTA: [`plan`] it,
+/// then [`run`] what it asks for.
+pub(crate) fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
+    let effect = plan(ctx.state, ctx.config, action);
+    run(ctx, effect);
+}
+
+/// Run an effect: save the settings, or claim the job's lane and spawn it,
+/// and only once claimed mark the workspace busy and say what it is doing.
+pub(crate) fn run(ctx: &mut ActionCtx<'_>, effect: WorkspaceEffect) {
+    let request = match effect {
+        WorkspaceEffect::None => return,
+        WorkspaceEffect::SaveSettings => {
+            save_settings(ctx);
+            probe_if_due(ctx.state, ctx.dispatch_tx, ctx.in_flight);
+            return;
+        }
+        WorkspaceEffect::Job(request) => *request,
+    };
+    let JobRequest {
+        vtc_did,
+        persona,
+        work,
+        busy,
+        signer,
+        endpoint,
+        top_context_id,
+        own_did,
+        settings,
+    } = request;
+    let job = WorkspaceJob {
+        vtc_did,
+        persona,
+        work,
+        signer,
+        endpoint,
+        client: ctx.admin_vta.cloned(),
+        top_context_id,
+        own_did,
+        settings,
         settings_path: WorkspaceSettings::path(ctx.profile).ok(),
     };
+    let state = &mut *ctx.state;
     let started = background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |msg| {
-        view.note(Severity::Warning, msg);
+        if let Some(view) = view_mut(state) {
+            view.note(Severity::Warning, msg);
+        }
     });
     if !started {
         return;
     }
-    view.note(Severity::Progress, format!("{}…", capitalise(&busy)));
-    view.workspace.busy = Some(busy);
+    if let Some(view) = view_mut(ctx.state) {
+        view.note(Severity::Progress, format!("{}…", capitalise(&busy)));
+        view.workspace.busy = Some(busy);
+    }
 }
 
 /// How a checkout reads, in a few words, for the list.
@@ -1946,6 +2034,90 @@ mod tests {
         assert_eq!(
             v.workspace.push_access.get("github.com/acme/widgets"),
             Some(&("alice".to_string(), false))
+        );
+    }
+
+    // --- the pure plan ------------------------------------------------------
+
+    fn ws_view(s: &State) -> &ReposView {
+        s.main_page.content_panel.repos.view.as_ref().unwrap()
+    }
+
+    /// A job is planned with what it says while it runs; nothing is marked
+    /// busy or said until the runner has claimed its lane.
+    #[test]
+    fn a_job_is_planned_and_marks_nothing_until_claimed() {
+        let config = crate::state_handler::dispatch_util::test_config();
+        let mut s = state_with(view());
+        let WorkspaceEffect::Job(job) = plan(&mut s, &config, W::SetUp) else {
+            panic!("set-up is a job");
+        };
+        assert!(matches!(job.work, Work::SetUp));
+        assert_eq!(job.busy, "setting did-git-sign up");
+        assert!(job.signer.is_ok(), "the view's signer goes with it");
+        assert!(
+            job.endpoint.is_none(),
+            "the test keys are not held by a VTA"
+        );
+        let v = ws_view(&s);
+        assert!(v.workspace.busy.is_none() && v.status.is_none());
+    }
+
+    /// While one of the panel's jobs runs, another is refused, saying which.
+    #[test]
+    fn a_job_while_one_runs_is_refused_by_the_plan() {
+        let config = crate::state_handler::dispatch_util::test_config();
+        let mut v = view();
+        v.workspace.busy = Some("cloning acme/gadgets".into());
+        let mut s = state_with(v);
+        assert!(matches!(
+            plan(&mut s, &config, W::SetUp),
+            WorkspaceEffect::None
+        ));
+        assert_eq!(
+            ws_view(&s).status_text(),
+            Some("Still cloning acme/gadgets — please wait.")
+        );
+    }
+
+    /// A `y` is spent by the plan: armed, it plans the removal; unarmed,
+    /// nothing.
+    #[test]
+    fn a_confirmation_is_spent_by_the_plan() {
+        let config = crate::state_handler::dispatch_util::test_config();
+        let mut v = view();
+        v.workspace.confirm = Some(WorkspaceChange::RemoveIdentity);
+        let mut s = state_with(v);
+        let WorkspaceEffect::Job(job) = plan(&mut s, &config, W::Confirm) else {
+            panic!("an armed removal is a job");
+        };
+        assert!(matches!(job.work, Work::Remove));
+        assert!(ws_view(&s).workspace.confirm.is_none());
+        assert!(matches!(
+            plan(&mut s, &config, W::Confirm),
+            WorkspaceEffect::None
+        ));
+    }
+
+    /// Saving the settings is the runner's (it reads and writes the disk);
+    /// the plan changes nothing for it. A clone with nothing highlighted is
+    /// refused in the plan.
+    #[test]
+    fn settings_are_saved_by_the_runner_and_a_clone_needs_a_target() {
+        let config = crate::state_handler::dispatch_util::test_config();
+        let mut s = state_with(view());
+        assert!(matches!(
+            plan(&mut s, &config, W::SettingsSubmit),
+            WorkspaceEffect::SaveSettings
+        ));
+        assert!(ws_view(&s).status.is_none());
+        assert!(matches!(
+            plan(&mut s, &config, W::Clone),
+            WorkspaceEffect::None
+        ));
+        assert_eq!(
+            ws_view(&s).status_text(),
+            Some("Highlight a repository first.")
         );
     }
 }
