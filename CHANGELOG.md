@@ -45,7 +45,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that read what it changed — an inbox task, a relationship, the vetting book, a
   community's favourite mark, a setting — instead of every panel. Startup, a load, a
   persona or membership change, the agent-name cache and inbound messages still
-  rebuild them all. The vetting page's last two loop-side follow-ups are effect steps:
+  rebuild them all. Text that changes with the clock alone — a credential turning
+  "expired", a join awaiting its acknowledgement, a vetter grant expiring — was
+  refreshed by whichever full rebuild came next; it is now refreshed once a minute
+  (credentials, communities and vetting panels), so it is never more than a minute
+  late. The vetting page's last two loop-side follow-ups are effect steps:
   reading requirements again plans the hidden-vetting challenge and the vetter pass
   as steps that run even after a refusal or a give-up, and Enter on the attestation
   form plans the hidden attestation or the enrolling pass. No visible change.
