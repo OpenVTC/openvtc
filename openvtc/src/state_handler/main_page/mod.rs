@@ -3740,7 +3740,7 @@ mod tests {
 
     /// What `panel` shows, as text: the view model `sync_panels` rebuilds
     /// for it. Compared as `Debug`, which every view model has.
-    fn shown(page: &MainPageState, panel: Panels) -> String {
+    pub(crate) fn shown(page: &MainPageState, panel: Panels) -> String {
         let c = &page.content_panel;
         match panel {
             p if p == Panels::HEADER => format!("{:?}", page.config),
@@ -3756,30 +3756,111 @@ mod tests {
         }
     }
 
-    /// Every panel's view model, as text.
-    fn shown_all(page: &MainPageState) -> Vec<String> {
-        EACH_PANEL.iter().map(|p| shown(page, *p)).collect()
+    /// Every panel's view model, as text, named.
+    pub(crate) fn shown_all(page: &MainPageState) -> Vec<(Panels, String)> {
+        EACH_PANEL.iter().map(|p| (*p, shown(page, *p))).collect()
     }
 
-    /// An account with something on every panel: a persona in an Active
-    /// community, a relationship with VRCs both ways and an alias, inbox
-    /// tasks, keys, a vetting application holding a statement, a VTA key
-    /// backend, and verified agent names.
+    /// `page` as a full sync leaves it: the panels `sync_panels` rebuilds
+    /// compared against a full sync of a copy, at the same frozen clock.
+    pub(crate) fn assert_fully_synced(page: &MainPageState, config: &Config) {
+        let mut full = page.clone();
+        full.sync_from_config(config);
+        for ((panel, got), (_, want)) in shown_all(page).into_iter().zip(shown_all(&full)) {
+            assert_eq!(got, want, "{panel:?} is not what a full sync shows");
+        }
+    }
+
+    const VTC: &str = "did:web:vtc.example";
+    const SECOND_VTC: &str = "did:web:second.example";
+    const LEFT_VTC: &str = "did:web:left.example";
+    const REJECTED_VTC: &str = "did:web:rejected.example";
+    const PENDING_VTC: &str = "did:web:pending.example";
+    const JOINING_VTC: &str = "did:web:joining.example";
+
+    /// A page as the loop holds it before any sync: the VIC list comes from
+    /// the VTA vault, not from `Config`, so it is there already.
+    fn blank_page() -> MainPageState {
+        page_with_vic(VTC)
+    }
+
+    /// An identity loaded for `persona` as `did`.
+    fn load_identity(config: &mut Config, persona: PersonaId, did: &str) {
+        use affinidi_tdk::messaging::profiles::{ATMProfile, ATMProfileInner};
+        config.identities.insert(
+            persona,
+            openvtc_core::identity::IdentityContext {
+                persona_id: persona,
+                did: did.to_string(),
+                document: serde_json::from_value(serde_json::json!({ "id": did })).unwrap(),
+                profile: Arc::new(ATMProfile {
+                    inner: Arc::new(ATMProfileInner {
+                        did: did.to_string(),
+                        alias: did.to_string(),
+                        mediator: Arc::new(None),
+                    }),
+                }),
+                mediator_did: None,
+            },
+        );
+    }
+
+    /// An account with something on every panel, and every input each panel
+    /// reads: a loaded persona with a friendly name in two Active
+    /// communities, a Left (archived), a Rejected (unacknowledged) and a
+    /// Pending one; a relationship with VRCs both ways, an alias and an R-DID;
+    /// inbox tasks, one an outbound request; keys; a VTA key backend; vetting
+    /// applications (one held statement, one still joining), a vetter grant,
+    /// and a community's branding and PCS ZKP mode; verified agent names.
     fn busy_config() -> Config {
+        use openvtc_core::config::account::CommunityStatus;
         use openvtc_core::config::protected_config::Contact;
         use openvtc_core::relationships::{Relationship, RelationshipState};
         use openvtc_core::vetting::applicant::HeldStatement;
+        use openvtc_core::vetting::book::{Branding, KnownCommunity, VetterGrant};
+        use openvtc_core::vetting::mode::{ModeRead, VetterMode};
         use vta_sdk::protocols::vetting::{VettingMethod, VettingRelationship};
 
-        let vtc = "did:web:vtc.example";
         let mut config = with_active_persona(config_with_membership(
             ALICE_DID,
             Some("Work"),
-            vtc,
+            VTC,
             Some("Kernel Developers"),
         ));
         let persona = config.active_persona.unwrap();
+        load_identity(&mut config, persona, ALICE_DID);
+        config.public.friendly_name = "Alice".into();
         let now = chrono::Utc::now();
+
+        // More memberships of the same persona: a second Active one (later in
+        // display order), and three inactive or pending ones.
+        let first = config.account.communities[VTC][0].clone();
+        let other = |vtc: &str, name: &str, status: CommunityStatus| {
+            let mut c = first.clone();
+            c.vtc_did = vtc.into();
+            c.display_name = Some(name.into());
+            c.status = status;
+            c
+        };
+        let second = other(SECOND_VTC, "Zeta Club", CommunityStatus::Active);
+        let mut left = other(LEFT_VTC, "Left Behind", CommunityStatus::Left);
+        left.archived = true;
+        let mut rejected = other(REJECTED_VTC, "Turned Down", CommunityStatus::Rejected);
+        rejected.acknowledged = false;
+        let mut pending = other(
+            PENDING_VTC,
+            "Waiting Room",
+            CommunityStatus::Pending {
+                request_id: uuid::Uuid::new_v4(),
+            },
+        );
+        pending.requested_at = Some(now);
+        for c in [second, left, rejected, pending] {
+            config
+                .account
+                .communities
+                .insert(c.vtc_did.clone(), vec![c]);
+        }
 
         let remote = Arc::new(BOB_DID.to_string());
         config.private.relationships.relationships.insert(
@@ -3812,20 +3893,26 @@ mod tests {
             .vrcs_received
             .insert(&remote, signed_vrc(BOB_DID, ALICE_DID))
             .unwrap();
-        config.private.tasks.new_task_for(
-            &Arc::new("task-ping".to_string()),
-            TaskType::TrustPing {
-                from: Arc::new(ALICE_DID.to_string()),
-                to: remote.clone(),
-                remote_p_did: remote.clone(),
-            },
-            Some(persona),
-        );
-        config.private.tasks.new_task_for(
-            &Arc::new("task-accepted".to_string()),
-            TaskType::RelationshipRequestAccepted,
-            Some(persona),
-        );
+        for (id, type_) in [
+            (
+                "task-ping",
+                TaskType::TrustPing {
+                    from: Arc::new(ALICE_DID.to_string()),
+                    to: remote.clone(),
+                    remote_p_did: remote.clone(),
+                },
+            ),
+            ("task-accepted", TaskType::RelationshipRequestAccepted),
+            (
+                "task-outbound",
+                TaskType::RelationshipRequestOutbound { to: remote.clone() },
+            ),
+        ] {
+            config
+                .private
+                .tasks
+                .new_task_for(&Arc::new(id.to_string()), type_, Some(persona));
+        }
         config.key_info.insert(
             format!("{ALICE_DID}#key-0"),
             key_info(KeyTypes::PersonaSigning),
@@ -3835,10 +3922,9 @@ mod tests {
             key_info(KeyTypes::RelationshipVerification),
         );
 
-        let app = config
-            .private
-            .vetting
-            .start_application(vtc, persona, ALICE_DID, now)
+        let book = &mut config.private.vetting;
+        let app = book
+            .start_application(VTC, persona, ALICE_DID, now)
             .unwrap();
         app.statements.push(HeldStatement {
             id: "urn:uuid:statement-1".into(),
@@ -3853,6 +3939,33 @@ mod tests {
             received_at: now,
             credential: serde_json::json!({ "id": "urn:uuid:statement-1" }),
         });
+        book.start_application(JOINING_VTC, persona, ALICE_DID, now)
+            .unwrap();
+        book.vetter_grants.push(VetterGrant {
+            community: VTC.into(),
+            persona,
+            credential_id: Some("urn:uuid:grant-1".into()),
+            valid_until: Some(now + chrono::Duration::days(90)),
+            received_at: now,
+            credential: serde_json::json!({}),
+        });
+        book.communities.push(KnownCommunity {
+            community: JOINING_VTC.into(),
+            branding: Branding {
+                display_name: Some("Joiners".into()),
+                accent_color: Some("#336699".into()),
+            },
+            requested: Vec::new(),
+            fetched_at: now,
+            protocol: None,
+            routes: Vec::new(),
+            post_quantum_key: None,
+            vetter_mode: Some(ModeRead {
+                mode: VetterMode::PcsZkp,
+                read_at: now,
+            }),
+            directory: None,
+        });
 
         config.key_backend = KeyBackend::Vta {
             vta_url: "https://vta.example".into(),
@@ -3864,8 +3977,49 @@ mod tests {
             encryption_seed: secrecy::SecretBox::new(Box::new(vec![0u8; 32])),
         };
         config.set_cached_agent_name(BOB_DID, Some("example.com/@bob".into()), now);
-        config.set_cached_agent_name(vtc, Some("vtc.example/@club".into()), now);
+        config.set_cached_agent_name(VTC, Some("vtc.example/@club".into()), now);
         config
+    }
+
+    /// The fixture reaches what each panel reads, not just something on it.
+    #[test]
+    fn the_sync_fixture_fills_what_each_panel_reads() {
+        let _clock = test_clock::freeze(chrono::Utc::now());
+        let config = busy_config();
+        let mut page = blank_page();
+        page.sync_from_config(&config);
+        let c = &page.content_panel;
+        assert_eq!(page.config.did.as_str(), ALICE_DID, "a loaded persona");
+        assert!(!page.config.name.is_empty());
+        assert_eq!(c.settings.persona_did, ALICE_DID);
+        assert_eq!(c.vta.persona_did, ALICE_DID);
+        assert!(
+            c.vta
+                .active_dids
+                .iter()
+                .any(|d| d.label.starts_with("R-DID"))
+        );
+        assert_eq!(
+            c.vta.vics[0].issuer_agent_name.as_deref(),
+            Some("vtc.example/@club")
+        );
+        assert!(!c.vetting.personas.is_empty());
+        // The joined application is done with; the one still joining shows.
+        assert_eq!(c.vetting.applications.len(), 1);
+        assert!(
+            !c.vetting.memberships.is_empty(),
+            "the grant names a vetter"
+        );
+        assert!(c.inbox.tasks.iter().any(|t| matches!(
+            &t.kind,
+            content::TaskKind::RelationshipRequestOutbound { our_did, .. }
+                if our_did == "did:key:zRelationshipDid"
+        )));
+        let joining = &c.communities.joining;
+        assert_eq!(joining.len(), 1);
+        assert!(joining[0].accent.is_some(), "branded");
+        assert!(!c.credentials.vetting.is_empty());
+        assert!(c.communities.actions_required > 0);
     }
 
     /// Each panel synced alone shows exactly what the full sync shows it, and
@@ -3874,12 +4028,12 @@ mod tests {
     fn each_panel_synced_alone_shows_what_the_full_sync_shows() {
         let _clock = test_clock::freeze(chrono::Utc::now());
         let config = busy_config();
-        let mut full = MainPageState::default();
+        let mut full = blank_page();
         full.sync_from_config(&config);
-        let untouched = MainPageState::default();
+        let untouched = blank_page();
 
         for panel in EACH_PANEL {
-            let mut alone = MainPageState::default();
+            let mut alone = blank_page();
             alone.sync_panels(&config, panel);
             assert_eq!(shown(&alone, panel), shown(&full, panel), "{panel:?}");
             for other in EACH_PANEL.into_iter().filter(|p| *p != panel) {
@@ -3902,10 +4056,10 @@ mod tests {
     fn the_full_sync_is_every_panel_synced() {
         let _clock = test_clock::freeze(chrono::Utc::now());
         let config = busy_config();
-        let mut full = MainPageState::default();
+        let mut full = blank_page();
         full.sync_from_config(&config);
 
-        let mut one_by_one = MainPageState::default();
+        let mut one_by_one = blank_page();
         for panel in EACH_PANEL.into_iter().rev() {
             one_by_one.sync_panels(&config, panel);
         }
@@ -3915,41 +4069,58 @@ mod tests {
             .into_iter()
             .fold(Panels::HEADER, |all, panel| all | panel);
         assert_eq!(union, Panels::ALL);
-        let mut all = MainPageState::default();
+        let mut all = blank_page();
         all.sync_panels(&config, Panels::ALL);
         assert_eq!(shown_all(&all), shown_all(&full));
     }
 
     /// After `change`, syncing only `panels` leaves the page as a full sync
-    /// would, and the change shows on at least one of them.
-    fn assert_reaches_only(panels: Panels, change: impl FnOnce(&mut Config, &mut MainPageState)) {
+    /// would. With `each_changes`, every panel in the set shows the change
+    /// too, so none of them could be dropped from it.
+    fn assert_change_syncs(
+        panels: Panels,
+        each_changes: bool,
+        change: impl FnOnce(&mut Config, &mut MainPageState),
+    ) {
         let _clock = test_clock::freeze(chrono::Utc::now());
         let mut config = busy_config();
-        let mut page = MainPageState::default();
+        let mut page = blank_page();
         page.sync_from_config(&config);
-        let before = shown_all(&page);
+        let before = page.clone();
 
         change(&mut config, &mut page);
-        let mut partial = page.clone();
-        partial.sync_panels(&config, panels);
-        let mut full = page;
-        full.sync_from_config(&config);
+        page.sync_panels(&config, panels);
+        assert_fully_synced(&page, &config);
 
-        assert_eq!(shown_all(&partial), shown_all(&full));
-        assert_ne!(shown_all(&full), before, "the change shows somewhere");
+        let changed: Vec<Panels> = EACH_PANEL
+            .into_iter()
+            .filter(|p| shown(&page, *p) != shown(&before, *p))
+            .collect();
+        assert!(!changed.is_empty(), "the change shows somewhere");
+        if each_changes {
+            for panel in EACH_PANEL.into_iter().filter(|p| panels.contains(*p)) {
+                assert!(
+                    changed.contains(&panel),
+                    "{panel:?} does not show the change, so the set does not need it"
+                );
+            }
+        }
     }
 
     #[test]
     fn a_task_change_reaches_only_the_inbox() {
-        assert_reaches_only(Panels::FROM_TASKS, |config, _| {
+        assert_change_syncs(Panels::FROM_TASKS, true, |config, _| {
             config.private.tasks.clear();
         });
     }
 
+    /// Each input a relationship change touches reaches one of the panels:
+    /// our DID on an outbound request (inbox), the alias (relationships), a
+    /// VRC (credentials), a key (VTA).
     #[test]
     fn a_relationship_change_reaches_only_the_panels_that_read_it() {
         use openvtc_core::config::protected_config::Contact;
-        assert_reaches_only(Panels::FROM_RELATIONSHIPS, |config, _| {
+        assert_change_syncs(Panels::FROM_RELATIONSHIPS, true, |config, _| {
             let remote = Arc::new(BOB_DID.to_string());
             config.private.contacts.contacts.insert(
                 remote.clone(),
@@ -3969,74 +4140,106 @@ mod tests {
         });
     }
 
+    /// A vetting outcome changes the book and clears the task the step
+    /// answered (`outcome::sent_result`): statements (credentials), a new
+    /// application (the Vetting page, and a joining row), branding
+    /// (communities), the task (inbox).
     #[test]
     fn a_vetting_book_change_reaches_only_the_panels_that_read_it() {
-        assert_reaches_only(Panels::FROM_VETTING_BOOK, |config, _| {
-            config.private.vetting.applications[0].statements.clear();
+        assert_change_syncs(Panels::FROM_VETTING_BOOK, true, |config, _| {
             let persona = config.active_persona.unwrap();
+            let book = &mut config.private.vetting;
+            book.applications[0].statements.clear();
+            book.start_application(
+                "did:web:third.example",
+                persona,
+                ALICE_DID,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+            book.communities[0].branding.accent_color = Some("#993366".into());
             config
                 .private
-                .vetting
-                .start_application(
-                    "did:web:other.example",
-                    persona,
-                    ALICE_DID,
-                    chrono::Utc::now(),
-                )
-                .unwrap();
+                .tasks
+                .remove(&Arc::new("task-accepted".to_string()));
         });
     }
 
+    /// A favourite moves the second Active community first in display order,
+    /// so the header names it.
     #[test]
-    fn a_favourite_or_archive_mark_reaches_only_the_panels_that_read_it() {
-        assert_reaches_only(Panels::FROM_DISPLAY_ORDER, |config, _| {
-            for c in config.account.communities.values_mut().flatten() {
-                c.toggle_favourite();
-                c.archived = true;
-            }
+    fn a_favourite_reaches_only_the_panels_that_read_display_order() {
+        assert_change_syncs(Panels::FROM_DISPLAY_ORDER, true, |config, _| {
+            config.account.communities.get_mut(SECOND_VTC).unwrap()[0].toggle_favourite();
+        });
+    }
+
+    /// Archiving an inactive membership (the only kind that can be).
+    #[test]
+    fn archiving_reaches_only_the_panels_that_read_display_order() {
+        assert_change_syncs(Panels::FROM_DISPLAY_ORDER, false, |config, _| {
+            let persona = config.active_persona.unwrap();
+            config
+                .account
+                .archive_membership(REJECTED_VTC, persona)
+                .expect("an inactive membership archives");
         });
     }
 
     #[test]
     fn the_friendly_name_reaches_only_the_header_and_settings() {
-        assert_reaches_only(Panels::FROM_FRIENDLY_NAME, |config, _| {
+        assert_change_syncs(Panels::FROM_FRIENDLY_NAME, true, |config, _| {
             config.public.friendly_name = "Someone Else".into();
         });
     }
 
     #[test]
     fn the_protection_reaches_only_settings() {
-        assert_reaches_only(Panels::SETTINGS, |config, _| {
+        assert_change_syncs(Panels::SETTINGS, true, |config, _| {
             config.public.protection =
                 openvtc_core::config::ConfigProtectionType::Token("card-1".into());
         });
     }
 
+    /// Showing archived memberships lists the archived Left one: only the
+    /// overview reads the toggle.
     #[test]
     fn showing_archived_reaches_only_the_communities() {
-        assert_reaches_only(Panels::COMMUNITIES, |config, page| {
-            for c in config.account.communities.values_mut().flatten() {
-                c.archived = true;
-            }
-            // Archived, then shown: only the communities overview reads the
-            // toggle. The header's reach of the mark itself is pinned above.
+        assert_change_syncs(Panels::COMMUNITIES, true, |_, page| {
             page.content_panel.communities.show_archived = true;
-            page.sync_panels(config, Panels::HEADER);
         });
     }
 
     #[test]
     fn an_acknowledgement_reaches_only_the_communities() {
-        use openvtc_core::config::account::CommunityStatus;
-        assert_reaches_only(Panels::COMMUNITIES, |config, page| {
-            for c in config.account.communities.values_mut().flatten() {
-                c.status = CommunityStatus::Rejected;
-                c.acknowledged = false;
-            }
-            page.sync_from_config(config);
-            for c in config.account.communities.values_mut().flatten() {
-                c.acknowledge();
-            }
+        assert_change_syncs(Panels::COMMUNITIES, true, |config, _| {
+            config.account.communities.get_mut(REJECTED_VTC).unwrap()[0].acknowledge();
         });
+    }
+
+    /// With nothing in `Config` changed, time passing changes exactly the
+    /// panels in [`Panels::FROM_CLOCK`] — each of them — which the loop's
+    /// minute refresh syncs.
+    #[test]
+    fn time_passing_reaches_only_the_panels_the_minute_refresh_syncs() {
+        let config = busy_config();
+        let now = chrono::Utc::now();
+        let mut page = blank_page();
+        {
+            let _clock = test_clock::freeze(now);
+            page.sync_from_config(&config);
+        }
+        let before = page.clone();
+
+        let _clock = test_clock::freeze(now + chrono::Duration::days(400));
+        page.sync_panels(&config, Panels::FROM_CLOCK);
+        assert_fully_synced(&page, &config);
+        for panel in EACH_PANEL {
+            assert_eq!(
+                shown(&page, panel) != shown(&before, panel),
+                Panels::FROM_CLOCK.contains(panel),
+                "{panel:?}"
+            );
+        }
     }
 }
