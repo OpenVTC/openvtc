@@ -91,8 +91,8 @@ dirs = "7.0"
 # on one `vta-sdk` line; this must be the release on the line pinned below, or
 # the graph holds two sdks (`git_signing` hands it a `VtaClient`). `vgi-core` is
 # always the same release as `did-git-sign`.
-did-git-sign = "0.33.0"
-vgi-core = "0.33.0"
+did-git-sign = "0.34.0"
+vgi-core = "0.34.0"
 dialoguer = { version = "0.12", features = ["password"] }
 # Must be the node the resolver uses (`cargo tree -i didwebvh-rs`: one node).
 # 0.8.1+ mints a did:webvh with its did:scid presentation. All DID <-> URL
@@ -172,7 +172,7 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # `trust-tasks-rs`, `affinidi-tdk`, `affinidi-messaging-sdk` and
 # `dtg-credentials`. Name the patch when a specific release is what makes the
 # line work. Check: `cargo tree -d -e normal,build,dev`.
-vta-sdk = { version = "0.80.0", features = [
+vta-sdk = { version = "0.86.0", features = [
   "session",
   "client",
   # Registers the same per-platform credential store as the other VTI tools
