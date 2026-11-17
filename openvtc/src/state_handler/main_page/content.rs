@@ -26,7 +26,7 @@ use vta_sdk::protocols::vetting::{
 /// Holds the credential *source* (an `Arc`, so cloning a panel state is a
 /// pointer bump) and pretty-prints it only when a detail view is actually
 /// rendered — avoiding a `serde_json::to_string_pretty` per credential on
-/// every `sync_from_config` (i.e. every config mutation / inbound message).
+/// every sync of a panel that lists credentials (every change it shows).
 ///
 /// Two source shapes exist because the displayed JSON must be **byte-identical**
 /// to the previous eager output:
@@ -1902,7 +1902,7 @@ pub struct VicSummary {
     /// already targets, so a name is usually available. Not set by
     /// [`VicSummary::from_descriptor`] — that maps a vault descriptor and has no
     /// `Config` — but stitched on in `MainPageState::sync_vic_agent_names`,
-    /// which runs at every `sync_from_config` and after every vault reload.
+    /// which runs at every sync of the VTA panel and after every vault reload.
     pub issuer_agent_name: Option<String>,
     /// Validity status: "valid" / "expired" / "revoked" / "unknown".
     pub status: String,

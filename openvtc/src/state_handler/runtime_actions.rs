@@ -192,7 +192,10 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     c.toggle_favourite();
                 }
                 ctx.save.mark_dirty();
-                ctx.state.main_page.sync_from_config(ctx.config);
+                ctx.state.main_page.sync_panels(
+                    ctx.config,
+                    crate::state_handler::main_page::Panels::FROM_DISPLAY_ORDER,
+                );
                 if let Some(new_idx) = ctx
                     .config
                     .account
@@ -222,7 +225,10 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
             {
                 c.acknowledge();
                 ctx.save.mark_dirty();
-                ctx.state.main_page.sync_from_config(ctx.config);
+                ctx.state.main_page.sync_panels(
+                    ctx.config,
+                    crate::state_handler::main_page::Panels::COMMUNITIES,
+                );
             }
         }
         Action::LeaveCommunity(i) => {
@@ -747,7 +753,10 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 match ctx.config.account.archive_membership(&vtc, persona) {
                     Ok(()) => {
                         ctx.save.mark_dirty();
-                        ctx.state.main_page.sync_from_config(ctx.config);
+                        ctx.state.main_page.sync_panels(
+                            ctx.config,
+                            crate::state_handler::main_page::Panels::FROM_DISPLAY_ORDER,
+                        );
                         ctx.state.main_page.content_panel.communities.status_message =
                             Some(Status::success("Community archived.".to_string()));
                     }
@@ -763,7 +772,10 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
             // archived records stay discoverable.
             let comms = &mut ctx.state.main_page.content_panel.communities;
             comms.show_archived = !comms.show_archived;
-            ctx.state.main_page.sync_from_config(ctx.config);
+            ctx.state.main_page.sync_panels(
+                ctx.config,
+                crate::state_handler::main_page::Panels::COMMUNITIES,
+            );
         }
         Action::OpenCommunitySwitcher => {
             // R-C-7: list the Active communities (the only switchable

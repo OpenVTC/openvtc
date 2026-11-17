@@ -711,7 +711,10 @@ pub(super) fn plan_abandon_application(state: &mut State, config: &mut Config) -
     let asked = app.requests.len();
     back(panel(state));
     panel(state).selected = 0;
-    state.main_page.sync_from_config(config);
+    state.main_page.sync_panels(
+        config,
+        crate::state_handler::main_page::Panels::FROM_VETTING_BOOK,
+    );
     VettingEffect(vec![
         Step::MarkDirty,
         Step::Status(Status::success(if asked == 0 {

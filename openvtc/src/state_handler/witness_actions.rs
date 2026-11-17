@@ -361,7 +361,10 @@ impl WitnessOutcome {
                 }
                 config.private.witnessings.push(record);
                 save.mark_dirty();
-                state.main_page.sync_from_config(config);
+                state.main_page.sync_panels(
+                    config,
+                    crate::state_handler::main_page::Panels::RELATIONSHIPS,
+                );
                 // Back to the relationship, which now lists the witnessing. A failure stays on
                 // the prompt instead, so another witness can be tried.
                 let rels = &mut state.main_page.content_panel.relationships;

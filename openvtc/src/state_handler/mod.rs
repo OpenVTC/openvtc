@@ -3558,7 +3558,9 @@ fn queue_for_check(
                     .communities
                     .verifying
                     .insert(vtc);
-                state.main_page.sync_from_config(config);
+                state
+                    .main_page
+                    .sync_panels(config, crate::state_handler::main_page::Panels::COMMUNITIES);
             }
             Ok(())
         }

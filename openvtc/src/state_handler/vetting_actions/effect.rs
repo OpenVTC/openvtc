@@ -9,7 +9,8 @@
 //!
 //! A step that fails ([`Step::Sign`], [`Step::Send`], [`Step::CardKeys`])
 //! applies its [`Abort`] — the book changes it undoes, then the failure said
-//! through [`give_up`] — and the steps after it are not run.
+//! through [`give_up`] — and the steps after it are not run, except those
+//! marked [`Step::Always`], which follow an action whatever became of it.
 
 use std::collections::VecDeque;
 
@@ -179,6 +180,21 @@ pub(super) enum Step {
     /// Plan one of a PCS job's answers on the state and book as the steps
     /// before left them ([`pcs::plan_pcs_answer`]), and run its steps next.
     PcsAnswer(Box<PcsAnswer>),
+    /// Run the step inside even when a step before it gave up. The steps a
+    /// plan makes of it ([`Step::Then`]) are ordinary: one of them giving up
+    /// skips the rest of them, but not the `Always` steps after.
+    Always(Box<Step>),
+}
+
+impl Step {
+    /// `step`, run even when a step before it gave up.
+    pub(super) fn always(step: Step) -> Self {
+        Self::Always(Box::new(step))
+    }
+
+    fn runs_always(&self) -> bool {
+        matches!(self, Self::Always(_))
+    }
 }
 
 /// What a started job at the VTA changes on the page.
@@ -232,6 +248,14 @@ pub(super) enum Followup {
         community: String,
         persona: PersonaId,
         now: DateTime<Utc>,
+    },
+    // Hidden vetting
+    /// Ask the community of hidden-vetting application `application_id` for a
+    /// submission challenge; quietly when the status line changed since
+    /// `said_before` to a warning or an error, which stays.
+    AskChallenge {
+        application_id: String,
+        said_before: Option<Status>,
     },
 }
 
@@ -367,9 +391,12 @@ impl Undo {
     }
 }
 
-/// Run `effect`'s steps in order, stopping at the first that gives up.
+/// Run `effect`'s steps in order. A step that gives up skips every step after
+/// it but the [`Step::Always`] ones.
 pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
     let mut steps: VecDeque<Step> = effect.0.into();
+    // What is left once a step gave up: only the steps that run regardless.
+    let gave_up = |steps: &mut VecDeque<Step>| steps.retain(Step::runs_always);
     let mut signed: Option<(PersonaId, Document)> = None;
     let mut keys: Option<CardKeys> = None;
     let said_before = panel(ctx.state).status_message.clone();
@@ -385,7 +412,10 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                 abort,
             } => match sign(ctx, persona, &mut document).await {
                 Ok(()) => signed = Some((persona, *document)),
-                Err(e) => return abort.apply(ctx.state, ctx.config, e),
+                Err(e) => {
+                    abort.apply(ctx.state, ctx.config, e);
+                    gave_up(&mut steps);
+                }
             },
             Step::Send { sent, claim, abort } => {
                 // A plan builds a send only after its signing
@@ -393,10 +423,12 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                 // stops the run, so a document is always held here.
                 let Some((persona, document)) = signed.take() else {
                     debug_assert!(false, "a vetting send planned without a signing");
-                    return;
+                    gave_up(&mut steps);
+                    continue;
                 };
                 if let Err(e) = send_signed(ctx, persona, document, *sent, claim) {
-                    return abort.apply(ctx.state, ctx.config, e);
+                    abort.apply(ctx.state, ctx.config, e);
+                    gave_up(&mut steps);
                 }
             }
             Step::Then(followup) => {
@@ -409,14 +441,18 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
             // Faces and the card
             Step::CardKeys { persona, abort } => match card_keys(ctx, persona).await {
                 Ok(found) => keys = Some(found),
-                Err(e) => return abort.apply(ctx.state, ctx.config, e),
+                Err(e) => {
+                    abort.apply(ctx.state, ctx.config, e);
+                    gave_up(&mut steps);
+                }
             },
             Step::Face { work, claim } => {
                 // A plan builds a face job only when the loop held a VTA
                 // session, and the session is not dropped within an arm.
                 let Some(client) = ctx.admin_vta.cloned() else {
                     debug_assert!(false, "a face job planned without a VTA session");
-                    return;
+                    gave_up(&mut steps);
+                    continue;
                 };
                 spawn_face(ctx, client, *work, keys.take(), claim);
             }
@@ -425,10 +461,12 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                 // As with `Send`: a plan keeps a session only after its signing.
                 let Some((_, document)) = signed.as_ref() else {
                     debug_assert!(false, "a session kept without a signing");
-                    return;
+                    gave_up(&mut steps);
+                    continue;
                 };
                 if let Err(e) = keep_session(ctx.config, &request_id, document) {
-                    return abort.apply(ctx.state, ctx.config, e);
+                    abort.apply(ctx.state, ctx.config, e);
+                    gave_up(&mut steps);
                 }
             }
             Step::Statement(statement) => deliver_statement(ctx, *statement).await,
@@ -496,6 +534,7 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                     steps.push_front(step);
                 }
             }
+            Step::Always(step) => steps.push_front(*step),
         }
     }
 }
@@ -503,12 +542,17 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
 /// Show `summary`, unless the status line changed since `said_before` to a
 /// warning or an error ([`Step::Summary`]).
 fn summarise(state: &mut State, said_before: Option<&Status>, summary: Status) {
-    let now = panel(state).status_message.as_ref();
-    let warned = now != said_before
-        && now.is_some_and(|s| matches!(s.severity, Severity::Warning | Severity::Error));
-    if !warned {
+    if !warned_since(state, said_before) {
         show(state, summary);
     }
+}
+
+/// Whether the status line changed since `said_before` to a warning or an
+/// error: news a later word must not cover.
+pub(super) fn warned_since(state: &mut State, said_before: Option<&Status>) -> bool {
+    let now = panel(state).status_message.as_ref();
+    now != said_before
+        && now.is_some_and(|s| matches!(s.severity, Severity::Warning | Severity::Error))
 }
 
 /// Run an effect of local steps — [`Step::Persist`], [`Step::MarkDirty`],

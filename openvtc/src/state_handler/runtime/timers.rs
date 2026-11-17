@@ -191,7 +191,9 @@ impl Runtime {
             });
             if config.private.tasks.tasks.len() != before {
                 save.mark_dirty();
-                state.main_page.sync_from_config(config);
+                state
+                    .main_page
+                    .sync_panels(config, crate::state_handler::main_page::Panels::FROM_TASKS);
             }
             let line = format!(
                 "No reply to the ping after {} s — they may be offline, or not \
@@ -286,7 +288,10 @@ impl Runtime {
         }
         if vetting_changed {
             save.mark_dirty();
-            state.main_page.sync_from_config(config);
+            state.main_page.sync_panels(
+                config,
+                crate::state_handler::main_page::Panels::FROM_VETTING_BOOK,
+            );
         }
         // The vetter side runs on its own schedule — the
         // hidden-vetting tick below, at least hourly.
@@ -379,7 +384,9 @@ impl Runtime {
                 );
             }
             save.mark_dirty();
-            state.main_page.sync_from_config(config);
+            state
+                .main_page
+                .sync_panels(config, crate::state_handler::main_page::Panels::FROM_TASKS);
             let _ = handler.state_tx.publish(state);
         }
     }
@@ -434,6 +441,13 @@ impl Runtime {
                 tokio::spawn(openvtc_core::join::status_poll::send_all(atm, polls));
             }
         }
+        // A change syncs only the panels that read it, so text that turns with
+        // the clock alone — a credential expiring, a join awaiting its
+        // acknowledgement, a vetter grant running out — is brought up to date
+        // here, at most a minute late.
+        state
+            .main_page
+            .sync_panels(config, crate::state_handler::main_page::Panels::FROM_CLOCK);
     }
 
     pub(super) async fn on_hidden_vetting_tick(&mut self) {

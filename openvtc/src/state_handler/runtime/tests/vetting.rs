@@ -171,6 +171,62 @@ async fn refreshing_requirements_files_the_question_and_claims_the_domain() {
     );
 }
 
+// The challenge and the vetter pass follow a refresh whatever became of it:
+// refused while busy, given up at the key lookup, or with no application
+// selected at all.
+
+#[tokio::test]
+async fn refreshing_requirements_while_busy_still_runs_the_vetter_pass() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+    application(&mut rt, persona);
+    rebound_engine(&mut rt, persona);
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    act(&mut rt, VettingAction::RefreshRequirements).await;
+
+    assert!(!asked(&rt, QueryKind::Manifest), "the refresh was refused");
+    assert!(key_check_started(&rt), "the vetter pass ran after it");
+    assert!(asked(&rt, QueryKind::PcsBinding));
+    assert!(busy(&rt), "the other job still holds the domain");
+}
+
+#[tokio::test]
+async fn refreshing_requirements_without_keys_still_runs_the_vetter_pass() {
+    let (mut rt, _h) = runtime().await;
+    let persona = persona_without_keys(&mut rt, "did:key:zApplicant").await;
+    application(&mut rt, persona);
+    rebound_engine(&mut rt, persona);
+
+    act(&mut rt, VettingAction::RefreshRequirements).await;
+
+    assert!(!asked(&rt, QueryKind::Manifest));
+    assert!(
+        key_check_started(&rt),
+        "the vetter pass ran after the give-up"
+    );
+    assert!(
+        log_line(&rt, "Could not ask the community")
+            < log_line(&rt, "which hidden-vetting key it holds for you"),
+        "the refresh gives up before the pass runs"
+    );
+    assert!(!asked(&rt, QueryKind::PcsBinding));
+}
+
+#[tokio::test]
+async fn refreshing_requirements_with_no_application_runs_the_vetter_pass() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    rebound_engine(&mut rt, persona);
+
+    act(&mut rt, VettingAction::RefreshRequirements).await;
+
+    assert!(!asked(&rt, QueryKind::Manifest));
+    assert!(key_check_started(&rt));
+    assert!(asked(&rt, QueryKind::PcsBinding));
+    assert!(!busy(&rt), "the pass asks on the client's own");
+}
+
 // ---- start an application ----
 
 fn new_application_form(rt: &mut Runtime, community: &str) {
@@ -3390,5 +3446,161 @@ mod hidden {
         );
         assert!(logged(&rt.state, &format!("Hidden vetting at {VTC} — ")));
         assert!(rt.save.is_pending());
+    }
+
+    /// The challenge's progress note follows a refresh that went out: a
+    /// warning on the status line from before the refresh is not news the
+    /// refresh left, so it does not hold the note back.
+    #[tokio::test]
+    async fn a_challenge_after_a_refresh_that_went_out_says_it_is_asking() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        hidden_application(&mut rt, persona);
+        rt.state.main_page.content_panel.vetting.status_message =
+            Some(Status::warning("from an earlier action"));
+
+        act(&mut rt, VettingAction::RefreshRequirements).await;
+
+        assert!(asked(&rt, QueryKind::Manifest));
+        assert!(asked(&rt, QueryKind::PcsChallenge));
+        assert_eq!(
+            status(&rt),
+            &Status::progress("Asking the community for a submission challenge…")
+        );
+    }
+
+    // ---- a refresh's follow-ups, in order ----
+
+    #[tokio::test]
+    async fn a_refresh_gives_up_then_the_challenge_then_the_vetter_pass() {
+        let (mut rt, _h) = runtime().await;
+        let persona = persona_without_keys(&mut rt, "did:key:zApplicant").await;
+        hidden_application(&mut rt, persona);
+        rebound_engine(&mut rt, persona);
+
+        act(&mut rt, VettingAction::RefreshRequirements).await;
+
+        let requirements = log_line(&rt, "Could not ask the community");
+        let challenge = log_line(&rt, "Could not ask for a submission challenge");
+        let pass = log_line(&rt, "which hidden-vetting key it holds for you");
+        assert!(requirements < challenge && challenge < pass);
+        assert!(key_check_started(&rt));
+        assert!(!asked(&rt, QueryKind::PcsChallenge));
+        assert!(!asked(&rt, QueryKind::PcsBinding));
+    }
+
+    // ---- attesting a request that asks for a proof ----
+
+    /// A desk request from the applicant carrying its PCS identifier, its
+    /// card in, and the attest form ticked.
+    fn hidden_card(rt: &mut Runtime, persona: PersonaId) -> String {
+        let id = super::desk_request(rt, persona);
+        let entry = rt.config.private.vetting.desk_entry_mut(&id).unwrap();
+        let mut raw = serde_json::to_value(&entry.request).unwrap();
+        raw.as_object_mut().unwrap().insert(
+            "ext".into(),
+            openvtc_core::vetting::hidden::request_ext(SUITE, "zApplicantId"),
+        );
+        entry.request = serde_json::from_value(raw).unwrap();
+        card_received(rt, &id, "did:key:zVetter");
+        attest_form(rt, &id, true);
+        id
+    }
+
+    #[tokio::test]
+    async fn attesting_a_proof_unenrolled_enrols_through_the_vetter_pass() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+        grant(&mut rt, persona);
+        rt.config
+            .private
+            .vetting
+            .hidden_published
+            .insert(VTC.into(), params());
+        reads_as_hidden(&mut rt);
+        let id = hidden_card(&mut rt, persona);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(issued(&rt), 0, "nothing was signed");
+        assert!(matches!(page(&rt).mode, VettingMode::List));
+        assert!(matches!(
+            desk_state(&rt, &id),
+            DeskState::CardReceived { .. }
+        ));
+        assert_eq!(
+            rt.config.private.vetting.hidden_vetter.len(),
+            1,
+            "the vetter pass minted the engine"
+        );
+        assert_eq!(held(&rt).persona, persona);
+        assert!(rt.save.is_pending());
+    }
+
+    #[tokio::test]
+    async fn attesting_a_proof_unenrolled_while_busy_still_enrols() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+        grant(&mut rt, persona);
+        rt.config
+            .private
+            .vetting
+            .hidden_published
+            .insert(VTC.into(), params());
+        reads_as_hidden(&mut rt);
+        hidden_card(&mut rt, persona);
+        assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(rt.config.private.vetting.hidden_vetter.len(), 1);
+        assert!(matches!(page(&rt).mode, VettingMode::List));
+    }
+
+    #[tokio::test]
+    async fn attesting_a_proof_with_no_vta_says_it_is_not_connected() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+        engine(&mut rt, persona);
+        reads_as_hidden(&mut rt);
+        let id = hidden_card(&mut rt, persona);
+        // A person's job holding the vetting domain does not stop it: the
+        // attestation is the VTA's job, on its own domain.
+        assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        let s = status(&rt);
+        assert_eq!(s.severity, Severity::Error);
+        assert!(
+            s.text
+                .starts_with("A hidden attestation is made by your VTA, and it is not connected"),
+            "{}",
+            s.text
+        );
+        assert!(matches!(page(&rt).mode, VettingMode::Attest { .. }));
+        assert!(matches!(
+            desk_state(&rt, &id),
+            DeskState::CardReceived { .. }
+        ));
+        assert_eq!(issued(&rt), 0);
+        assert!(!rt.in_flight.is_busy(DispatchDomain::HiddenVetting));
+    }
+
+    #[tokio::test]
+    async fn attesting_a_proof_with_no_token_says_to_wait() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+        engine(&mut rt, persona);
+        reads_as_hidden(&mut rt);
+        hidden_card(&mut rt, persona);
+        rt.admin_vta = Some(vta_sdk::client::VtaClient::new("http://127.0.0.1:1"));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        let s = status(&rt);
+        assert_ne!(s.severity, Severity::Progress, "{}", s.text);
+        assert!(!rt.in_flight.is_busy(DispatchDomain::HiddenVetting));
+        assert_eq!(issued(&rt), 0);
     }
 }

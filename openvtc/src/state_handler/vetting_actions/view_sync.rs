@@ -27,8 +27,7 @@ use crate::state_handler::main_page::content::{
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
 
 /// Rebuild the page's rows from the book.
-pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
-    let now = Utc::now();
+pub(crate) fn sync(vetting: &mut VettingState, config: &Config, now: DateTime<Utc>) {
     let book = &config.private.vetting;
     let name = |did: &str| config.agent_name_for(did).map(|n| sanitize_display(n, 256));
     // The membership's own name first; the name the community gives itself in
@@ -615,7 +614,7 @@ mod tests {
             },
         });
         let mut v = VettingState::default();
-        sync(&mut v, &config);
+        sync(&mut v, &config, Utc::now());
         assert_eq!(v.attested_hidden.len(), 1);
         assert_eq!(v.attested_hidden[0].1, now.format("%Y-%m-%d").to_string());
         assert!(v.issued.is_empty());
@@ -645,7 +644,7 @@ mod tests {
             now,
         );
         let mut v = VettingState::default();
-        sync(&mut v, &config);
+        sync(&mut v, &config, Utc::now());
         assert_eq!(
             v.tickets[0].mode_note.as_deref(),
             Some("issued under PCS ZKP")
@@ -656,7 +655,7 @@ mod tests {
             VetterMode::PcsZkp,
             now,
         );
-        sync(&mut v, &config);
+        sync(&mut v, &config, Utc::now());
         assert_eq!(v.tickets[0].mode_note, None);
     }
 
@@ -672,7 +671,7 @@ mod tests {
         .unwrap();
         config.private.vetting.applications.push(app);
         let mut v = VettingState::default();
-        sync(&mut v, &config);
+        sync(&mut v, &config, Utc::now());
         assert!(
             v.directory_communities.is_empty(),
             "a deleted persona's application is not a searcher: {:?}",
@@ -718,7 +717,7 @@ mod tests {
             Utc::now(),
         ));
         let mut v = VettingState::default();
-        sync(&mut v, &config);
+        sync(&mut v, &config, Utc::now());
         assert_eq!(v.applications.len(), 1);
         assert_eq!(
             v.applications[0].next_step.as_deref(),
