@@ -2251,11 +2251,13 @@ mod tests {
             &ws_view(&s).workspace.form,
             Some(WorkspaceForm::Settings { error: Some(e), .. }) if e.starts_with("Use an absolute path")
         ));
-        ws_view_mut(&mut s).workspace.form = form("/srv/code");
+        // Absolute on every platform (`/srv/code` is not absolute on Windows).
+        let root = std::env::temp_dir().join("code");
+        ws_view_mut(&mut s).workspace.form = form(&root.to_string_lossy());
         let WorkspaceEffect::Job(job) = plan(&mut s, &config, W::SettingsSubmit) else {
             panic!("a valid root is saved by a job");
         };
-        assert!(matches!(&job.work, Work::Settings { root, .. } if root == Path::new("/srv/code")));
+        assert!(matches!(&job.work, Work::Settings { root: saved, .. } if *saved == root));
         assert!(ws_view(&s).status.is_none());
         assert!(matches!(
             plan(&mut s, &config, W::Clone),
