@@ -1621,16 +1621,14 @@ pub(crate) fn plan_tick(state: &mut State, now: Instant, wall: DateTime<Utc>) ->
             ),
         );
     }
-    if let Some(view) = view_mut(state) {
-        if let Some(link) = view.link.as_mut() {
-            if link.phase == LinkPhase::Waiting && link.expires_at.is_some_and(|e| wall >= e) {
-                link.phase = LinkPhase::Expired;
-            }
-            if link.poll_due(now, wall)
-                && let Some(link_id) = link.link_id.clone()
-            {
-                poll = Some(link_id);
-            }
+    if let Some(link) = view_mut(state).and_then(|v| v.link.as_mut()) {
+        if link.phase == LinkPhase::Waiting && link.expires_at.is_some_and(|e| wall >= e) {
+            link.phase = LinkPhase::Expired;
+        }
+        if link.poll_due(now, wall)
+            && let Some(link_id) = link.link_id.clone()
+        {
+            poll = Some(link_id);
         }
     }
     let mut steps: Vec<Step> = poll
