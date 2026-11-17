@@ -7,9 +7,9 @@
 //! job that claims the vetting domain, and anything planned on the state those
 //! leave behind — is a [`VettingEffect`]: steps [`run`] does in order.
 //!
-//! A step that fails ([`Step::Sign`], [`Step::Send`]) applies its [`Abort`] —
-//! the book changes it undoes, then the failure said through
-//! [`give_up`] — and the steps after it are not run.
+//! A step that fails ([`Step::Sign`], [`Step::Send`], [`Step::CardKeys`])
+//! applies its [`Abort`] — the book changes it undoes, then the failure said
+//! through [`give_up`] — and the steps after it are not run.
 
 use std::collections::VecDeque;
 
@@ -20,6 +20,7 @@ use openvtc_core::vetting::registry::VetterProfileRecord;
 use openvtc_core::vetting::wire::Document;
 
 use super::dispatch::{panel, persist, plan_followup, show};
+use super::faces::{CardKeys, FaceWork, card_keys, spawn_face};
 use super::jobs::Sent;
 use super::send::{Claim, give_up, send_signed, sign};
 use crate::state_handler::background_dispatch::DispatchDomain;
@@ -60,6 +61,16 @@ impl VettingEffect {
         });
         Self(steps)
     }
+
+    // Faces and the card
+
+    /// Spawn the face job `work`, holding the vetting domain.
+    pub(super) fn face(work: FaceWork) -> Self {
+        Self(vec![Step::Face {
+            work: Box::new(work),
+            claim: Claim::Held,
+        }])
+    }
 }
 
 /// One thing the loop does for a planned action.
@@ -89,6 +100,13 @@ pub(super) enum Step {
     },
     /// Plan the rest on the state and book as the steps before left them.
     Then(Followup),
+    // Faces and the card
+    /// Look up `persona`'s keys for a card ([`card_keys`]). The runner holds
+    /// them for the [`Step::Face`] that follows.
+    CardKeys { persona: PersonaId, abort: Abort },
+    /// Hand a face or card job to the background, against the loop's VTA
+    /// session, held as `claim` says ([`spawn_face`]).
+    Face { work: Box<FaceWork>, claim: Claim },
 }
 
 /// A plan made only once the steps before it have run, because it reads what
@@ -185,6 +203,7 @@ impl Undo {
 pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
     let mut steps: VecDeque<Step> = effect.0.into();
     let mut signed: Option<(PersonaId, Document)> = None;
+    let mut keys: Option<CardKeys> = None;
     while let Some(step) = steps.pop_front() {
         match step {
             Step::Persist(message) => persist(ctx, message),
@@ -216,6 +235,20 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                 for step in next.into_iter().rev() {
                     steps.push_front(step);
                 }
+            }
+            // Faces and the card
+            Step::CardKeys { persona, abort } => match card_keys(ctx, persona).await {
+                Ok(found) => keys = Some(found),
+                Err(e) => return abort.apply(ctx.state, ctx.config, e),
+            },
+            Step::Face { work, claim } => {
+                // A plan builds a face job only when the loop held a VTA
+                // session, and the session is not dropped within an arm.
+                let Some(client) = ctx.admin_vta.cloned() else {
+                    debug_assert!(false, "a face job planned without a VTA session");
+                    return;
+                };
+                spawn_face(ctx, client, *work, keys.take(), claim);
             }
         }
     }

@@ -39,7 +39,7 @@
 //!
 //! # Planning a handler still on the loop
 //!
-//! The desk, tickets, faces and hidden vetting are handled by `dispatch::on_loop`
+//! The desk, tickets and hidden vetting are handled by `dispatch::on_loop`
 //! with the `send` helpers (`begin`, `abandon`, `sign_and_send`, `spawn`),
 //! which do the same things the plan and the runner do. To plan one:
 //!
@@ -65,7 +65,8 @@
 //!   recorded and returns `[Step::Persist(..), Step::Send { .. }]`. The held
 //!   document is kept by the runner from `Sign` to `Send`.
 //! - Work that is not a signed document send (a face job, a PCS job) is a new
-//!   step that spawns it with the same `Claim`. A loop-side helper still
+//!   step that spawns it with the same `Claim`, as `Step::Face` does for the
+//!   face and card jobs. A loop-side helper still
 //!   awaited after a plan (`refresh_vetter_side`, `ask_for_challenge`) is run
 //!   by the `on_loop` arm after `effect::run`, as `RefreshRequirements` does,
 //!   until it is planned in turn.
