@@ -256,6 +256,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   asking the community for its requirements could not be sent, the page still counted
   it as asked, so the next Enter opened the session without the requirements; it now
   asks again.
+- **Vetting: a decline or withdrawal that cannot be built is undone**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). If the decline or withdrawal
+  document failed to build, the request stayed declined, or the statement marked
+  withdrawn, in memory with nothing sent. Both are now put back, as they already were
+  when the signing or the send failed.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

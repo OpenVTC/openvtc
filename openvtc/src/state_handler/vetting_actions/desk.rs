@@ -932,8 +932,12 @@ pub(super) fn plan_decline(
             return VettingEffect::none();
         }
     };
-    // A document that cannot be built leaves the request declined in the
-    // book, unsaved: nothing here puts it back.
+    // From here the book holds the request declined: a failure before the
+    // decline goes out puts it back where it stood.
+    let restore = vec![Undo::RestoreDesk {
+        request_id: request_id.to_string(),
+        previous: DeskSnapshot(Box::new(entry.state.clone())),
+    }];
     let document = match wire::document(
         VETTING_DECLINE_TYPE,
         &vetter_did,
@@ -943,7 +947,7 @@ pub(super) fn plan_decline(
     ) {
         Ok(d) => d,
         Err(e) => {
-            give_up(state, config, WHAT, e);
+            Abort::undoing(WHAT, restore).apply(state, config, e);
             return VettingEffect::none();
         }
     };
@@ -958,13 +962,7 @@ pub(super) fn plan_decline(
         document,
         sent,
         Claim::Held,
-        Abort::undoing(
-            "Could not send the decline",
-            vec![Undo::RestoreDesk {
-                request_id: request_id.to_string(),
-                previous: DeskSnapshot(Box::new(entry.state)),
-            }],
-        ),
+        Abort::undoing("Could not send the decline", restore),
     )
 }
 
@@ -1011,8 +1009,9 @@ pub(super) fn plan_withdraw(
             return VettingEffect::none();
         }
     };
-    // A document that cannot be built leaves the withdrawal recorded as sent,
-    // unsaved: nothing here clears it.
+    // From here the book holds the withdrawal as sent: a failure before it
+    // goes out clears it.
+    let unwithdraw = vec![Undo::NotWithdrawn(statement_id.to_string())];
     let document = match wire::document(
         VETTING_REVOKE_STATEMENT_TYPE,
         &vetter_did,
@@ -1022,7 +1021,7 @@ pub(super) fn plan_withdraw(
     ) {
         Ok(d) => d,
         Err(e) => {
-            give_up(state, config, WHAT, e);
+            Abort::undoing(WHAT, unwithdraw).apply(state, config, e);
             return VettingEffect::none();
         }
     };
@@ -1036,10 +1035,7 @@ pub(super) fn plan_withdraw(
         document,
         sent,
         Claim::Held,
-        Abort::undoing(
-            "Could not send the withdrawal",
-            vec![Undo::NotWithdrawn(statement_id.to_string())],
-        ),
+        Abort::undoing("Could not send the withdrawal", unwithdraw),
     )
 }
 
@@ -1353,11 +1349,18 @@ mod tests {
             &Abort::undoing(
                 "Could not send the decline",
                 vec![Undo::RestoreDesk {
-                    request_id: id,
+                    request_id: id.clone(),
                     previous: DeskSnapshot(Box::new(DeskState::Accepted)),
                 }],
             )
         );
+        // The same undo a document that cannot be built applies: the request
+        // stands where it stood.
+        abort.clone().apply(&mut state, &mut config, "no keys");
+        assert!(matches!(
+            config.private.vetting.desk_entry(&id).unwrap().state,
+            DeskState::Accepted
+        ));
     }
 
     /// A decline note over the limit is refused before anything else.
