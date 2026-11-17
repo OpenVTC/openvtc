@@ -247,7 +247,7 @@ impl MainPageState {
 /// "expired" or "expires in 3 days", a join awaiting acknowledgement, a
 /// vetter grant expiring. Read once per sync, so the panels in it agree.
 ///
-/// Tests freeze it ([`test_clock::freeze`]) so two syncs compare equal across
+/// Tests freeze it (`test_clock::freeze`) so two syncs compare equal across
 /// a minute or day rollover.
 #[must_use]
 pub(crate) fn sync_clock() -> chrono::DateTime<chrono::Utc> {
