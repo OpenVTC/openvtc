@@ -39,6 +39,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The communities panel's context actions use the reducer + effect shape of the
+  identity, relationship and inbox panels** (part of
+  [#612](https://github.com/OpenVTC/openvtc/issues/612)): a pure `plan` decides what a
+  delete, device-access read, grant or revoke asks the VTA, and a runner claims the
+  domain, spawns the job and only then marks the view busy. No visible change.
 - **The admin VTA session's receive health and context-path validation come from
   vta-sdk** ([#610](https://github.com/OpenVTC/openvtc/issues/610)). The health check
   reads `VtaClient::receive_health()`, which counts every request on every clone of the

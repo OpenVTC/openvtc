@@ -82,6 +82,7 @@ action handling `runtime_actions.rs`. The feature work is in focused modules:
 | `agent_name_refresh.rs` | Off-loop batch resolution of agent names (DID→name), applied via background-dispatch (see §4). |
 | `inbox_actions.rs`, `relationship_actions.rs`, `credential_actions.rs`, `settings_actions.rs` | Per-panel business logic — each exposes a `dispatch(...)` entry point the matching `Action` arm calls. |
 | `persona_actions.rs` | The identity pane. `apply(&mut State, &PersonaAction)` is pure and returns a `PersonaEffect` naming any network work; the loop spawns it and folds the result back through `PersonaOutcome::apply`. Reads and writes share one `DispatchDomain`. |
+| `community_context_actions.rs` | A membership's VTA context: deletion and device access. `reduce` handles the view-only actions (shared with the degraded loop); `plan(&mut State, &Config, own_did, action)` is pure and returns a `ContextEffect`, whose request `run` claims and spawns, applying the effect's `Commit` only once the claim succeeded. |
 | `didcomm` | A re-export of `openvtc_core::didcomm`: the messaging service, listener config/ids and lifecycle events. |
 | `runtime/`, `runtime_actions.rs` | The runtime loop (`Runtime`, one method per `select!` arm) and its action handler. |
 | `main_page/` | Maps `Config` → display state (`sync_from_config`), menu/content models. |

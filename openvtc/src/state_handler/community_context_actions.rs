@@ -18,10 +18,12 @@
 //!   `application` role in that context alone, with an expiry, listed and
 //!   revocable per community ([`openvtc_core::community_access`]).
 //!
-//! Every VTA call is a background job in [`DispatchDomain::CommunityAccess`],
-//! applied back on the loop thread by [`ContextOutcome::apply`]. View-only
-//! changes — typing, moving the highlight, opening the grant form — go through
-//! [`reduce`], which both loops share.
+//! View-only changes — typing, moving the highlight, opening the grant form —
+//! go through [`reduce`], which both loops share. An action that reads the
+//! config or reaches the VTA is planned by [`plan`], which is pure and returns
+//! a [`ContextEffect`]; [`run`] claims [`DispatchDomain::CommunityAccess`],
+//! spawns the job and only then applies the effect's [`Commit`]. The job's
+//! answer is applied back on the loop thread by [`ContextOutcome::apply`].
 
 use crate::state_handler::main_page::status::Status;
 
@@ -181,27 +183,169 @@ fn idle_form(view: &mut Option<DeviceAccessView>) -> Option<&mut GrantForm> {
 }
 
 // ****************************************************************************
-// Loop-side actions
+// Loop-side actions: the reducer
 // ****************************************************************************
 
-/// Service an action that reads the config or reaches the VTA.
-pub(crate) fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
-    match action {
-        Act::DeleteStart(index) => start_deletion(ctx, index),
-        Act::DeleteConfirm => confirm_deletion(ctx),
-        Act::DevicesOpen(index) => open_devices(ctx, index),
-        Act::DevicesRefresh => {
-            if let Some(context_id) = panel(ctx.state)
-                .device_access
-                .as_ref()
-                .filter(|v| !v.busy)
-                .map(|v| v.context_id.clone())
-            {
-                read_grants(ctx, context_id);
+/// What a loop-side action needs beyond the state change [`plan`] already made.
+pub(crate) enum ContextEffect {
+    /// Nothing more: the action changed the view, refused, or did nothing.
+    None,
+    /// Ask the VTA ([`Request`]).
+    Request(Box<Request>),
+}
+
+/// A call to the VTA. The runner claims the domain; [`Commit`] is applied only
+/// once the claim succeeds, and [`Refusal`] says where a refusal — a busy
+/// domain, or no VTA session — is shown.
+pub(crate) struct Request {
+    /// The call, resolved to its arguments.
+    pub(crate) request: ContextRequest,
+    /// The view change owed once the job is running.
+    pub(crate) commit: Commit,
+    /// Where a refusal is shown.
+    pub(crate) refusal: Refusal,
+}
+
+/// A context call, resolved on the loop to everything but its session.
+pub(crate) enum ContextRequest {
+    /// What deleting `context_id` would remove.
+    Preview { top: String, context_id: String },
+    /// Delete the context (and the persona that goes with it).
+    Delete {
+        top: String,
+        deletion: ContextDeletion,
+        vtc_did: String,
+        persona: PersonaId,
+        community: String,
+    },
+    /// Read `context_id`'s device grants.
+    List { context_id: String },
+    /// Grant `did` access to `context_id`.
+    Grant {
+        top: String,
+        context_id: String,
+        did: String,
+        label: String,
+        expires: chrono::DateTime<Utc>,
+    },
+    /// Revoke `did`'s access to `context_id`.
+    Revoke { context_id: String, did: String },
+}
+
+impl ContextRequest {
+    /// What the call is for, in the words of "cannot … right now".
+    fn purpose(&self) -> &'static str {
+        match self {
+            ContextRequest::Preview { .. } | ContextRequest::Delete { .. } => "delete a context",
+            ContextRequest::List { .. } => "read device access",
+            ContextRequest::Grant { .. } => "grant device access",
+            ContextRequest::Revoke { .. } => "revoke device access",
+        }
+    }
+
+    /// The job, with the session and the messaging service it runs on.
+    fn into_job(self, client: VtaClient, service: &Messaging) -> ContextJob {
+        match self {
+            ContextRequest::Preview { top, context_id } => ContextJob::Preview {
+                client,
+                top,
+                context_id,
+            },
+            ContextRequest::Delete {
+                top,
+                deletion,
+                vtc_did,
+                persona,
+                community,
+            } => ContextJob::Delete {
+                client,
+                service: service.clone(),
+                top,
+                deletion,
+                vtc_did,
+                persona,
+                community,
+            },
+            ContextRequest::List { context_id } => ContextJob::List { client, context_id },
+            ContextRequest::Grant {
+                top,
+                context_id,
+                did,
+                label,
+                expires,
+            } => ContextJob::Grant {
+                client,
+                top,
+                context_id,
+                did,
+                label,
+                expires,
+            },
+            ContextRequest::Revoke { context_id, did } => ContextJob::Revoke {
+                client,
+                context_id,
+                did,
+            },
+        }
+    }
+}
+
+/// A view change made only once a request's job has claimed the domain.
+pub(crate) enum Commit {
+    /// Open the deletion view, closing the device view.
+    OpenDeletion(Box<ContextDeleteView>),
+    /// The open deletion is running.
+    Deleting,
+    /// `context_id`'s grants are being read.
+    Listing { context_id: String },
+    /// The device view is busy, saying what it is doing.
+    Busy(String),
+}
+
+/// Where a request that did not start is explained.
+#[derive(Clone, Copy)]
+pub(crate) enum Refusal {
+    /// The panel's status line.
+    Panel,
+    /// The open device view's message.
+    View,
+}
+
+impl Refusal {
+    fn show(self, state: &mut State, message: String) {
+        match self {
+            Refusal::Panel => panel(state).status_message = Some(Status::error(message)),
+            Refusal::View => {
+                if let Some(view) = panel(state).device_access.as_mut() {
+                    view.message = Some(Status::error(message));
+                }
             }
         }
-        Act::GrantSubmit => submit_grant(ctx),
-        Act::RevokeConfirm => confirm_revoke(ctx),
+    }
+}
+
+/// Plan a loop-side action. Pure: it reads `config`, changes only what the
+/// action changes before anything is asked, and returns the call the loop
+/// still owes. `own_did` is the DID the admin session authenticates as, which
+/// a grant may not name.
+pub(crate) fn plan(
+    state: &mut State,
+    config: &Config,
+    own_did: Option<&str>,
+    action: Act,
+) -> ContextEffect {
+    match action {
+        Act::DeleteStart(index) => plan_deletion(state, config, index),
+        Act::DeleteConfirm => plan_confirm_deletion(state, config),
+        Act::DevicesOpen(index) => plan_open_devices(state, config, index),
+        Act::DevicesRefresh => panel(state)
+            .device_access
+            .as_ref()
+            .filter(|v| !v.busy)
+            .map(|v| v.context_id.clone())
+            .map_or(ContextEffect::None, list_grants),
+        Act::GrantSubmit => plan_grant(state, config, own_did),
+        Act::RevokeConfirm => plan_revoke(state),
         // View-only: the shared reducer handled these before the loop saw them.
         Act::DeleteInput(_)
         | Act::DeleteCancel
@@ -213,7 +357,7 @@ pub(crate) fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
         | Act::GrantExpiry(_)
         | Act::GrantCancel
         | Act::RevokeArm
-        | Act::RevokeCancel => {}
+        | Act::RevokeCancel => ContextEffect::None,
     }
 }
 
@@ -239,24 +383,291 @@ fn community_name(config: &Config, membership: &CommunityRecord) -> String {
     )
 }
 
-/// The VTA session a job needs, or why there is none.
-fn session(ctx: &ActionCtx<'_>, what: &str) -> Result<VtaClient, String> {
-    ctx.admin_vta
-        .cloned()
-        .ok_or_else(|| format!("VTA session unavailable — cannot {what} right now."))
+fn plan_deletion(state: &mut State, config: &Config, index: usize) -> ContextEffect {
+    let Some(membership) = membership_at(state, config, index) else {
+        return ContextEffect::None;
+    };
+    let deletion = match community_context::deletable_context(
+        &config.account,
+        &config.private.vetting.applications,
+        active_persona(config),
+        membership,
+    ) {
+        Ok(deletion) => deletion,
+        Err(refusal) => {
+            panel(state).status_message = Some(Status::warning(refusal.describe()));
+            return ContextEffect::None;
+        }
+    };
+    let view = ContextDeleteView {
+        vtc_did: membership.vtc_did.clone(),
+        persona: membership.persona_ref,
+        community: community_name(config, membership),
+        context_id: deletion.context_id.clone(),
+        takes_persona: deletion.persona,
+        phase: ContextDeletePhase::Previewing,
+        typed: String::new(),
+    };
+    ContextEffect::Request(Box::new(Request {
+        request: ContextRequest::Preview {
+            top: config.account.top_context_id.clone(),
+            context_id: deletion.context_id,
+        },
+        commit: Commit::OpenDeletion(Box::new(view)),
+        refusal: Refusal::Panel,
+    }))
 }
 
-/// Claim the domain for `job` and spawn it. On a busy domain the job is
-/// dropped and `on_busy` given the reason; returns whether it started.
-fn start(
-    ctx: &mut ActionCtx<'_>,
-    job: ContextJob,
-    on_busy: impl FnOnce(&mut State, String),
-) -> bool {
+fn plan_confirm_deletion(state: &mut State, config: &Config) -> ContextEffect {
+    let Some(view) = panel(state).context_delete.clone() else {
+        return ContextEffect::None;
+    };
+    if !matches!(view.phase, ContextDeletePhase::Ready(_)) {
+        return ContextEffect::None;
+    }
+    if !community_context::confirms_deletion(&view.typed) {
+        panel(state).status_message = Some(Status::info(format!(
+            "Type {DELETE_CONFIRMATION} in capitals to delete {}.",
+            view.context_id
+        )));
+        return ContextEffect::None;
+    }
+    // Checked again, against the config as it is now: the preview may have
+    // been on screen while a join or an application started using the context.
+    let problem = match config
+        .account
+        .memberships()
+        .find(|m| m.vtc_did == view.vtc_did && m.persona_ref == view.persona)
+        .map(|m| {
+            community_context::deletable_context(
+                &config.account,
+                &config.private.vetting.applications,
+                active_persona(config),
+                m,
+            )
+        }) {
+        // The same deletion the holder was shown — including whether a persona
+        // goes with it — or none at all.
+        Some(Ok(deletion)) if deletion == view.deletion() => None,
+        Some(Ok(_)) | None => {
+            Some("The membership changed since the preview — start the deletion again.".to_string())
+        }
+        Some(Err(refusal)) => Some(refusal.describe()),
+    };
+    if let Some(problem) = problem {
+        let communities = panel(state);
+        communities.context_delete = None;
+        communities.status_message = Some(Status::warning(problem));
+        return ContextEffect::None;
+    }
+    let deletion = view.deletion();
+    let ContextDeleteView {
+        vtc_did,
+        persona,
+        community,
+        ..
+    } = view;
+    ContextEffect::Request(Box::new(Request {
+        request: ContextRequest::Delete {
+            top: config.account.top_context_id.clone(),
+            deletion,
+            vtc_did,
+            persona,
+            community,
+        },
+        commit: Commit::Deleting,
+        refusal: Refusal::Panel,
+    }))
+}
+
+/// The persona OpenVTC is acting as — the one selected, or, with no selection,
+/// the default it falls back to. A persona in use that way is never deleted
+/// with a context. The selection is read directly as well as through
+/// [`Config::active_identity`], which only resolves a selection whose identity
+/// has been loaded.
+fn active_persona(config: &Config) -> Option<PersonaId> {
+    config
+        .active_persona
+        .or_else(|| config.active_identity().map(|identity| identity.persona_id))
+}
+
+fn plan_open_devices(state: &mut State, config: &Config, index: usize) -> ContextEffect {
+    let Some(membership) = membership_at(state, config, index) else {
+        return ContextEffect::None;
+    };
+    if !community_context::is_sub_context(
+        &membership.sub_context_id,
+        &config.account.top_context_id,
+    ) {
+        panel(state).status_message = Some(Status::warning(
+            "This community lives in your top context. Device access is scoped to a \
+             community's own context, and access to the top context would reach every community."
+                .to_string(),
+        ));
+        return ContextEffect::None;
+    }
+    let view = DeviceAccessView {
+        community: community_name(config, membership),
+        context_id: membership.sub_context_id.clone(),
+        can_grant: membership.status.is_active(),
+        selected: 0,
+        form: None,
+        confirm_revoke: false,
+        busy: false,
+        message: None,
+    };
+    let context_id = view.context_id.clone();
+    // The view opens whether or not the read starts: a refused read is said
+    // in it.
+    let communities = panel(state);
+    communities.context_delete = None;
+    communities.device_access = Some(view);
+    list_grants(context_id)
+}
+
+fn list_grants(context_id: String) -> ContextEffect {
+    ContextEffect::Request(Box::new(Request {
+        request: ContextRequest::List {
+            context_id: context_id.clone(),
+        },
+        commit: Commit::Listing { context_id },
+        refusal: Refusal::View,
+    }))
+}
+
+fn plan_grant(state: &mut State, config: &Config, own_did: Option<&str>) -> ContextEffect {
+    let Some(view) = panel(state).device_access.clone() else {
+        return ContextEffect::None;
+    };
+    let Some(form) = view.form.as_ref() else {
+        return ContextEffect::None;
+    };
+    if view.busy || !view.can_grant {
+        return ContextEffect::None;
+    }
+    let did = match community_access::parse_device_did(&form.did, own_did) {
+        Ok(did) => did,
+        Err(e) => {
+            Refusal::View.show(state, reason(&e));
+            return ContextEffect::None;
+        }
+    };
+    let expires = community_access::expires_at(Utc::now(), form.expiry);
+    let label = community_access::grant_label(&form.name, &view.community);
+    let progress = format!("Granting {}…", shorten_did(&did, 40));
+    ContextEffect::Request(Box::new(Request {
+        request: ContextRequest::Grant {
+            top: config.account.top_context_id.clone(),
+            context_id: view.context_id,
+            did,
+            label,
+            expires,
+        },
+        commit: Commit::Busy(progress),
+        refusal: Refusal::View,
+    }))
+}
+
+fn plan_revoke(state: &mut State) -> ContextEffect {
+    let communities = panel(state);
+    let Some(view) = communities.device_access.as_mut() else {
+        return ContextEffect::None;
+    };
+    // Disarmed whatever happens next: a `y` answers one confirmation.
+    let armed = std::mem::take(&mut view.confirm_revoke);
+    if !armed || view.busy {
+        return ContextEffect::None;
+    }
+    let context_id = view.context_id.clone();
+    let Some(grant) = communities
+        .device_grants
+        .get(&context_id)
+        .and_then(|l| l.grants().get(view.selected))
+        .cloned()
+    else {
+        return ContextEffect::None;
+    };
+    let progress = format!("Revoking {}…", shorten_did(&grant.did, 40));
+    ContextEffect::Request(Box::new(Request {
+        request: ContextRequest::Revoke {
+            context_id,
+            did: grant.did,
+        },
+        commit: Commit::Busy(progress),
+        refusal: Refusal::View,
+    }))
+}
+
+// ****************************************************************************
+// Loop-side actions: the effect runner
+// ****************************************************************************
+
+/// Service an action that reads the config or reaches the VTA: [`plan`] it,
+/// then run what it asks for.
+pub(crate) fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
+    let own_did = ctx.admin_vta.and_then(VtaClient::caller_did);
+    let effect = plan(ctx.state, ctx.config, own_did, action);
+    run(ctx, effect);
+}
+
+/// Run an effect: find the session, claim the domain and spawn the job, and
+/// only then apply the commit. A refusal is shown where the effect says.
+pub(crate) fn run(ctx: &mut ActionCtx<'_>, effect: ContextEffect) {
+    let ContextEffect::Request(request) = effect else {
+        return;
+    };
+    let Request {
+        request,
+        commit,
+        refusal,
+    } = *request;
+    let Some(client) = ctx.admin_vta.cloned() else {
+        let message = format!(
+            "VTA session unavailable — cannot {} right now.",
+            request.purpose()
+        );
+        return refusal.show(ctx.state, message);
+    };
+    let job = request.into_job(client, ctx.didcomm_service);
     let state = &mut *ctx.state;
-    background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |busy| {
-        on_busy(state, busy);
-    })
+    let started = background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |busy| {
+        refusal.show(state, busy);
+    });
+    if started {
+        apply_commit(ctx.state, commit);
+    }
+}
+
+/// Apply the view change a started request owes.
+fn apply_commit(state: &mut State, commit: Commit) {
+    let communities = panel(state);
+    match commit {
+        Commit::OpenDeletion(view) => {
+            communities.device_access = None;
+            communities.status_message = None;
+            communities.context_delete = Some(*view);
+        }
+        Commit::Deleting => {
+            if let Some(open) = communities.context_delete.as_mut() {
+                open.phase = ContextDeletePhase::Deleting;
+            }
+        }
+        Commit::Listing { context_id } => {
+            communities
+                .device_grants
+                .entry(context_id)
+                .or_insert(GrantListing::Loading);
+            if let Some(view) = communities.device_access.as_mut() {
+                view.busy = true;
+            }
+        }
+        Commit::Busy(progress) => {
+            if let Some(open) = communities.device_access.as_mut() {
+                open.busy = true;
+                open.message = Some(Status::progress(progress));
+            }
+        }
+    }
 }
 
 /// One context job, resolved on the loop. I/O only.
@@ -407,275 +818,6 @@ impl ContextJob {
                 }
             }
         }
-    }
-}
-
-/// Report a grant or revoke that could not start — always a refusal.
-fn set_view_message(state: &mut State, message: String) {
-    if let Some(view) = panel(state).device_access.as_mut() {
-        view.message = Some(Status::error(message));
-    }
-}
-
-fn start_deletion(ctx: &mut ActionCtx<'_>, index: usize) {
-    let config: &Config = ctx.config;
-    let Some(membership) = membership_at(ctx.state, config, index) else {
-        return;
-    };
-    let deletion = match community_context::deletable_context(
-        &config.account,
-        &config.private.vetting.applications,
-        active_persona(config),
-        membership,
-    ) {
-        Ok(deletion) => deletion,
-        Err(refusal) => {
-            panel(ctx.state).status_message = Some(Status::warning(refusal.describe()));
-            return;
-        }
-    };
-    let view = ContextDeleteView {
-        vtc_did: membership.vtc_did.clone(),
-        persona: membership.persona_ref,
-        community: community_name(config, membership),
-        context_id: deletion.context_id.clone(),
-        takes_persona: deletion.persona,
-        phase: ContextDeletePhase::Previewing,
-        typed: String::new(),
-    };
-    let refuse = |state: &mut State, message: String| {
-        panel(state).status_message = Some(Status::error(message));
-    };
-    let job = match session(ctx, "delete a context") {
-        Ok(client) => ContextJob::Preview {
-            client,
-            top: config.account.top_context_id.clone(),
-            context_id: deletion.context_id,
-        },
-        Err(message) => return refuse(ctx.state, message),
-    };
-    if !start(ctx, job, refuse) {
-        return;
-    }
-    let communities = panel(ctx.state);
-    communities.device_access = None;
-    communities.status_message = None;
-    communities.context_delete = Some(view);
-}
-
-fn confirm_deletion(ctx: &mut ActionCtx<'_>) {
-    let Some(view) = panel(ctx.state).context_delete.clone() else {
-        return;
-    };
-    if !matches!(view.phase, ContextDeletePhase::Ready(_)) {
-        return;
-    }
-    if !community_context::confirms_deletion(&view.typed) {
-        panel(ctx.state).status_message = Some(Status::info(format!(
-            "Type {DELETE_CONFIRMATION} in capitals to delete {}.",
-            view.context_id
-        )));
-        return;
-    }
-    // Checked again, against the config as it is now: the preview may have
-    // been on screen while a join or an application started using the context.
-    let config: &Config = ctx.config;
-    let problem = match config
-        .account
-        .memberships()
-        .find(|m| m.vtc_did == view.vtc_did && m.persona_ref == view.persona)
-        .map(|m| {
-            community_context::deletable_context(
-                &config.account,
-                &config.private.vetting.applications,
-                active_persona(config),
-                m,
-            )
-        }) {
-        // The same deletion the holder was shown — including whether a persona
-        // goes with it — or none at all.
-        Some(Ok(deletion)) if deletion == view.deletion() => None,
-        Some(Ok(_)) | None => {
-            Some("The membership changed since the preview — start the deletion again.".to_string())
-        }
-        Some(Err(refusal)) => Some(refusal.describe()),
-    };
-    if let Some(problem) = problem {
-        let communities = panel(ctx.state);
-        communities.context_delete = None;
-        communities.status_message = Some(Status::warning(problem));
-        return;
-    }
-    let refuse = |state: &mut State, message: String| {
-        panel(state).status_message = Some(Status::error(message));
-    };
-    let client = match session(ctx, "delete a context") {
-        Ok(client) => client,
-        Err(message) => return refuse(ctx.state, message),
-    };
-    let deletion = view.deletion();
-    let ContextDeleteView {
-        vtc_did,
-        persona,
-        community,
-        ..
-    } = view;
-    let job = ContextJob::Delete {
-        client,
-        service: ctx.didcomm_service.clone(),
-        top: config.account.top_context_id.clone(),
-        deletion,
-        vtc_did,
-        persona,
-        community,
-    };
-    if !start(ctx, job, refuse) {
-        return;
-    }
-    if let Some(open) = panel(ctx.state).context_delete.as_mut() {
-        open.phase = ContextDeletePhase::Deleting;
-    }
-}
-
-/// The persona OpenVTC is acting as — the one selected, or, with no selection,
-/// the default it falls back to. A persona in use that way is never deleted
-/// with a context. The selection is read directly as well as through
-/// [`Config::active_identity`], which only resolves a selection whose identity
-/// has been loaded.
-fn active_persona(config: &Config) -> Option<PersonaId> {
-    config
-        .active_persona
-        .or_else(|| config.active_identity().map(|identity| identity.persona_id))
-}
-
-fn open_devices(ctx: &mut ActionCtx<'_>, index: usize) {
-    let config: &Config = ctx.config;
-    let Some(membership) = membership_at(ctx.state, config, index) else {
-        return;
-    };
-    if !community_context::is_sub_context(
-        &membership.sub_context_id,
-        &config.account.top_context_id,
-    ) {
-        panel(ctx.state).status_message = Some(Status::warning(
-            "This community lives in your top context. Device access is scoped to a \
-             community's own context, and access to the top context would reach every community."
-                .to_string(),
-        ));
-        return;
-    }
-    let view = DeviceAccessView {
-        community: community_name(config, membership),
-        context_id: membership.sub_context_id.clone(),
-        can_grant: membership.status.is_active(),
-        selected: 0,
-        form: None,
-        confirm_revoke: false,
-        busy: false,
-        message: None,
-    };
-    let context_id = view.context_id.clone();
-    let communities = panel(ctx.state);
-    communities.context_delete = None;
-    communities.device_access = Some(view);
-    read_grants(ctx, context_id);
-}
-
-fn read_grants(ctx: &mut ActionCtx<'_>, context_id: String) {
-    let client = match session(ctx, "read device access") {
-        Ok(client) => client,
-        Err(message) => return set_view_message(ctx.state, message),
-    };
-    let job = ContextJob::List {
-        client,
-        context_id: context_id.clone(),
-    };
-    if !start(ctx, job, set_view_message) {
-        return;
-    }
-    let communities = panel(ctx.state);
-    communities
-        .device_grants
-        .entry(context_id)
-        .or_insert(GrantListing::Loading);
-    if let Some(view) = communities.device_access.as_mut() {
-        view.busy = true;
-    }
-}
-
-fn submit_grant(ctx: &mut ActionCtx<'_>) {
-    let Some(view) = panel(ctx.state).device_access.clone() else {
-        return;
-    };
-    let Some(form) = view.form.as_ref() else {
-        return;
-    };
-    if view.busy || !view.can_grant {
-        return;
-    }
-    let own_did = ctx.admin_vta.and_then(VtaClient::caller_did);
-    let did = match community_access::parse_device_did(&form.did, own_did) {
-        Ok(did) => did,
-        Err(e) => return set_view_message(ctx.state, reason(&e)),
-    };
-    let expires = community_access::expires_at(Utc::now(), form.expiry);
-    let label = community_access::grant_label(&form.name, &view.community);
-    let client = match session(ctx, "grant device access") {
-        Ok(client) => client,
-        Err(message) => return set_view_message(ctx.state, message),
-    };
-    let progress = format!("Granting {}…", shorten_did(&did, 40));
-    let job = ContextJob::Grant {
-        client,
-        top: ctx.config.account.top_context_id.clone(),
-        context_id: view.context_id,
-        did,
-        label,
-        expires,
-    };
-    if !start(ctx, job, set_view_message) {
-        return;
-    }
-    if let Some(open) = panel(ctx.state).device_access.as_mut() {
-        open.busy = true;
-        open.message = Some(Status::progress(progress));
-    }
-}
-
-fn confirm_revoke(ctx: &mut ActionCtx<'_>) {
-    let communities = panel(ctx.state);
-    let Some(view) = communities.device_access.as_mut() else {
-        return;
-    };
-    let armed = std::mem::take(&mut view.confirm_revoke);
-    if !armed || view.busy {
-        return;
-    }
-    let context_id = view.context_id.clone();
-    let Some(grant) = communities
-        .device_grants
-        .get(&context_id)
-        .and_then(|l| l.grants().get(view.selected))
-        .cloned()
-    else {
-        return;
-    };
-    let client = match session(ctx, "revoke device access") {
-        Ok(client) => client,
-        Err(message) => return set_view_message(ctx.state, message),
-    };
-    let progress = format!("Revoking {}…", shorten_did(&grant.did, 40));
-    let job = ContextJob::Revoke {
-        client,
-        context_id,
-        did: grant.did,
-    };
-    if !start(ctx, job, set_view_message) {
-        return;
-    }
-    if let Some(open) = panel(ctx.state).device_access.as_mut() {
-        open.busy = true;
-        open.message = Some(Status::progress(progress));
     }
 }
 
@@ -1233,6 +1375,66 @@ mod tests {
         reduce(&mut state, &Act::RevokeArm);
         assert!(
             panel(&mut state)
+                .device_access
+                .as_ref()
+                .unwrap()
+                .confirm_revoke
+        );
+    }
+
+    /// `plan` is pure: a refusal it can decide alone is shown and asks for
+    /// nothing; a grant it can make is returned with its commit unapplied.
+    #[test]
+    fn plan_refuses_a_bad_did_and_defers_the_busy_marker_to_the_runner() {
+        let config = test_config();
+        let mut state = State::default();
+        let mut view = device_view();
+        view.form = Some(GrantForm {
+            did: "not-a-did".into(),
+            ..GrantForm::default()
+        });
+        panel(&mut state).device_access = Some(view);
+        assert!(matches!(
+            plan(&mut state, &config, None, Act::GrantSubmit),
+            ContextEffect::None
+        ));
+        let view = panel(&mut state).device_access.clone().unwrap();
+        assert!(view.message.is_some(), "the bad DID is explained");
+
+        let mut view = device_view();
+        view.form = Some(GrantForm {
+            did: "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG".into(),
+            ..GrantForm::default()
+        });
+        panel(&mut state).device_access = Some(view);
+        let ContextEffect::Request(request) = plan(&mut state, &config, None, Act::GrantSubmit)
+        else {
+            panic!("a valid grant asks the VTA");
+        };
+        assert!(matches!(request.request, ContextRequest::Grant { .. }));
+        assert!(matches!(request.commit, Commit::Busy(_)));
+        assert!(
+            !panel(&mut state).device_access.as_ref().unwrap().busy,
+            "busy is the commit's, applied only once the job has started"
+        );
+    }
+
+    /// A revocation's confirmation is spent by the `y` that answers it, whether
+    /// or not the revocation can start.
+    #[test]
+    fn plan_disarms_a_revocation_it_answers() {
+        let config = test_config();
+        let mut state = State::default();
+        let mut view = device_view();
+        view.confirm_revoke = true;
+        panel(&mut state).device_access = Some(view);
+        // No listing, so nothing to revoke.
+        assert!(matches!(
+            plan(&mut state, &config, None, Act::RevokeConfirm),
+            ContextEffect::None
+        ));
+        assert!(
+            !panel(&mut state)
                 .device_access
                 .as_ref()
                 .unwrap()
