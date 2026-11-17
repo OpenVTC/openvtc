@@ -626,7 +626,11 @@ async fn run(lp: &mut Loop<'_>, effect: RoomsEffect) -> bool {
 
 /// Send a planned request: look up the key, build, claim and arm
 /// ([`community_request::send`]), then commit — or say why not. Returns
-/// whether it was dispatched; a failure the view shows is not.
+/// whether it was dispatched or failed in a way the view now shows; `false`
+/// only when nothing happened (a busy lane, a view still waiting). A shown
+/// failure counts as taken, so a [`Next`] whose key lookup fails is not
+/// retried every tick: the reason stays until the person acts again, as in
+/// Elections.
 async fn run_send(lp: &mut Loop<'_>, send: Send) -> bool {
     let Send {
         to,
@@ -651,7 +655,7 @@ async fn run_send(lp: &mut Loop<'_>, send: Send) -> bool {
         // said to be busy.
         Sent::Failed(purpose, why) => {
             community_request::fail::<Rooms>(lp.state, &purpose, why);
-            false
+            true
         }
         Sent::Unthreaded(purpose) => {
             community_request::fail::<Rooms>(lp.state, &purpose, UNTHREADED.into());

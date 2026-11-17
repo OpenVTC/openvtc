@@ -218,6 +218,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   "Collecting" with nothing sent, and stayed there. The press now changes nothing and
   says "A request to this community is still waiting — try again when it answers.",
   as Elections refuses the same case.
+- **Rooms: a step whose key lookup fails is given up, not retried every tick**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). A follow-on step (a page read,
+  an acceptance step, a renewals check) whose persona key could not be read was retried
+  and its error rewritten on every tick. It now shows the reason once and stops until
+  the person acts again, as Elections does.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

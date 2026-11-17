@@ -373,23 +373,30 @@ async fn a_refresh_step_on_a_busy_lane_is_kept() {
     assert_eq!(view(&mut rt).next, Some(Next::Refresh));
 }
 
-/// A page step whose key lookup fails says why, and is kept for the next tick.
+/// A page step whose key lookup fails says why and is given up, not retried
+/// on the next tick: the reason stays until the person acts again.
 #[tokio::test]
-async fn a_page_step_whose_key_lookup_fails_is_kept() {
+async fn a_page_step_whose_key_lookup_fails_is_given_up() {
     let mut rt = without_identity().await;
     open_quietly(&mut rt).await;
     with_offered_room(&mut rt);
     let next = Next::MembershipsPage {
         cursor: "c1".into(),
     };
-    view(&mut rt).next = Some(next.clone());
+    view(&mut rt).next = Some(next);
     rt.on_capabilities_sweep().await;
-    assert_eq!(view(&mut rt).next, Some(next));
+    assert!(view(&mut rt).next.is_none());
     assert_eq!(
         status(&mut rt),
         Some((Severity::Error, NO_IDENTITY.to_string()))
     );
     assert!(!rt.in_flight.is_busy(DispatchDomain::Rooms));
+
+    // The next tick neither retries it nor rewrites the reason.
+    view(&mut rt).status.as_mut().unwrap().text = "seen".into();
+    rt.on_capabilities_sweep().await;
+    assert!(view(&mut rt).next.is_none());
+    assert_eq!(status(&mut rt), Some((Severity::Error, "seen".into())));
 }
 
 /// A page step that is sent arms the view and is taken.
