@@ -8,7 +8,6 @@ use secrecy::SecretString;
 use tokio::sync::Mutex;
 
 use crate::{
-    Interrupted,
     state_handler::main_page::{MainPanel, menu::MainMenu},
     ui::pages::setup_flow::SetupFlow,
 };
@@ -741,12 +740,6 @@ pub enum WorkspaceAction {
 
 pub enum Action {
     Exit,
-
-    /// An unrecoverable error has occurred on the UX Side.
-    // Error-propagation channel: handled in every action loop, but no producer
-    // emits it yet (the UX side currently fails via `Interrupted` directly).
-    #[allow(dead_code)]
-    UXError(Interrupted),
 
     /// Make MainMenu active
     /// This is used from the setup flow to switch back to the main menu

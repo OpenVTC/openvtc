@@ -96,6 +96,16 @@ impl OverrideReport {
             .collect();
         Some(format!("DEV OVERRIDE: {}", parts.join(" · ")))
     }
+
+    /// One line per ignored variable, then the applied overrides, for a
+    /// command with no activity log to put them in (the headless commands).
+    pub(crate) fn notices(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self.ignored.iter().map(Ignored::message).collect();
+        if let Some(banner) = self.banner() {
+            lines.push(format!("{banner} (this run only, not saved)"));
+        }
+        lines
+    }
 }
 
 fn label(var: &str) -> &str {
@@ -690,5 +700,26 @@ mod tests {
                 .any(|l| l.contains("OPENVTC_VTA_DID is set but ignored"))
         );
         assert!(log.iter().any(|l| l.contains("DEV OVERRIDE")));
+    }
+
+    #[test]
+    fn notices_list_ignored_then_applied() {
+        assert!(OverrideReport::default().notices().is_empty());
+        let report = OverrideReport {
+            applied: vec![(VTA_URL_VAR, OVERRIDE_URL.to_string())],
+            ignored: vec![Ignored {
+                var: VTA_DID_VAR,
+                reason: IgnoreReason::ReleaseBuild,
+            }],
+        };
+        assert_eq!(
+            report.notices(),
+            vec![
+                "OPENVTC_VTA_DID is set but ignored: release builds do not accept \
+                 trust-anchor overrides."
+                    .to_string(),
+                "DEV OVERRIDE: VTA → http://127.0.0.1:9099 (this run only, not saved)".to_string(),
+            ]
+        );
     }
 }

@@ -9,7 +9,7 @@
 //! loop-local state. [`ActionCtx`] is that set.
 //!
 //! Three arms stay in the loop, because they are not about acting on state:
-//! `Exit` and `UXError` signal the terminator and `break` with the loop's own
+//! `Exit` signals the terminator and `break` with the loop's own
 //! outcome type, and `StartJoin` opens the join, which the loop then drives
 //! (`join_flow::JoinDriver`): while a join is open every action is the
 //! driver's, and never reaches this module.
@@ -1304,13 +1304,13 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::FactoryReset(..)
         | Action::TokenWriteKeys(..) => {}
 
-        // Owned by the loop: `Exit` and `UXError` signal the terminator and
+        // Owned by the loop: `Exit` signals the terminator and
         // break with its outcome type, and the two `StartJoin` verbs open the
         // join the loop then drives (`join_flow::JoinDriver`).
         // Listed so the match stays exhaustive — the guarantee is that a NEW
         // variant cannot be added without a decision here, and these already
         // have one.
-        Action::Exit | Action::UXError(..) | Action::StartJoin | Action::StartJoinFor(..) => {
+        Action::Exit | Action::StartJoin | Action::StartJoinFor(..) => {
             debug_assert!(false, "handled by the loop, not the handler");
         }
     }

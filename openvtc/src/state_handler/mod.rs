@@ -346,11 +346,7 @@ pub struct DeferredLoad {
 
 pub enum StartingMode {
     NotSet,
-    // Eager main-page boot path, superseded by `MainPageDeferred` (which main.rs
-    // now constructs). The match-arm handler is retained for the eager path.
-    #[allow(dead_code)]
-    MainPage(Box<Config>, TDK),
-    MainPageDeferred(DeferredLoad),
+    MainPageDeferred(Box<DeferredLoad>),
     SetupWizard,
 }
 
@@ -512,17 +508,9 @@ impl StateHandler {
 
         let starting_mode = std::mem::replace(&mut self.starting_mode, StartingMode::NotSet);
         // The third element is the live admin VTA session handed back by
-        // `load_step2` (PERF #1) for reuse below; `None` for the modes that
-        // don't open one (they fall back to building one as before).
+        // `load_step2` (PERF #1) for reuse below; `None` for the setup wizard,
+        // which opens none (a session is built below).
         let (tdk, config, loaded_admin_vta) = match starting_mode {
-            StartingMode::MainPage(config, tdk) => {
-                state.active_page = ActivePage::Main;
-                state.main_page.menu_panel.selected = true;
-                state.main_page.config = (&config).into();
-                state.main_page.log("Configuration loaded");
-
-                (tdk.to_owned(), config, None)
-            }
             StartingMode::SetupWizard => {
                 // Instantiate TDK
                 let tdk = TDK::new(
@@ -582,6 +570,7 @@ impl StateHandler {
                 }
             }
             StartingMode::MainPageDeferred(deferred) => {
+                let deferred = *deferred;
                 // Show the loading screen while the config decrypts and the
                 // mediator connection is established; it switches to Main once
                 // ready (or stays up to show a startup error).
@@ -852,7 +841,7 @@ impl StateHandler {
         // PERF #1: prefer the session `load_step2` already opened (handed back
         // as `loaded_admin_vta`) so the whole runtime uses a SINGLE admin
         // connection. Only fall back to opening one here when there isn't one
-        // (the SetupWizard / pre-loaded-Config modes, or a State-A account that
+        // (the SetupWizard mode, or a State-A account that
         // had no persona to open a session for).
         let admin_vta: Option<vta_sdk::client::VtaClient> = if loaded_admin_vta.is_some() {
             loaded_admin_vta
@@ -1243,12 +1232,6 @@ impl StateHandler {
                             debug!("Failed to send terminate signal: {e}");
                         }
                         break DegradedOutcome::Exit(Interrupted::UserInt);
-                    }
-                    Action::UXError(interrupted) => {
-                        if let Err(e) = terminator.terminate(interrupted.clone()) {
-                            debug!("Failed to send terminate signal: {e}");
-                        }
-                        break DegradedOutcome::Exit(interrupted);
                     }
                     Action::DeleteCommunity(i) => {
                         if let Some(ctx) = join_ctx.as_mut() {
@@ -1763,7 +1746,9 @@ impl StateHandler {
                                 }
                             }
                         }
-                        None => in_flight.finish(outcome.domain()),
+                        // Freed only for a job that claimed it (#609).
+                        None if outcome.claimed() => in_flight.finish(outcome.domain()),
+                        None => {}
                     }
                     if minted_persona {
                         state
@@ -2829,7 +2814,7 @@ fn remove_community(
 /// Only arms that mutate `&mut State` and nothing else live here. Loop-local
 /// arms stay in their loops because they need resources this signature can't
 /// carry cleanly:
-///   * `Exit` / `UXError` — must signal the terminator and `break` with the
+///   * `Exit` — must signal the terminator and `break` with the
 ///     loop's own outcome type (`Interrupted` vs `DegradedOutcome`).
 ///   * `DeleteCommunity` / `DeleteDid` — `async`, and reach into the live
 ///     `Config`, the admin VTA session, and the DIDComm service to tear down

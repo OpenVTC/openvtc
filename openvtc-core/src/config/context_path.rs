@@ -7,23 +7,11 @@
 //!
 //! The hierarchy is **real and VTA-enforced** (VTI #257): a context id *is* its
 //! `/`-separated path, the VTA validates depth/segments and enforces
-//! ancestry-aware ACL server-side. This module mirrors the path **construction
-//! and validation** rules from `vti-common::context_path` /
-//! `vti-common::identifier` so the CLI builds only paths the VTA will accept;
-//! the VTA remains the enforcement source of truth (it re-validates). The rules
-//! are mirrored rather than imported because `vti-common` is not consumable from
-//! this workspace (it is not a `vta-sdk` dependency and `vta-sdk` does not
-//! re-export it). The mirrored definitions are kept byte-for-byte faithful to
-//! their `vti-common` originals to avoid drift on these security-relevant rules.
-//!
-//! TODO(VTI#392): the pure validators now ship in `vta-sdk` (the pinned 0.80
-//! has `context_path` and `identifier`). Diff this mirror against them, then
-//! delete it and re-export from `vta-sdk` instead.
-//!
-//! The ancestry/ACL helper (`is_ancestor_or_self`) is deliberately **not**
-//! mirrored: this client never makes authorization decisions — the VTA owns the
-//! "admin of a parent covers the subtree" gate — so a local copy would be unused
-//! dead code and a drift hazard.
+//! ancestry-aware ACL server-side. Path **construction and validation** use
+//! `vta_sdk::context_path` and `vta_sdk::identifier` — the rules the VTA itself
+//! applies — so the CLI builds only paths the VTA will accept; the VTA remains
+//! the enforcement source of truth (it re-validates). The validators here wrap
+//! them only to report failures as [`OpenVTCError::Config`].
 //!
 //! Per `CLAUDE.md`, the no-name fallback derives its token from the VTC
 //! `did:webvh` via `didwebvh-rs` rather than hand-rolled string surgery.
@@ -36,21 +24,19 @@ const MAX_SLUG_LEN: usize = 32;
 /// Number of leading SCID characters kept for the no-name fallback token.
 const FALLBACK_TOKEN_LEN: usize = 12;
 
-/// Maximum nesting depth (number of path segments). Mirrors
-/// `vti-common::context_path::MAX_CONTEXT_DEPTH`. A `<top>/<community>` path is
-/// depth 2.
-pub const MAX_CONTEXT_DEPTH: usize = 8;
+/// Maximum nesting depth (number of path segments). A `<top>/<community>` path
+/// is depth 2.
+pub use vta_sdk::context_path::MAX_CONTEXT_DEPTH;
 
-/// The path separator. Mirrors `vti-common::context_path::SEPARATOR`. A context
-/// identifier is segments joined by this; it never appears inside a segment.
-pub const SEPARATOR: char = '/';
+/// The path separator. A context identifier is segments joined by this; it
+/// never appears inside a segment.
+pub use vta_sdk::context_path::SEPARATOR;
 
-/// Maximum length of a single context-path segment in bytes. Mirrors
-/// `vti-common::identifier::MAX_IDENTIFIER_LEN`.
-pub const MAX_IDENTIFIER_LEN: usize = 64;
+/// Maximum length of a single context-path segment in bytes.
+pub use vta_sdk::identifier::MAX_IDENTIFIER_LEN;
 
-/// Validate a single context-path segment (one identifier). Mirrors
-/// `vti-common::identifier::validate_identifier`: non-empty, ≤
+/// Validate a single context-path segment (one identifier), by
+/// `vta_sdk::identifier::validate_identifier`: non-empty, ≤
 /// [`MAX_IDENTIFIER_LEN`] bytes, and every character in `[A-Za-z0-9._-]`.
 /// Anything else — including the separators `/`, `:`, and whitespace that could
 /// let a caller traverse into or collide with adjacent VTA store namespaces — is
@@ -61,70 +47,22 @@ pub const MAX_IDENTIFIER_LEN: usize = 64;
 /// Returns [`OpenVTCError::Config`] describing the first rule the segment
 /// violates; `label` names the field for a self-describing message.
 pub fn validate_identifier(label: &str, value: &str) -> Result<(), OpenVTCError> {
-    if value.is_empty() {
-        return Err(OpenVTCError::Config(format!("{label} must not be empty")));
-    }
-    if value.len() > MAX_IDENTIFIER_LEN {
-        return Err(OpenVTCError::Config(format!(
-            "{label} is {} bytes; maximum is {MAX_IDENTIFIER_LEN}",
-            value.len()
-        )));
-    }
-    for (i, ch) in value.chars().enumerate() {
-        let ok = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-';
-        if !ok {
-            return Err(OpenVTCError::Config(format!(
-                "{label} contains an invalid character {ch:?} at position {i}; \
-                 allowed: A-Z, a-z, 0-9, '.', '_', '-'"
-            )));
-        }
-    }
-    Ok(())
+    vta_sdk::identifier::validate_identifier(label, value).map_err(config_error)
 }
 
-/// Validate a full context path. Mirrors
-/// `vti-common::context_path::validate_context_path`: non-empty, no
-/// leading/trailing/doubled separator, ≤ [`MAX_CONTEXT_DEPTH`] segments, and
-/// every segment a valid [identifier](validate_identifier).
+/// Validate a full context path, by `vta_sdk::context_path::validate_context_path`:
+/// non-empty, no leading/trailing/doubled separator, ≤ [`MAX_CONTEXT_DEPTH`]
+/// segments, and every segment a valid [identifier](validate_identifier).
 ///
 /// # Errors
 ///
 /// Returns [`OpenVTCError::Config`] describing the first rule the path violates.
 pub fn validate_context_path(value: &str) -> Result<(), OpenVTCError> {
-    if value.is_empty() {
-        return Err(OpenVTCError::Config(
-            "context path must not be empty".into(),
-        ));
-    }
-    if value.starts_with(SEPARATOR) || value.ends_with(SEPARATOR) {
-        return Err(OpenVTCError::Config(format!(
-            "context path must not start or end with '{SEPARATOR}'"
-        )));
-    }
-
-    let segments: Vec<&str> = value.split(SEPARATOR).collect();
-    if segments.len() > MAX_CONTEXT_DEPTH {
-        return Err(OpenVTCError::Config(format!(
-            "context path is {} levels deep; maximum is {MAX_CONTEXT_DEPTH}",
-            segments.len()
-        )));
-    }
-    for segment in &segments {
-        // An empty segment means a leading/trailing/doubled separator — `split`
-        // yields `""` for each. (The leading/trailing case is caught above; this
-        // catches `a//b`.)
-        if segment.is_empty() {
-            return Err(OpenVTCError::Config(
-                "context path must not contain an empty segment ('//')".into(),
-            ));
-        }
-        validate_identifier("context path segment", segment)?;
-    }
-    Ok(())
+    vta_sdk::context_path::validate_context_path(value).map_err(config_error)
 }
 
-/// Build a child path under `parent` by appending a single `segment`. Mirrors
-/// `vti-common::context_path::child_path`: the `segment` must be one valid
+/// Build a child path under `parent` by appending a single `segment`, by
+/// `vta_sdk::context_path::child_path`: the `segment` must be one valid
 /// identifier (it cannot itself contain a separator, else it would silently add
 /// several levels) and the resulting path must [validate](validate_context_path),
 /// depth included.
@@ -135,12 +73,11 @@ pub fn validate_context_path(value: &str) -> Result<(), OpenVTCError> {
 /// the resulting path violates [`validate_context_path`] (e.g. it would exceed
 /// [`MAX_CONTEXT_DEPTH`]).
 pub fn child_path(parent: &str, segment: &str) -> Result<String, OpenVTCError> {
-    // Reject a `segment` that is empty or contains the separator: `child_path`
-    // adds exactly one level.
-    validate_identifier("context path segment", segment)?;
-    let candidate = format!("{parent}{SEPARATOR}{segment}");
-    validate_context_path(&candidate)?;
-    Ok(candidate)
+    vta_sdk::context_path::child_path(parent, segment).map_err(config_error)
+}
+
+fn config_error(e: vta_sdk::identifier::ValidationError) -> OpenVTCError {
+    OpenVTCError::Config(e.0)
 }
 
 /// Slugify a community display name per D9.
@@ -219,7 +156,7 @@ pub fn fallback_token(vtc_did: &str) -> Result<String, OpenVTCError> {
 /// gains a `-2`, `-3`, … suffix until it is unique.
 ///
 /// Every candidate is constructed via [`child_path`], so the returned id is
-/// guaranteed to satisfy the mirrored `vti-common` rules — each segment a valid
+/// guaranteed to satisfy the VTA's own rules — each segment a valid
 /// identifier, the whole path within [`MAX_CONTEXT_DEPTH`] — exactly what the
 /// VTA re-validates server-side. The slug is `[a-z0-9-]` capped at
 /// `MAX_SLUG_LEN` and the collision suffix adds only `[0-9-]`, so a usable
@@ -391,7 +328,7 @@ mod tests {
         assert_eq!(render_for_display("openvtc"), "openvtc");
     }
 
-    // --- mirrored `vti-common` validation rules ---------------------------
+    // --- validation rules (vta-sdk) ---------------------------------------
 
     #[test]
     fn validate_identifier_accepts_common_shapes() {

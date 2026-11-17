@@ -13,13 +13,14 @@
 //! launch-time context fetch, and the probe sent on a rebuilt session. The
 //! tracker is shared by clone, so every observer counts into the same leg.
 //!
-//! TODO: replace this module with the SDK's own receive-leg health —
-//! `VtaClient::receive_health()` / `ReceiveLegHealth` and
-//! `VtaError::RepliesNotArriving` (VTI #1978) — which counts every request on
-//! every clone of the session, not only the ones wrapped here. Nothing blocks
-//! it: the pinned vta-sdk (0.80) has all three. [`ReceiveHealth`] mirrors
+//! Why not the SDK's own receive-leg health: vta-sdk 0.80's
+//! `VtaClient::receive_health()` / `ReceiveLegHealth` counts only Trust-Task
+//! requests sent over TSP. An admin session whose VTA does not advertise TSP
+//! talks DIDComm only and would never be counted, so its breaker could never
+//! trip. This module counts the DIDComm calls it wraps. Switch once the SDK
+//! counts DIDComm requests too (see #610); [`ReceiveHealth`] mirrors
 //! `ReceiveLegHealth` field for field and [`REPLY_TIMEOUT_BREAKER`] mirrors the
-//! SDK's constant, so the switch is local to this module and its callers'
+//! SDK's constant, so the switch stays local to this module and its callers'
 //! `observe` lines.
 
 use std::sync::{Arc, Mutex};

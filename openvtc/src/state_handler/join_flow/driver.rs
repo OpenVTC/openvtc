@@ -14,8 +14,8 @@
 //!   aborted or superseded job's result is ignored), and its progress lines as
 //!   [`ProgressUpdate::Join`], applied by [`JoinDriver::on_progress`].
 //! - **While a job is in flight** the join actions are queued and replayed, in
-//!   order, once it has finished — except the ways out: `JoinCancel`,
-//!   `Exit` and `UXError` abort the job at once.
+//!   order, once it has finished — except the ways out: `JoinCancel` and
+//!   `Exit` abort the job at once.
 //! - **A launch** is a saga ([`JoinSaga`]): off-loop stages with on-loop
 //!   applies between them, each recording what it did. Every way a launch can
 //!   stop short — a failed stage, a cancel, an interrupt — undoes it from
@@ -98,7 +98,7 @@ pub(crate) enum JoinStep {
     AwaitChallenge(AwaitingChallenge),
     /// The launch is parked on a wallet session ([`AwaitingWallet`]).
     AwaitWallet(AwaitingWallet),
-    /// Application is exiting (Exit / UXError / interrupt).
+    /// Application is exiting (Exit / interrupt).
     Exit(Interrupted),
 }
 
@@ -1147,10 +1147,7 @@ impl JoinDriver {
             return JoinStep::Continue;
         };
         if session.job.as_ref().is_some_and(|job| job.submitting)
-            && matches!(
-                action,
-                Action::Exit | Action::UXError(_) | Action::JoinCancel
-            )
+            && matches!(action, Action::Exit | Action::JoinCancel)
         {
             // The request may already be on the wire. Cancelling now would
             // forget the persona the community is about to answer, with no
@@ -1167,7 +1164,6 @@ impl JoinDriver {
             // everything else waits its turn.
             let step = match action {
                 Action::Exit => JoinStep::Exit(Interrupted::UserInt),
-                Action::UXError(interrupted) => JoinStep::Exit(interrupted),
                 Action::JoinCancel => JoinStep::Returned(None),
                 action => {
                     session.queued.push_back(action);
@@ -1447,7 +1443,6 @@ impl JoinDriver {
     async fn act(&mut self, ctx: &mut JoinCtx<'_>, action: Action) -> JoinStep {
         match action {
             Action::Exit => return JoinStep::Exit(Interrupted::UserInt),
-            Action::UXError(interrupted) => return JoinStep::Exit(interrupted),
             Action::JoinCancel => {
                 // Leave the flow; the caller restores the main page. Hand back
                 // the joined session (if any) so the runtime loop can bring its

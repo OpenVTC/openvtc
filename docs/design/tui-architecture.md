@@ -82,6 +82,7 @@ action handling `runtime_actions.rs`. The feature work is in focused modules:
 | `agent_name_refresh.rs` | Off-loop batch resolution of agent names (DID→name), applied via background-dispatch (see §4). |
 | `inbox_actions.rs`, `relationship_actions.rs`, `credential_actions.rs`, `settings_actions.rs` | Per-panel business logic — each exposes a `dispatch(...)` entry point the matching `Action` arm calls. |
 | `persona_actions.rs` | The identity pane. `apply(&mut State, &PersonaAction)` is pure and returns a `PersonaEffect` naming any network work; the loop spawns it and folds the result back through `PersonaOutcome::apply`. Reads and writes share one `DispatchDomain`. |
+| `community_context_actions.rs` | A membership's VTA context: deletion and device access. `reduce` handles the view-only actions (shared with the degraded loop); `plan(&mut State, &Config, own_did, action)` is pure and returns a `ContextEffect`, whose request `run` claims and spawns, applying the effect's `Commit` only once the claim succeeded. |
 | `didcomm` | A re-export of `openvtc_core::didcomm`: the messaging service, listener config/ids and lifecycle events. |
 | `runtime/`, `runtime_actions.rs` | The runtime loop (`Runtime`, one method per `select!` arm) and its action handler. |
 | `main_page/` | Maps `Config` → display state (`sync_from_config`), menu/content models. |
@@ -126,7 +127,9 @@ inbox accept/reject, context-DID delete):
    claim `dispatch` then makes cannot be lost in between.
    `background_dispatch::spawn_unclaimed` runs a job without claiming: for
    work the client starts on its own (a revocation check, a step of hidden
-   vetting) that must never be refused or block a person's job.
+   vetting) that must never be refused or block a person's job. Its outcome
+   comes back as `DispatchOutcome::Unclaimed` and is applied like any other,
+   but frees no domain: a person's job may hold it.
 3. The job returns a `DispatchOutcome` over an mpsc the loop owns. The dedicated
    `Some(outcome) = dispatch_rx.recv()` arm calls `apply_outcome`, which mutates
    `State`/`Config` **on the loop thread** and clears the busy-flag. Mutation
@@ -165,7 +168,7 @@ supervision, inbound messages and timers carry on while the join screen is up
    `apply_outcome`, and the driver ignores any that are not for the job it is
    waiting on (an aborted one).
 3. Join actions that arrive while a job is in flight are queued and replayed
-   in order when it finishes. `JoinCancel`, `Exit` and `UXError` are not: they
+   in order when it finishes. `JoinCancel` and `Exit` are not: they
    abort the job at once (`AbortHandle`; the driver frees the domain).
 4. A launch is a saga (`openvtc_core::join::saga::JoinSaga`): context
    registered → persona minted → listener up → submitted → persisted, with

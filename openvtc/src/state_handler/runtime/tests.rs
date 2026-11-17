@@ -185,6 +185,77 @@ async fn a_dispatch_outcome_frees_its_domain() {
     assert!(!rt.in_flight.is_busy(domain));
 }
 
+/// A vetting job the client starts on its own, finishing while a person's
+/// send holds the `Vetting` domain, leaves the domain held: the person's
+/// second send is still refused as busy (#609).
+#[tokio::test]
+async fn an_unclaimed_vetting_job_does_not_free_a_persons_send() {
+    use crate::state_handler::actions::VettingAction;
+    use crate::state_handler::vetting_actions::{Sent, VettingOutcome};
+    use background_dispatch::{DispatchDomain, DispatchOutcome, InFlight, Job};
+
+    /// The client's own vetting send: holds nothing, reports a sent manifest.
+    struct UnheldSend;
+    impl Job for UnheldSend {
+        fn domain(&self) -> DispatchDomain {
+            DispatchDomain::Vetting
+        }
+        async fn execute(self) -> DispatchOutcome {
+            DispatchOutcome::Vetting(VettingOutcome::Sent {
+                sent: Box::new(Sent::Manifest {
+                    community: "did:web:vtc.example".into(),
+                }),
+                error: None,
+            })
+        }
+    }
+
+    let (mut rt, _h) = runtime().await;
+    let app = openvtc_core::vetting::applicant::Application::new(
+        "did:web:vtc.example",
+        openvtc_core::config::account::PersonaId::new(),
+        "did:key:zApplicant",
+        chrono::Utc::now(),
+    )
+    .expect("application");
+    rt.config.private.vetting.applications.push(app);
+    rt.state.main_page.sync_from_config(&rt.config);
+    assert_eq!(
+        rt.state.main_page.content_panel.vetting.applications.len(),
+        1
+    );
+
+    // The person's send is in flight: it holds the domain.
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    // The client's own send finishes first, through the loop's outcome arm.
+    background_dispatch::spawn_unclaimed(UnheldSend, &rt.dispatch_tx);
+    let outcome = tokio::time::timeout(Duration::from_secs(10), rt.dispatch_rx.recv())
+        .await
+        .expect("the unclaimed job reports back")
+        .expect("the channel is open");
+    assert!(!outcome.claimed());
+    rt.on_dispatch_outcome(outcome).await;
+    assert!(
+        rt.in_flight.is_busy(DispatchDomain::Vetting),
+        "the person's claim survives an unclaimed outcome"
+    );
+
+    // A second send the person starts is refused as busy.
+    rt.state.main_page.content_panel.vetting.status_message = None;
+    rt.on_action(Action::Vetting(VettingAction::RefreshRequirements))
+        .await;
+    let status = rt
+        .state
+        .main_page
+        .content_panel
+        .vetting
+        .status_message
+        .as_ref()
+        .expect("the refusal is shown");
+    assert_eq!(status.text, InFlight::busy_message(DispatchDomain::Vetting));
+}
+
 #[tokio::test]
 async fn a_vta_sync_tick_without_a_session_starts_nothing() {
     let (mut rt, _h) = runtime().await;
@@ -312,4 +383,175 @@ async fn f10_on_a_join_page_stops_the_loop_and_tells_the_terminator() {
         h.interrupt_seen.try_recv(),
         Ok(Interrupted::UserInt)
     ));
+}
+
+// ---- community context: the claim, a busy domain, no session ----
+
+const DEVICE_DID: &str = "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG";
+
+/// A device-access view on one context, its grant form filled in.
+fn device_access_with_form(rt: &mut Runtime) {
+    use crate::state_handler::main_page::content::{DeviceAccessView, GrantForm};
+    rt.state.main_page.content_panel.communities.device_access = Some(DeviceAccessView {
+        community: "Club".into(),
+        context_id: "openvtc/club".into(),
+        can_grant: true,
+        selected: 0,
+        form: Some(GrantForm {
+            did: DEVICE_DID.into(),
+            ..GrantForm::default()
+        }),
+        confirm_revoke: false,
+        busy: false,
+        message: None,
+    });
+}
+
+fn device_view(rt: &Runtime) -> &crate::state_handler::main_page::content::DeviceAccessView {
+    rt.state
+        .main_page
+        .content_panel
+        .communities
+        .device_access
+        .as_ref()
+        .expect("the view stays open")
+}
+
+/// A grant refused because a context job holds the domain changes nothing but
+/// the view's message: the form stays open and the view is not marked busy.
+#[tokio::test]
+async fn a_grant_on_a_busy_context_domain_is_refused_and_commits_nothing() {
+    use crate::state_handler::actions::CommunityContextAction as Act;
+    use background_dispatch::{DispatchDomain, InFlight};
+    let (mut rt, _h) = runtime().await;
+    rt.admin_vta = Some(vta_sdk::client::VtaClient::new("https://vta.example"));
+    device_access_with_form(&mut rt);
+    assert!(rt.in_flight.try_begin(DispatchDomain::CommunityAccess));
+
+    rt.on_action(Action::CommunityContext(Act::GrantSubmit))
+        .await;
+
+    let view = device_view(&rt);
+    assert!(!view.busy, "nothing started, so nothing is running");
+    assert!(view.form.is_some(), "the form is kept to submit again");
+    assert_eq!(
+        view.message.as_ref().map(|m| m.text.as_str()),
+        Some(InFlight::busy_message(DispatchDomain::CommunityAccess).as_str())
+    );
+}
+
+/// A revocation refused as busy disarms the confirmation (as a refused one
+/// always did) and starts nothing.
+#[tokio::test]
+async fn a_revoke_on_a_busy_context_domain_is_refused_and_commits_nothing() {
+    use crate::state_handler::actions::CommunityContextAction as Act;
+    use crate::state_handler::main_page::content::GrantListing;
+    use background_dispatch::{DispatchDomain, InFlight};
+    let (mut rt, _h) = runtime().await;
+    rt.admin_vta = Some(vta_sdk::client::VtaClient::new("https://vta.example"));
+    device_access_with_form(&mut rt);
+    {
+        let communities = &mut rt.state.main_page.content_panel.communities;
+        let view = communities.device_access.as_mut().unwrap();
+        view.form = None;
+        view.confirm_revoke = true;
+        communities.device_grants.insert(
+            "openvtc/club".into(),
+            GrantListing::Loaded(vec![openvtc_core::community_access::DeviceGrant {
+                did: DEVICE_DID.into(),
+                role: "application".into(),
+                label: Some("laptop".into()),
+                contexts: vec!["openvtc/club".into()],
+                elsewhere: Vec::new(),
+                expires_at: None,
+            }]),
+        );
+    }
+    assert!(rt.in_flight.try_begin(DispatchDomain::CommunityAccess));
+
+    rt.on_action(Action::CommunityContext(Act::RevokeConfirm))
+        .await;
+
+    let view = device_view(&rt);
+    assert!(!view.busy);
+    assert!(!view.confirm_revoke);
+    assert_eq!(
+        view.message.as_ref().map(|m| m.text.as_str()),
+        Some(InFlight::busy_message(DispatchDomain::CommunityAccess).as_str())
+    );
+}
+
+/// A refresh refused as busy leaves the listing as it was.
+#[tokio::test]
+async fn a_refresh_on_a_busy_context_domain_leaves_the_listing_alone() {
+    use crate::state_handler::actions::CommunityContextAction as Act;
+    use background_dispatch::{DispatchDomain, InFlight};
+    let (mut rt, _h) = runtime().await;
+    rt.admin_vta = Some(vta_sdk::client::VtaClient::new("https://vta.example"));
+    device_access_with_form(&mut rt);
+    assert!(rt.in_flight.try_begin(DispatchDomain::CommunityAccess));
+
+    rt.on_action(Action::CommunityContext(Act::DevicesRefresh))
+        .await;
+
+    let view = device_view(&rt);
+    assert!(!view.busy);
+    assert_eq!(
+        view.message.as_ref().map(|m| m.text.as_str()),
+        Some(InFlight::busy_message(DispatchDomain::CommunityAccess).as_str())
+    );
+    assert!(
+        !rt.state
+            .main_page
+            .content_panel
+            .communities
+            .device_grants
+            .contains_key("openvtc/club"),
+        "no listing is marked loading for a read that never started"
+    );
+}
+
+/// With no VTA session a grant is refused with the reason, and claims nothing.
+#[tokio::test]
+async fn a_grant_without_a_vta_session_says_so_and_claims_nothing() {
+    use crate::state_handler::actions::CommunityContextAction as Act;
+    use background_dispatch::DispatchDomain;
+    let (mut rt, _h) = runtime().await;
+    device_access_with_form(&mut rt);
+
+    rt.on_action(Action::CommunityContext(Act::GrantSubmit))
+        .await;
+
+    let view = device_view(&rt);
+    assert!(!view.busy);
+    assert_eq!(
+        view.message.as_ref().map(|m| m.text.as_str()),
+        Some("VTA session unavailable — cannot grant device access right now.")
+    );
+    assert!(!rt.in_flight.is_busy(DispatchDomain::CommunityAccess));
+}
+
+/// A grant that starts claims the domain, marks the view busy and says what it
+/// is doing.
+#[tokio::test]
+async fn a_grant_that_starts_claims_the_domain_then_marks_the_view_busy() {
+    use crate::state_handler::actions::CommunityContextAction as Act;
+    use background_dispatch::DispatchDomain;
+    let (mut rt, _h) = runtime().await;
+    rt.admin_vta = Some(vta_sdk::client::VtaClient::new("https://vta.example"));
+    device_access_with_form(&mut rt);
+
+    rt.on_action(Action::CommunityContext(Act::GrantSubmit))
+        .await;
+
+    assert!(rt.in_flight.is_busy(DispatchDomain::CommunityAccess));
+    let view = device_view(&rt);
+    assert!(view.busy);
+    assert!(
+        view.message
+            .as_ref()
+            .is_some_and(|m| m.text.starts_with("Granting did:key:")),
+        "{:?}",
+        view.message
+    );
 }
