@@ -856,3 +856,699 @@ async fn asking_for_a_resend_files_the_question_and_a_failed_send_forgets_it() {
         status(&rt).text
     );
 }
+
+// ============================================================================
+// Faces and the card
+// ============================================================================
+//
+// The face and card jobs run against the VTA session. The harness gives it
+// one at a closed local port, so a job fails off the loop at once — the
+// failure path whose outcome is then applied.
+
+mod faces {
+    use chrono::Utc;
+    use openvtc_core::vetting::applicant::{OpenSession, OutboundRequest, RequestState};
+    use vta_sdk::protocols::vetting::VettingMethod;
+
+    use super::*;
+    use crate::state_handler::main_page::content::{CardPreview, FaceChoice, NewFaceForm, PoolRow};
+
+    const NO_VTA: &str = "Faces live in your VTA, and it is not connected — try again once it is.";
+    const SESSION: &str = "session-1";
+
+    fn connect(rt: &mut Runtime) {
+        rt.admin_vta = Some(vta_sdk::client::VtaClient::new("http://127.0.0.1:1"));
+    }
+
+    fn context_of(rt: &Runtime, id: &str) -> Option<String> {
+        rt.config
+            .private
+            .vetting
+            .application_by_id(id)
+            .and_then(|a| a.context_id.clone())
+    }
+
+    fn face(name: &str, worn: bool) -> FaceChoice {
+        FaceChoice {
+            profile_id: format!("p-{name}"),
+            name: name.into(),
+            entries: 1,
+            worn,
+            claim_types: vec!["name.legal".into()],
+        }
+    }
+
+    fn picker(rt: &mut Runtime, id: &str, faces: Vec<FaceChoice>, index: usize) {
+        rt.state.main_page.content_panel.vetting.mode = VettingMode::ChooseFace {
+            application_id: id.into(),
+            faces,
+            index,
+            required: vec!["name.legal".into()],
+        };
+    }
+
+    /// The make-a-face form over `pool`, asking for a legal name.
+    fn new_face(rt: &mut Runtime, id: &str, pool: Vec<PoolRow>) {
+        rt.state.main_page.content_panel.vetting.mode =
+            VettingMode::NewFace(Box::new(NewFaceForm::open(
+                id.into(),
+                vec!["name.legal".into()],
+                Vec::new(),
+                pool,
+                "Vetting".into(),
+            )));
+    }
+
+    fn legal_name() -> PoolRow {
+        PoolRow {
+            attribute_id: "attr-name".into(),
+            claim_type: "name.legal".into(),
+            label: "Legal name".into(),
+            value: Some("Alice Example".into()),
+        }
+    }
+
+    fn form(rt: &Runtime) -> &NewFaceForm {
+        match &page(rt).mode {
+            VettingMode::NewFace(form) => form,
+            _ => panic!("the form stays open"),
+        }
+    }
+
+    /// An application with an open session from [`VETTER`], expiring at
+    /// `expires_at`.
+    fn with_session(
+        rt: &mut Runtime,
+        persona: PersonaId,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> String {
+        let id = application(rt, persona);
+        let app = rt
+            .config
+            .private
+            .vetting
+            .application_by_id_mut(&id)
+            .expect("the application");
+        app.requests.push(OutboundRequest {
+            document_id: "req-1".into(),
+            vetter: VETTER.into(),
+            state: RequestState::Session {
+                request_id: "r-1".into(),
+                session: Box::new(OpenSession {
+                    id: SESSION.into(),
+                    challenge: "challenge".into(),
+                    domain: VTC.into(),
+                    method: VettingMethod::Video,
+                    required_claims: vec!["name.legal".into()],
+                    optional_claims: Vec::new(),
+                    expires_at,
+                    match_code: "0000".into(),
+                    document: None,
+                }),
+                card: None,
+            },
+            eligibility: None,
+            grant_status: None,
+            sent_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        id
+    }
+
+    fn card(rt: &mut Runtime, id: &str, preview: Option<CardPreview>) {
+        rt.state.main_page.content_panel.vetting.mode = VettingMode::SendCard {
+            application_id: id.into(),
+            session_id: SESSION.into(),
+            preview,
+        };
+    }
+
+    fn previewed(problem: Option<&str>) -> CardPreview {
+        CardPreview {
+            preview_id: "01PREVIEW".into(),
+            claims: vec![("name.legal".into(), "Alice Example".into())],
+            problem: problem.map(ToString::to_string),
+        }
+    }
+
+    fn later() -> chrono::DateTime<Utc> {
+        Utc::now() + chrono::Duration::hours(1)
+    }
+
+    // ---- choose a face (list the faces) ----
+
+    #[tokio::test]
+    async fn choosing_a_face_with_no_vta_says_so_and_derives_nothing() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        rt.state.main_page.content_panel.vetting.card_after_face = Some(("x".into(), "y".into()));
+
+        act(&mut rt, VettingAction::ChooseFace).await;
+
+        assert_eq!(status(&rt), &Status::error(NO_VTA));
+        assert_eq!(context_of(&rt, &id), None);
+        assert!(
+            page(&rt).card_after_face.is_none(),
+            "from the list, no card"
+        );
+        assert!(!busy(&rt));
+        assert!(!rt.save.is_pending());
+    }
+
+    #[tokio::test]
+    async fn choosing_a_face_from_a_card_remembers_the_card_even_when_refused() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = with_session(&mut rt, persona, later());
+        card(&mut rt, &id, None);
+
+        act(&mut rt, VettingAction::ChooseFace).await;
+
+        assert_eq!(status(&rt), &Status::error(NO_VTA));
+        assert_eq!(page(&rt).card_after_face, Some((id, SESSION.into())));
+        assert!(matches!(page(&rt).mode, VettingMode::SendCard { .. }));
+    }
+
+    #[tokio::test]
+    async fn choosing_a_face_while_busy_derives_the_context_and_reads_nothing() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+        act(&mut rt, VettingAction::ChooseFace).await;
+
+        assert_busy_refusal(&rt);
+        // The context is derived before the busy check, in memory only.
+        assert!(context_of(&rt, &id).is_some());
+        assert!(!rt.save.is_pending());
+    }
+
+    #[tokio::test]
+    async fn choosing_a_face_reads_the_faces_and_a_failed_read_says_why() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+
+        act(&mut rt, VettingAction::ChooseFace).await;
+
+        assert!(busy(&rt));
+        assert_eq!(status(&rt), &Status::progress("Reading your faces…"));
+        assert!(context_of(&rt, &id).is_some());
+        assert!(matches!(page(&rt).mode, VettingMode::List));
+        assert!(!rt.save.is_pending());
+
+        settle(&mut rt).await;
+        assert!(!busy(&rt));
+        assert!(
+            status(&rt).text.starts_with("Could not read your faces"),
+            "{}",
+            status(&rt).text
+        );
+        assert!(rt.save.is_pending(), "the derived context is saved");
+    }
+
+    // ---- make a new face (read the pool) ----
+
+    #[tokio::test]
+    async fn opening_a_new_face_with_no_vta_says_so() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        picker(&mut rt, &id, Vec::new(), 0);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(status(&rt), &Status::error(NO_VTA));
+        assert!(matches!(page(&rt).mode, VettingMode::ChooseFace { .. }));
+        assert!(!busy(&rt));
+    }
+
+    #[tokio::test]
+    async fn opening_a_new_face_while_busy_reads_nothing() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        picker(&mut rt, &id, Vec::new(), 0);
+        assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_busy_refusal(&rt);
+        assert!(matches!(page(&rt).mode, VettingMode::ChooseFace { .. }));
+        assert_eq!(
+            context_of(&rt, &id),
+            None,
+            "the pool read derives no context"
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_a_new_face_reads_the_pool_and_a_failed_read_says_why() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        picker(&mut rt, &id, vec![face("Work", false)], 1);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert!(busy(&rt));
+        assert_eq!(status(&rt), &Status::progress("Reading your attributes…"));
+        assert!(matches!(page(&rt).mode, VettingMode::ChooseFace { .. }));
+        assert!(!rt.save.is_pending());
+
+        settle(&mut rt).await;
+        assert!(!busy(&rt));
+        assert!(
+            status(&rt)
+                .text
+                .starts_with("Could not read your attributes"),
+            "{}",
+            status(&rt).text
+        );
+    }
+
+    // ---- wear a face ----
+
+    #[tokio::test]
+    async fn wearing_no_face_says_to_make_one() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        // Past the "make one" row: there is no face at the index.
+        picker(&mut rt, &id, Vec::new(), 3);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(
+            status(&rt),
+            &Status::warning("Make a face under My Identity first.")
+        );
+        assert!(!busy(&rt));
+    }
+
+    #[tokio::test]
+    async fn wearing_the_worn_face_goes_back_to_the_card() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        picker(&mut rt, &id, vec![face("Work", true)], 0);
+        rt.state.main_page.content_panel.vetting.card_after_face =
+            Some((id.clone(), SESSION.into()));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(
+            status(&rt),
+            &Status::warning("Work is already the face you show vetters.")
+        );
+        assert!(matches!(
+            &page(&rt).mode,
+            VettingMode::SendCard { session_id, preview: None, .. } if session_id == SESSION
+        ));
+        assert!(page(&rt).card_after_face.is_none());
+        assert_eq!(context_of(&rt, &id), None);
+    }
+
+    #[tokio::test]
+    async fn wearing_a_face_with_no_vta_says_so() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        picker(&mut rt, &id, vec![face("Work", false)], 0);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(status(&rt), &Status::error(NO_VTA));
+        assert!(matches!(page(&rt).mode, VettingMode::ChooseFace { .. }));
+        assert_eq!(context_of(&rt, &id), None);
+    }
+
+    #[tokio::test]
+    async fn wearing_a_face_for_a_gone_application_cannot() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        picker(&mut rt, "gone", vec![face("Work", false)], 0);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(
+            status(&rt),
+            &Status::error("Cannot wear that face: the application is gone")
+        );
+        assert!(matches!(page(&rt).mode, VettingMode::ChooseFace { .. }));
+        assert!(!busy(&rt));
+    }
+
+    #[tokio::test]
+    async fn wearing_a_face_while_busy_keeps_the_picker() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        picker(&mut rt, &id, vec![face("Work", false)], 0);
+        assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_busy_refusal(&rt);
+        assert!(matches!(page(&rt).mode, VettingMode::ChooseFace { .. }));
+        assert!(context_of(&rt, &id).is_some());
+        assert!(!rt.save.is_pending());
+    }
+
+    #[tokio::test]
+    async fn wearing_a_face_goes_to_the_list_and_a_failed_wear_says_why() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        picker(&mut rt, &id, vec![face("Work", false)], 0);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert!(busy(&rt));
+        assert_eq!(status(&rt), &Status::progress("Wearing Work…"));
+        assert!(matches!(page(&rt).mode, VettingMode::List));
+        assert!(context_of(&rt, &id).is_some());
+        assert!(!rt.save.is_pending());
+
+        settle(&mut rt).await;
+        assert!(!busy(&rt));
+        assert!(
+            status(&rt).text.starts_with("Could not wear Work: "),
+            "{}",
+            status(&rt).text
+        );
+        assert!(rt.save.is_pending());
+    }
+
+    // ---- the make-a-face form ----
+
+    #[tokio::test]
+    async fn enter_on_an_empty_form_waits() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        new_face(&mut rt, &id, Vec::new());
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert!(form(&rt).saving.is_none());
+        assert!(page(&rt).status_message.is_none());
+        assert!(!busy(&rt));
+    }
+
+    #[tokio::test]
+    async fn saving_a_typed_value_with_no_vta_keeps_the_form_not_saving() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        new_face(&mut rt, &id, Vec::new());
+        act(&mut rt, VettingAction::Input("Alice Example".into())).await;
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(status(&rt), &Status::error(NO_VTA));
+        assert!(form(&rt).saving.is_none());
+        assert_eq!(form(&rt).draft("name.legal"), "Alice Example");
+        assert!(!busy(&rt));
+    }
+
+    #[tokio::test]
+    async fn saving_a_typed_value_while_busy_keeps_the_form_not_saving() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        new_face(&mut rt, &id, Vec::new());
+        act(&mut rt, VettingAction::Input("Alice Example".into())).await;
+        assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_busy_refusal(&rt);
+        assert!(form(&rt).saving.is_none());
+        assert_eq!(form(&rt).draft("name.legal"), "Alice Example");
+    }
+
+    #[tokio::test]
+    async fn saving_a_typed_value_waits_on_the_write_and_a_failed_write_says_why() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        new_face(&mut rt, &id, Vec::new());
+        act(&mut rt, VettingAction::Input("Alice Example".into())).await;
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert!(busy(&rt));
+        assert_eq!(form(&rt).saving.as_deref(), Some("name.legal"));
+        assert!(page(&rt).status_message.is_none(), "the form says it");
+        assert_eq!(context_of(&rt, &id), None);
+
+        settle(&mut rt).await;
+        assert!(!busy(&rt));
+        assert!(form(&rt).saving.is_none());
+        assert!(
+            form(&rt)
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Could not save it: ")),
+            "{:?}",
+            form(&rt).error
+        );
+        assert!(status(&rt).text.starts_with("Could not save your "));
+    }
+
+    #[tokio::test]
+    async fn making_a_face_with_no_vta_says_so_and_keeps_the_form() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        new_face(&mut rt, &id, vec![legal_name()]);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(status(&rt), &Status::error(NO_VTA));
+        assert!(matches!(page(&rt).mode, VettingMode::NewFace(_)));
+        assert_eq!(context_of(&rt, &id), None);
+    }
+
+    #[tokio::test]
+    async fn making_a_face_while_busy_keeps_the_form() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        new_face(&mut rt, &id, vec![legal_name()]);
+        assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_busy_refusal(&rt);
+        assert!(matches!(page(&rt).mode, VettingMode::NewFace(_)));
+        assert!(context_of(&rt, &id).is_some());
+        assert!(!rt.save.is_pending());
+    }
+
+    #[tokio::test]
+    async fn making_a_face_goes_to_the_list_and_a_failed_make_says_why() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        new_face(&mut rt, &id, vec![legal_name()]);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert!(busy(&rt));
+        assert_eq!(status(&rt), &Status::progress("Making Vetting…"));
+        assert!(matches!(page(&rt).mode, VettingMode::List));
+        assert!(context_of(&rt, &id).is_some());
+
+        settle(&mut rt).await;
+        assert!(!busy(&rt));
+        assert!(
+            status(&rt).text.starts_with("Could not wear Vetting: "),
+            "{}",
+            status(&rt).text
+        );
+    }
+
+    // ---- send the card ----
+
+    #[tokio::test]
+    async fn a_card_for_a_gone_application_does_nothing() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        card(&mut rt, "gone", None);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert!(page(&rt).status_message.is_none());
+        assert!(!busy(&rt));
+    }
+
+    #[tokio::test]
+    async fn a_card_for_a_closed_session_says_so() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = application(&mut rt, persona);
+        card(&mut rt, &id, None);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(status(&rt), &Status::warning("That session has closed."));
+        assert_eq!(context_of(&rt, &id), None);
+    }
+
+    #[tokio::test]
+    async fn a_card_for_an_expired_session_says_so() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = with_session(&mut rt, persona, Utc::now() - chrono::Duration::minutes(1));
+        card(&mut rt, &id, None);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(
+            status(&rt),
+            &Status::warning("The session has expired — ask the vetter to open another.")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_card_the_face_cannot_make_says_why() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = with_session(&mut rt, persona, later());
+        card(&mut rt, &id, Some(previewed(Some("no legal name"))));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(status(&rt), &Status::warning("no legal name"));
+        assert!(!busy(&rt));
+    }
+
+    #[tokio::test]
+    async fn a_card_with_no_vta_says_so() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = with_session(&mut rt, persona, later());
+        card(&mut rt, &id, None);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_eq!(status(&rt), &Status::error(NO_VTA));
+        assert_eq!(context_of(&rt, &id), None);
+    }
+
+    #[tokio::test]
+    async fn a_card_while_busy_derives_the_context_and_sends_nothing() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = with_session(&mut rt, persona, later());
+        card(&mut rt, &id, Some(previewed(None)));
+        assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_busy_refusal(&rt);
+        assert!(context_of(&rt, &id).is_some());
+        assert!(matches!(
+            page(&rt).mode,
+            VettingMode::SendCard {
+                preview: Some(_),
+                ..
+            }
+        ));
+        assert!(!rt.save.is_pending());
+    }
+
+    #[tokio::test]
+    async fn previewing_a_card_asks_the_vta_and_a_failed_preview_says_why() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = with_session(&mut rt, persona, later());
+        card(&mut rt, &id, None);
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert!(busy(&rt));
+        assert_eq!(
+            status(&rt),
+            &Status::progress("Asking your VTA what your face shows this vetter…")
+        );
+        assert!(context_of(&rt, &id).is_some());
+        assert!(!rt.save.is_pending());
+
+        settle(&mut rt).await;
+        assert!(!busy(&rt));
+        assert!(
+            status(&rt).text.starts_with("Could not preview the card: "),
+            "{}",
+            status(&rt).text
+        );
+    }
+
+    #[tokio::test]
+    async fn sending_a_card_without_keys_gives_up_unsent() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = persona_without_keys(&mut rt, "did:key:zApplicant").await;
+        let id = with_session(&mut rt, persona, later());
+        card(&mut rt, &id, Some(previewed(None)));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert_abandoned(&rt, "Could not sign the card");
+        // Derived before the key lookup, and kept.
+        assert!(context_of(&rt, &id).is_some());
+        assert!(!rt.save.is_pending());
+    }
+
+    #[tokio::test]
+    async fn sending_a_card_releases_it_and_a_failed_send_previews_again() {
+        let (mut rt, _h) = runtime().await;
+        connect(&mut rt);
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        let id = with_session(&mut rt, persona, later());
+        card(&mut rt, &id, Some(previewed(None)));
+
+        act(&mut rt, VettingAction::Submit).await;
+
+        assert!(busy(&rt));
+        assert_eq!(
+            status(&rt),
+            &Status::progress("Releasing and signing your card…")
+        );
+        assert!(context_of(&rt, &id).is_some());
+        assert!(!rt.save.is_pending());
+
+        settle(&mut rt).await;
+        assert!(!busy(&rt));
+        assert!(
+            status(&rt).text.starts_with("Could not send the card: "),
+            "{}",
+            status(&rt).text
+        );
+        assert!(matches!(
+            page(&rt).mode,
+            VettingMode::SendCard { preview: None, .. }
+        ));
+    }
+}
