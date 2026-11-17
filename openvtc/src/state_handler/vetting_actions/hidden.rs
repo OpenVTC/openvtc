@@ -395,7 +395,8 @@ pub(super) fn plan_check_hidden_key(
 /// Plan "get tokens" (`d`): whatever the schedule owes, in order — enrol where not enrolled,
 /// then draw every window that has begun — and, per community, exactly what is happening or
 /// what blocks it and until when. Said from the book as it was before the pass, which is what
-/// the pass acts on, once the pass has run.
+/// the pass acts on, once the pass has run — unless the pass said a warning or an error, which
+/// stays on the status line ([`Step::Summary`]).
 pub(super) fn plan_draw_now(config: &mut Config, now: DateTime<Utc>) -> VettingEffect {
     // Asked by hand: a lost enrolment is worth one more ask — the community may now re-issue it
     // to the same identifier, and it bounds how many times it will.
@@ -416,7 +417,7 @@ pub(super) fn plan_draw_now(config: &mut Config, now: DateTime<Utc>) -> VettingE
     };
     VettingEffect(vec![
         Step::RefreshVetterSide,
-        Step::Status(Status::info(if words.is_empty() {
+        Step::Summary(Status::info(if words.is_empty() {
             "None of the communities you vet for proves vetting with PCS ZKP, so there are no \
              tokens to get — hand out tickets with t."
                 .to_string()
@@ -773,7 +774,7 @@ mod tests {
         let effect = plan_draw_now(&mut config, Utc::now());
 
         assert!(!config.private.vetting.hidden_vetter[0].lost_reasked);
-        let [Step::RefreshVetterSide, Step::Status(word)] = effect.0.as_slice() else {
+        let [Step::RefreshVetterSide, Step::Summary(word)] = effect.0.as_slice() else {
             panic!("the pass, then what it did");
         };
         assert_eq!(word.severity, Severity::Info);

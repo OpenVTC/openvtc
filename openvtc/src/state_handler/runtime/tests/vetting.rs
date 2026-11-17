@@ -2965,6 +2965,34 @@ mod hidden {
         assert!(!busy(&rt));
     }
 
+    /// A pass that fails to ask something says why, and the summary of what
+    /// each community does does not cover it.
+    #[tokio::test]
+    async fn drawing_by_hand_leaves_a_failure_of_the_pass_said() {
+        let (mut rt, _h) = runtime().await;
+        let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+        engine(&mut rt, persona);
+        grant(&mut rt, persona);
+        rt.config
+            .private
+            .vetting
+            .hidden_published
+            .insert(VTC.into(), params());
+        reads_as_hidden(&mut rt);
+        rebound(&mut rt);
+
+        act(&mut rt, VettingAction::DrawNow).await;
+
+        let s = status(&rt);
+        assert_eq!(s.severity, Severity::Error);
+        assert!(
+            s.text
+                .contains(" which hidden-vetting key it holds for you: "),
+            "{}",
+            s.text
+        );
+    }
+
     #[tokio::test]
     async fn enter_on_the_hidden_view_runs_the_vetter_pass() {
         let (mut rt, _h) = runtime().await;

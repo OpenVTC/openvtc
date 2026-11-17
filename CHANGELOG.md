@@ -277,6 +277,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   submission-challenge request that follows replaced the refusal with "Asking the
   community for a submission challenge…". The challenge is still asked, quietly, when
   the requirements were refused or failed.
+- **Hidden vetting: "get tokens" (`d`) no longer covers a failure with its summary**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The per-community summary was
+  shown after the vetter pass even when the pass had just said a warning or an error
+  (a question to a community that could not be sent), which hid it. The failure now
+  stays on the status line; the summary is shown otherwise.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

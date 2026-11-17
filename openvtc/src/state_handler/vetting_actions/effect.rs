@@ -13,7 +13,7 @@
 
 use std::collections::VecDeque;
 
-use crate::state_handler::main_page::status::Status;
+use crate::state_handler::main_page::status::{Severity, Status};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::vetting::registry::VetterProfileRecord;
@@ -92,6 +92,10 @@ pub(super) enum Step {
     MarkDirty,
     /// Show a status line.
     Status(Status),
+    /// Show a summary of what the steps before it did — unless one of them
+    /// left a warning or an error on the status line, which is the real
+    /// news and stays.
+    Summary(Status),
     /// Look up `persona`'s keys and sign `document` with its authentication
     /// key. The runner holds the signed document for the [`Step::Send`] that
     /// follows.
@@ -360,11 +364,13 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
     let mut steps: VecDeque<Step> = effect.0.into();
     let mut signed: Option<(PersonaId, Document)> = None;
     let mut keys: Option<CardKeys> = None;
+    let said_before = panel(ctx.state).status_message.clone();
     while let Some(step) = steps.pop_front() {
         match step {
             Step::Persist(message) => persist(ctx, message),
             Step::MarkDirty => ctx.save.mark_dirty(),
             Step::Status(message) => show(ctx.state, message),
+            Step::Summary(message) => summarise(ctx.state, said_before.as_ref(), message),
             Step::Sign {
                 persona,
                 mut document,
@@ -483,6 +489,17 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
     }
 }
 
+/// Show `summary`, unless the status line changed since `said_before` to a
+/// warning or an error ([`Step::Summary`]).
+fn summarise(state: &mut State, said_before: Option<&Status>, summary: Status) {
+    let now = panel(state).status_message.as_ref();
+    let warned = now != said_before
+        && now.is_some_and(|s| matches!(s.severity, Severity::Warning | Severity::Error));
+    if !warned {
+        show(state, summary);
+    }
+}
+
 /// Run an effect of local steps — [`Step::Persist`], [`Step::MarkDirty`],
 /// [`Step::Status`] — without awaiting, for a plan made inside a synchronous
 /// pass ([`hidden_vetting_tick`](super::hidden::hidden_vetting_tick)).
@@ -491,7 +508,7 @@ pub(super) fn run_local(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
         match step {
             Step::Persist(message) => persist(ctx, message),
             Step::MarkDirty => ctx.save.mark_dirty(),
-            Step::Status(message) => show(ctx.state, message),
+            Step::Status(message) | Step::Summary(message) => show(ctx.state, message),
             _ => debug_assert!(false, "a step that awaits, run without awaiting"),
         }
     }
@@ -502,8 +519,29 @@ mod tests {
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
     use crate::state_handler::main_page::content::DirectoryView;
-    use crate::state_handler::main_page::status::Severity;
     use openvtc_core::vetting::queries::{CommunityQuery, QueryKind};
+
+    /// A summary is said over what was there before and over progress, but
+    /// not over a warning or an error the steps before it left.
+    #[test]
+    fn a_summary_does_not_cover_a_warning_said_before_it() {
+        let mut state = State::default();
+        let summary = Status::info("summary");
+        let stale = Status::error("from an earlier action");
+
+        panel(&mut state).status_message = Some(stale.clone());
+        summarise(&mut state, Some(&stale), summary.clone());
+        assert_eq!(panel(&mut state).status_message, Some(summary.clone()));
+
+        panel(&mut state).status_message = Some(Status::progress("working"));
+        summarise(&mut state, None, summary.clone());
+        assert_eq!(panel(&mut state).status_message, Some(summary.clone()));
+
+        let failed = Status::error("could not ask");
+        panel(&mut state).status_message = Some(failed.clone());
+        summarise(&mut state, None, summary);
+        assert_eq!(panel(&mut state).status_message, Some(failed));
+    }
 
     /// Giving up undoes the plan's changes in order, then says why — in the
     /// status line and the activity log.

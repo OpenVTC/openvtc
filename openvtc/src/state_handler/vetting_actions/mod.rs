@@ -28,7 +28,8 @@
 //! handler made them: after the busy check, before any save or signing.
 //!
 //! `effect::run` does the steps in order: `Persist` (save and sync, showing
-//! and logging the message), `MarkDirty`, `Status`, `Sign` (the persona's key
+//! and logging the message), `MarkDirty`, `Status`, `Summary` (a status that
+//! does not cover a warning or error the steps before it left), `Sign` (the persona's key
 //! lookup and the signing, holding the signed document), `Send` (the signed
 //! document to a `SendJob`, filing a manifest question first, claimed through
 //! `background_dispatch::dispatch` for `Claim::Held` or `spawn_unclaimed` for
