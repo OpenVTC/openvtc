@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use super::*;
 use crate::state_handler::actions::ReposAction as Act;
+use crate::state_handler::actions::WorkspaceAction;
 use crate::state_handler::background_dispatch::{DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::main_page::repos::{
     ArmedChange, LinkFlow, LinkPhase, NewRepoForm, Pending, Purpose, ReposPhase, ReposScreen,
-    ReposView, Severity,
+    ReposView, Severity, WorkspaceChange,
 };
 use crate::state_handler::repos_actions;
 use openvtc_core::config::account::PersonaId;
@@ -536,4 +537,123 @@ async fn an_unanswered_change_ends_on_the_sweep() {
     let (severity, text) = status(&rt).unwrap();
     assert_eq!(severity, Severity::Error);
     assert!(text.contains("may have been applied"), "{text}");
+}
+
+// ---- the workspace: local jobs ----
+//
+// Set-up is the job pinned end to end: with the test config's keys held
+// locally (no VTA), it fails at once inside the job without touching git,
+// did-git-sign or the filesystem. Saving the settings form writes the
+// profile's settings file and is not driven here.
+
+fn workspace(w: WorkspaceAction) -> Action {
+    Action::Repos(Act::Workspace(w))
+}
+
+/// A job while another of the panel's own runs says what is running and
+/// claims nothing.
+#[tokio::test]
+async fn a_workspace_job_while_one_runs_says_what_is_running() {
+    let (mut rt, _h) = runtime().await;
+    open_view(&mut rt, PersonaId::new(), true);
+    view_mut(&mut rt).workspace.busy = Some("cloning acme/gadgets".into());
+
+    rt.on_action(workspace(WorkspaceAction::SetUp)).await;
+
+    assert!(!rt.in_flight.is_busy(DispatchDomain::GitWorkspace));
+    assert_eq!(
+        status(&rt),
+        Some((
+            Severity::Warning,
+            "Still cloning acme/gadgets — please wait.".into()
+        ))
+    );
+}
+
+/// A job refused for want of a target says so and claims nothing.
+#[tokio::test]
+async fn a_clone_with_nothing_highlighted_is_refused() {
+    let (mut rt, _h) = runtime().await;
+    open_view(&mut rt, PersonaId::new(), false);
+
+    rt.on_action(workspace(WorkspaceAction::Clone)).await;
+
+    assert!(!rt.in_flight.is_busy(DispatchDomain::GitWorkspace));
+    assert!(view(&rt).workspace.busy.is_none());
+    assert_eq!(
+        status(&rt),
+        Some((Severity::Warning, "Highlight a repository first.".into()))
+    );
+}
+
+/// A job on a busy lane is refused with the busy message and marks nothing
+/// running; a confirmed removal is spent all the same.
+#[tokio::test]
+async fn a_workspace_job_on_a_busy_lane_is_refused_and_marks_nothing() {
+    let (mut rt, _h) = runtime().await;
+    open_view(&mut rt, PersonaId::new(), true);
+    view_mut(&mut rt).workspace.confirm = Some(WorkspaceChange::RemoveIdentity);
+    assert!(rt.in_flight.try_begin(DispatchDomain::GitWorkspace));
+
+    rt.on_action(workspace(WorkspaceAction::Confirm)).await;
+
+    let v = view(&rt);
+    assert!(
+        v.workspace.confirm.is_none(),
+        "a `y` answers one confirmation"
+    );
+    assert!(v.workspace.busy.is_none());
+    assert_eq!(
+        status(&rt),
+        Some((
+            Severity::Warning,
+            InFlight::busy_message(DispatchDomain::GitWorkspace)
+        ))
+    );
+}
+
+/// A job that starts claims the lane, then marks the workspace busy and says
+/// so; its failure frees the lane, clears the mark, says why and wants a
+/// probe. Nothing is persisted.
+#[tokio::test]
+async fn a_workspace_job_claims_then_marks_busy_and_its_failure_is_said() {
+    let (mut rt, _h) = runtime().await;
+    open_view(&mut rt, PersonaId::new(), true);
+
+    rt.on_action(workspace(WorkspaceAction::SetUp)).await;
+
+    assert!(rt.in_flight.is_busy(DispatchDomain::GitWorkspace));
+    assert_eq!(
+        view(&rt).workspace.busy.as_deref(),
+        Some("setting did-git-sign up")
+    );
+    assert_eq!(
+        status(&rt),
+        Some((Severity::Progress, "Setting did-git-sign up…".into()))
+    );
+
+    let outcome = loop {
+        let outcome = tokio::time::timeout(Duration::from_secs(30), rt.dispatch_rx.recv())
+            .await
+            .expect("the job reports back")
+            .expect("the channel is open");
+        if matches!(outcome, DispatchOutcome::Workspace(_)) {
+            break outcome;
+        }
+        rt.on_dispatch_outcome(outcome).await;
+    };
+    rt.on_dispatch_outcome(outcome).await;
+
+    assert!(!rt.in_flight.is_busy(DispatchDomain::GitWorkspace));
+    let v = view(&rt);
+    assert!(v.workspace.busy.is_none());
+    assert_eq!(v.workspace.probe_wanted, Some(true));
+    assert_eq!(
+        status(&rt),
+        Some((
+            Severity::Error,
+            "openvtc's keys are not held by a VTA, so there is no key for did-git-sign".into()
+        ))
+    );
+    assert!(!rt.save.needs_flush());
 }
