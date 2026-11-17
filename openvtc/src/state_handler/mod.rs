@@ -867,6 +867,9 @@ impl StateHandler {
         // When the loop rebuilds a stalled session it publishes the new client
         // here, and the presence task's next call uses it.
         let mut admin_vta_watch = None;
+        // The admin session's receive leg, shared by every observer of the
+        // session and handed to the supervisor below.
+        let receive = openvtc_core::vta_receive_leg::ReceiveLegTracker::new();
         if let Some(client) = admin_vta.as_ref() {
             // The DID this install authenticates as. It owns our device binding,
             // so it is how the presence task recognises our own row in the
@@ -883,6 +886,7 @@ impl StateHandler {
                 watch_rx,
                 self.profile.clone(),
                 self_did,
+                receive.clone(),
                 presence_tx,
             ));
         }
@@ -894,6 +898,7 @@ impl StateHandler {
         let mut vta_supervisor = vta_recovery::AdminVtaSupervisor::new(
             openvtc_core::config::RuntimeVtaConnect::from_backend(&config.key_backend),
             admin_vta_watch,
+            receive,
         );
 
         // Put any membership credential this account holds into the VTA's
@@ -966,7 +971,9 @@ impl StateHandler {
 
         // Fetch VTA context name, reusing the always-on admin session.
         if let Some(client) = admin_vta.as_ref()
-            && let Ok(resp) = client.list_contexts().await
+            && let Ok(resp) = vta_supervisor
+                .receive()
+                .observe(client.list_contexts().await)
         {
             if let Some(ctx) = resp
                 .contexts
@@ -1905,7 +1912,11 @@ impl StateHandler {
         join_ctx: Option<DegradedJoinContext>,
     ) -> Result<Interrupted> {
         // No loaded config, so no admin session to watch: an idle supervisor.
-        let mut idle = vta_recovery::AdminVtaSupervisor::new(None, None);
+        let mut idle = vta_recovery::AdminVtaSupervisor::new(
+            None,
+            None,
+            openvtc_core::vta_receive_leg::ReceiveLegTracker::new(),
+        );
         match self
             .run_degraded_loop(
                 action_rx,

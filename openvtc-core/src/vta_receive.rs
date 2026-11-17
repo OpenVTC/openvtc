@@ -7,8 +7,8 @@
 //! mediator inbox until the session collects it. A session that has stopped
 //! collecting (observed 2026-10-05: two admin sessions, an hour, every VTA reply
 //! refused once the mediator's per-peer queue filled) looks exactly like a VTA
-//! that never answers — and retrying only queues another reply. The session
-//! counts the state ([`crate::vta_receive_leg`]); this module is where OpenVTC turns
+//! that never answers — and retrying only queues another reply. The state is
+//! detected by [`crate::vta_receive_leg`]; this module is where OpenVTC turns
 //! it into words and a schedule.
 //!
 //! - [`replies_not_arriving_text`] is the one sentence for it (R6.4): neither

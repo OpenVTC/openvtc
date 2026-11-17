@@ -21,6 +21,7 @@
 //! correct a machine that has been renamed since.
 
 use openvtc_core::devices::{self, DeviceRecord};
+use openvtc_core::vta_receive_leg::ReceiveLegTracker;
 use std::collections::BTreeSet;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
@@ -131,21 +132,22 @@ impl FailureLatch {
 /// `client` follows the admin session: when the loop rebuilds it, the next call
 /// here uses the new one, never the closed one.
 ///
-/// Every call here is counted on the session's receive leg, which makes the
-/// heartbeat and listing a periodic probe of whether the VTA's replies still
-/// reach this app.
+/// `receive` is the admin session's receive leg: every call here is counted on
+/// it, which makes the heartbeat and listing a periodic probe of whether the
+/// VTA's replies still reach this app.
 ///
 /// Returns when `tx` closes — i.e. when the state handler exits.
 pub async fn run(
     client: watch::Receiver<VtaClient>,
     profile: String,
     self_did: Option<String>,
+    receive: ReceiveLegTracker,
     tx: UnboundedSender<PresenceReport>,
 ) {
     let current = || client.borrow().clone();
     let mut latch = FailureLatch::default();
     let first = current();
-    let mut self_id = match devices::register(&first, &profile).await {
+    let mut self_id = match devices::register(&first, &profile, &receive).await {
         Ok(devices::Registration::Claimed(record)) => {
             info!(device_id = %record.device_id, "registered this install with the VTA");
             if tx
@@ -170,7 +172,7 @@ pub async fn run(
             let _ = tx.send(latch.failed(
                 PresenceCall::Register,
                 &e,
-                first.receive_health().replies_not_arriving(),
+                receive.health().replies_not_arriving(),
             ));
             None
         }
@@ -183,7 +185,7 @@ pub async fn run(
 
     loop {
         let client = current();
-        match devices::list(&client).await {
+        match devices::list(&client, &receive).await {
             Ok(all) => {
                 if let Some(report) = latch.succeeded()
                     && tx.send(report).is_err()
@@ -219,7 +221,7 @@ pub async fn run(
                 // the stale name would outlive every launch.
                 if mine.is_some_and(|d| devices::name_correction_due(d, &profile)) {
                     debug!("this install's binding shows a stale name; correcting it");
-                    if let Err(e) = devices::heartbeat(&client, &profile).await {
+                    if let Err(e) = devices::heartbeat(&client, &profile, &receive).await {
                         debug!("name correction failed; it will retry on the next beat: {e}");
                     }
                 }
@@ -239,7 +241,7 @@ pub async fn run(
                     .send(latch.failed(
                         PresenceCall::List,
                         &e,
-                        client.receive_health().replies_not_arriving(),
+                        receive.health().replies_not_arriving(),
                     ))
                     .is_err()
                 {
@@ -254,7 +256,7 @@ pub async fn run(
         }
         // Re-read: the session may have been rebuilt during the sleep.
         let client = current();
-        match devices::heartbeat(&client, &profile).await {
+        match devices::heartbeat(&client, &profile, &receive).await {
             Ok(()) => {
                 if let Some(report) = latch.succeeded()
                     && tx.send(report).is_err()
@@ -270,7 +272,7 @@ pub async fn run(
                     .send(latch.failed(
                         PresenceCall::Heartbeat,
                         &e,
-                        client.receive_health().replies_not_arriving(),
+                        receive.health().replies_not_arriving(),
                     ))
                     .is_err()
                 {
