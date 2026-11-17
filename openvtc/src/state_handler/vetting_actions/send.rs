@@ -1,6 +1,10 @@
-//! Shared sending helpers: checking the vetting domain is free, signing a
-//! message on the loop and handing its send to a background job, which claims
-//! the domain when it is dispatched.
+//! Shared sending helpers: checking the vetting domain is free, giving up on
+//! a send before it started, signing a message on the loop and handing its
+//! send to a background job, which claims the domain when it is dispatched.
+//!
+//! The pure halves ([`claimable`], [`give_up`]) are what a plan uses; the
+//! effect runner ([`super::effect::run`]) and the handlers not yet planned use
+//! the rest.
 
 use crate::state_handler::main_page::status::Status;
 use affinidi_tdk::didcomm::Message;
@@ -10,10 +14,11 @@ use openvtc_core::vetting::queries::{CommunityQuery, QueryKind};
 use openvtc_core::vetting::wire::{self, Document};
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 
-use super::dispatch::status;
+use super::dispatch::show;
 use super::jobs::{SendJob, Sent};
 use crate::state_handler::background_dispatch::{self, DispatchDomain, InFlight};
 use crate::state_handler::runtime_actions::ActionCtx;
+use crate::state_handler::state::State;
 
 // ============================================================================
 // Sending
@@ -24,11 +29,19 @@ use crate::state_handler::runtime_actions::ActionCtx;
 /// would be refused; the job claims the domain when it is dispatched
 /// ([`Claim::Held`]).
 pub(super) fn begin(ctx: &mut ActionCtx<'_>) -> bool {
-    if !ctx.in_flight.is_busy(DispatchDomain::Vetting) {
+    let busy = ctx.in_flight.is_busy(DispatchDomain::Vetting);
+    claimable(ctx.state, busy)
+}
+
+/// [`begin`] for a plan: `busy` is the vetting domain as the loop found it
+/// when the action arrived. The loop runs one arm at a time, so a domain free
+/// here is still free when the effect's send claims it.
+pub(super) fn claimable(state: &mut State, busy: bool) -> bool {
+    if !busy {
         return true;
     }
-    status(
-        ctx,
+    show(
+        state,
         Status::warning(InFlight::busy_message(DispatchDomain::Vetting)),
     );
     false
@@ -62,10 +75,20 @@ pub(super) fn spawn<J: background_dispatch::Job>(ctx: &mut ActionCtx<'_>, job: J
 /// Give up on a send before it started: say why, and show whatever the book
 /// now holds. Nothing was dispatched, so nothing holds the domain.
 pub(super) fn abandon(ctx: &mut ActionCtx<'_>, what: &str, error: impl std::fmt::Display) {
+    give_up(ctx.state, ctx.config, what, error);
+}
+
+/// [`abandon`] for a plan, which has the state and the config but no loop.
+pub(super) fn give_up(
+    state: &mut State,
+    config: &Config,
+    what: &str,
+    error: impl std::fmt::Display,
+) {
     let message = format!("{what}: {error}");
-    ctx.state.main_page.log(message.clone());
-    ctx.state.main_page.sync_from_config(ctx.config);
-    status(ctx, Status::error(message));
+    state.main_page.log(message.clone());
+    state.main_page.sync_from_config(config);
+    show(state, Status::error(message));
 }
 
 pub(super) fn persona_did(config: &Config, persona: PersonaId) -> Option<String> {
@@ -89,22 +112,43 @@ pub(super) async fn sign_and_send(
     sent: Sent,
     claim: Claim,
 ) -> Result<(), String> {
+    sign(ctx, persona, &mut document).await?;
+    send_signed(ctx, persona, document, sent, claim)
+}
+
+/// Look up `persona`'s keys and sign `document` with its authentication key.
+pub(super) async fn sign(
+    ctx: &mut ActionCtx<'_>,
+    persona: PersonaId,
+    document: &mut Document,
+) -> Result<(), String> {
     let keys = ctx
         .config
         .get_persona_keys_for(persona, ctx.tdk)
         .await
         .map_err(|e| e.to_string())?;
-    wire::sign(&mut document, &keys.authentication.secret)
+    wire::sign(document, &keys.authentication.secret)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+}
+
+/// Hand a signed `document` to a background job, held as `claim` says. On
+/// error nothing was sent.
+pub(super) fn send_signed(
+    ctx: &mut ActionCtx<'_>,
+    persona: PersonaId,
+    document: Document,
+    sent: Sent,
+    claim: Claim,
+) -> Result<(), String> {
     let message = wire::to_message(&document).map_err(|e| e.to_string())?;
     let from = document.issuer.clone().unwrap_or_default();
     let to = document.recipient.clone().unwrap_or_default();
     // A manifest question is filed, as the join flow's is, so its answer —
     // and above all its refusal — has a question to land on. Unfiled, a
-    // refusal threaded on it matched nothing and was dropped, which also
-    // meant a community refusing the version asked was never asked again in
-    // the one it serves (`vetting::protocol`).
+    // refusal threaded on it would match nothing and be dropped, and a
+    // community refusing the version asked would never be asked again in the
+    // one it serves (`vetting::protocol`).
     if let Sent::Manifest { community } = &sent {
         ctx.config.private.vetting.ask(CommunityQuery {
             document_id: document.id.clone(),

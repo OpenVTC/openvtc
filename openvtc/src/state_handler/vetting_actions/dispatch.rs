@@ -1,27 +1,42 @@
 //! Maps each `VettingAction` onto the page: the action dispatcher, form
 //! navigation, and form submission.
+//!
+//! An action is first offered to [`reduce`], which makes the view-only
+//! changes — moving through a form, opening one, reading a pasted link — on
+//! the state, reading the book but never changing it. An action that changes
+//! the book or sends is planned by [`plan`], which is pure: it decides, makes
+//! the state and book changes the action makes before anything is saved or
+//! signed, and returns a [`VettingEffect`] that [`run`] carries out. The
+//! actions [`plan`] does not take yet (the desk, tickets, faces and hidden
+//! vetting) come back as [`Planned::Loop`] and are handled on the loop by
+//! [`on_loop`].
 
 use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
+use openvtc_core::config::Config;
 use openvtc_core::vetting::vetter::DeskState;
 use vta_sdk::protocols::vetting::VettingMethod;
 
 use super::answers::focus_application;
 use super::applicant::{
-    abandon_application, ask_listed_vetter, directory_page, open_directory, paste_ticket,
-    refresh_application_contexts, refresh_requirements, request_vetter, search_directory,
-    start_application, switch_vetting_path,
+    ask_listed_vetter, open_directory, paste_ticket, plan_abandon_application, plan_directory_page,
+    plan_refresh_requirements, plan_request_vetter, plan_search_directory, plan_start_application,
+    plan_started, plan_switch_vetting_path, refresh_application_contexts,
 };
 use super::desk::{
     attest, decline, open_session, refresh_stale_modes, refresh_vetter_side, withdraw,
 };
+use super::effect::{Followup, VettingEffect, run};
 use super::faces::{create_face, list_faces, open_new_face, send_card, wear_face};
 use super::hidden::ask_for_challenge;
 use super::tickets::{delete_ticket, issue_ticket};
-use super::vetter::{ask_event_mode, ask_resend, open_profile, profile_form, profile_submit};
+use super::vetter::{
+    open_profile, plan_ask_event_mode, plan_ask_resend, plan_profile_submit, profile_form,
+};
 use super::view_sync::sync_journey;
 use super::words::{clause, community_display, get_tokens_words, hides_vetters};
 use crate::state_handler::actions::VettingAction;
+use crate::state_handler::background_dispatch::DispatchDomain;
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
 use crate::state_handler::main_page::content::{
     AttestForm, DECLINE_MESSAGE_MAX, DECLINE_REASONS, DIRECTORY_METHODS, DeskStage, DeskView,
@@ -29,18 +44,29 @@ use crate::state_handler::main_page::content::{
     VETTING_WITHDRAWAL_REASONS, VettingMode, VettingState, VettingTab,
 };
 use crate::state_handler::runtime_actions::ActionCtx;
+use crate::state_handler::state::State;
 
 // ============================================================================
 // Actions
 // ============================================================================
 
-pub(super) fn page<'a>(ctx: &'a mut ActionCtx<'_>) -> &'a mut VettingState {
-    &mut ctx.state.main_page.content_panel.vetting
+/// The vetting page's state.
+pub(super) fn panel(state: &mut State) -> &mut VettingState {
+    &mut state.main_page.content_panel.vetting
 }
 
 /// Set the vetting page's status line, with the severity the caller knows.
+pub(super) fn show(state: &mut State, message: Status) {
+    panel(state).status_message = Some(message);
+}
+
+pub(super) fn page<'a>(ctx: &'a mut ActionCtx<'_>) -> &'a mut VettingState {
+    panel(ctx.state)
+}
+
+/// [`show`], from a loop-side handler.
 pub(super) fn status(ctx: &mut ActionCtx<'_>, message: Status) {
-    page(ctx).status_message = Some(message);
+    show(ctx.state, message);
 }
 
 /// Persist the book and show `message`.
@@ -57,11 +83,23 @@ pub(super) fn persist(ctx: &mut ActionCtx<'_>, message: impl Into<String>) {
     );
 }
 
-/// Handle one Vetting-page action.
+/// Handle one Vetting-page action: [`plan`] it and [`run`] the effect, or
+/// handle it on the loop when the plan hands it back.
 pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
+    let busy = ctx.in_flight.is_busy(DispatchDomain::Vetting);
+    match plan(ctx.state, ctx.config, busy, action) {
+        Planned::Effect(effect) => run(ctx, effect).await,
+        Planned::Loop(action) => on_loop(ctx, action).await,
+    }
+}
+
+/// Apply a view-only action: one that changes the page and at most reads the
+/// book. Returns `false` for the actions that change the book, send, or are
+/// handled on the loop.
+pub(super) fn reduce(state: &mut State, config: &Config, action: &VettingAction) -> bool {
     match action {
         VettingAction::OpenJourney => {
-            let v = page(ctx);
+            let v = panel(state);
             let target = match (v.tab, v.desk_view) {
                 (VettingTab::Applications, _) => v
                     .applications
@@ -77,56 +115,39 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 v.journey_target = Some(target);
                 v.mode = VettingMode::List;
                 v.status_message = None;
-                sync_journey(
-                    &mut ctx.state.main_page.content_panel.vetting,
-                    ctx.config,
-                    Utc::now(),
-                );
+                sync_journey(panel(state), config, Utc::now());
             }
         }
         VettingAction::OpenApplication(application_id) => {
-            if ctx
-                .config
+            if config
                 .private
                 .vetting
                 .applications
                 .iter()
-                .any(|a| a.id == application_id)
+                .any(|a| a.id == *application_id)
             {
                 focus_application(
-                    ctx.state,
-                    ctx.config,
-                    &application_id,
+                    state,
+                    config,
+                    application_id,
                     "Where your application stands, and what happens next.".to_string(),
                 );
             } else {
                 // Finished or abandoned between the panel drawing it and the
                 // key arriving: say so where the holder is looking.
-                ctx.state.main_page.content_panel.communities.status_message = Some(
-                    Status::warning("That application is no longer in progress.".to_string()),
-                );
+                state.main_page.content_panel.communities.status_message = Some(Status::warning(
+                    "That application is no longer in progress.".to_string(),
+                ));
             }
         }
         VettingAction::CloseJourney => {
-            let v = page(ctx);
+            let v = panel(state);
             v.journey_target = None;
             v.journey = None;
             v.mode = VettingMode::List;
         }
-        VettingAction::SwitchTab => {
-            let v = page(ctx);
-            v.tab = v.tab.next();
-            v.selected = 0;
-            v.mode = VettingMode::List;
-            v.status_message = None;
-            // Opening the desk: how each community vets is read again where the last reading
-            // is stale, so the badges and the ticket gate are not shown from an old answer.
-            if v.tab == VettingTab::Desk {
-                refresh_stale_modes(ctx).await;
-            }
-        }
         VettingAction::ShowTicket => {
-            let v = page(ctx);
+            let v = panel(state);
             // Only a ticket that can still be redeemed is worth holding up to a
             // camera; a spent one would scan and then be refused.
             if v.tickets.get(v.selected).is_some_and(|t| t.live) {
@@ -135,26 +156,25 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             }
         }
         VettingAction::SwitchDeskView(forward) => {
-            let v = page(ctx);
+            let v = panel(state);
             // The desk view is remembered across a tab switch, so this only
             // has to reset the cursor — the lists are different lengths and a
             // carried index would point at a different row, or at none.
-            v.desk_view = v.desk_view.shifted(forward);
+            v.desk_view = v.desk_view.shifted(*forward);
             v.selected = 0;
             v.status_message = None;
         }
         VettingAction::Select(i) => {
-            let v = page(ctx);
-            v.selected = i.min(v.tab_len().saturating_sub(1));
+            let v = panel(state);
+            v.selected = (*i).min(v.tab_len().saturating_sub(1));
         }
-        VettingAction::Back => back(page(ctx)),
-        VettingAction::PasteTicket(text) => paste_ticket(ctx, &text),
-        VettingAction::FindVetters => open_directory(ctx),
-        VettingAction::DirectoryPage(forward) => directory_page(ctx, forward).await,
-        VettingAction::AskListedVetter => ask_listed_vetter(ctx),
-        VettingAction::EditProfile => open_profile(ctx),
+        VettingAction::Back => back(panel(state)),
+        VettingAction::PasteTicket(text) => paste_ticket(state, config, text),
+        VettingAction::FindVetters => open_directory(state),
+        VettingAction::AskListedVetter => ask_listed_vetter(state),
+        VettingAction::EditProfile => open_profile(state, config),
         VettingAction::RemoveEvent => {
-            if let VettingMode::Profile(form) = &mut page(ctx).mode
+            if let VettingMode::Profile(form) = &mut panel(state).mode
                 && form.event.is_none()
                 && let Some(i) = form.event_index()
             {
@@ -164,57 +184,52 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             }
         }
         VettingAction::AskResend => {
-            if page(ctx).resend_candidates.is_empty() {
-                status(
-                    ctx,
+            if panel(state).resend_candidates.is_empty() {
+                show(
+                    state,
                     Status::warning(
                         "Every community you are an active member of has already sent you a live \
                      vetter credential — or you are not an active member of any.",
                     ),
                 );
             } else {
-                page(ctx).mode = VettingMode::Resend { index: 0 };
+                panel(state).mode = VettingMode::Resend { index: 0 };
             }
         }
         VettingAction::AskEventMode => {
-            if page(ctx).event_offers.is_empty() {
-                status(
-                    ctx,
+            if panel(state).event_offers.is_empty() {
+                show(
+                    state,
                     Status::warning(
                         "No community you vet for is running an event. Event mode is the exception, \
                      not the setting — an ordinary week is the slow drip.",
                     ),
                 );
             } else {
-                page(ctx).mode = VettingMode::EventMode { index: 0 };
+                panel(state).mode = VettingMode::EventMode { index: 0 };
             }
         }
-        VettingAction::Status(message) => status(ctx, message),
+        VettingAction::Status(message) => show(state, message.clone()),
         VettingAction::Input(text) => {
-            input(&mut page(ctx).mode, text);
-            refresh_application_contexts(ctx);
+            input(&mut panel(state).mode, text.clone());
+            refresh_application_contexts(state, config);
         }
-        VettingAction::NextField => move_field(page(ctx), true),
-        VettingAction::PrevField => move_field(page(ctx), false),
+        VettingAction::NextField => move_field(panel(state), true),
+        VettingAction::PrevField => move_field(panel(state), false),
         VettingAction::Cycle(forward) => {
-            let before = profile_membership(page(ctx));
-            cycle(page(ctx), forward);
-            let after = profile_membership(page(ctx));
+            let before = profile_membership(panel(state));
+            cycle(panel(state), *forward);
+            let after = profile_membership(panel(state));
             if let Some(index) = after
                 && before != after
             {
                 // Each community has its own profile: show the one for this one.
-                let form = profile_form(
-                    &ctx.state.main_page.content_panel.vetting,
-                    &ctx.config.private.vetting,
-                    index,
-                    0,
-                );
-                page(ctx).mode = VettingMode::Profile(Box::new(form));
+                let form = profile_form(panel(state), &config.private.vetting, index, 0);
+                panel(state).mode = VettingMode::Profile(Box::new(form));
             }
-            refresh_application_contexts(ctx);
+            refresh_application_contexts(state, config);
         }
-        VettingAction::Toggle => match &mut page(ctx).mode {
+        VettingAction::Toggle => match &mut panel(state).mode {
             VettingMode::NewFace(form) => form.toggle(),
             VettingMode::Attest { form, .. } => match form.field {
                 3 => form.liveness_confirmed = !form.liveness_confirmed,
@@ -234,22 +249,375 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             _ => {}
         },
         VettingAction::StartApplication => {
-            if page(ctx).personas.is_empty() {
-                status(
-                    ctx,
+            if panel(state).personas.is_empty() {
+                show(
+                    state,
                     Status::warning(
                         "Create a persona under My Identity first — it is the DID you join with.",
                     ),
                 );
             } else {
-                page(ctx).mode = VettingMode::NewApplication {
+                panel(state).mode = VettingMode::NewApplication {
                     community: String::new(),
                     persona_index: 0,
                     context_options: Vec::new(),
                     context_index: 0,
                     field: 0,
                 };
-                refresh_application_contexts(ctx);
+                refresh_application_contexts(state, config);
+            }
+        }
+        VettingAction::RequestVetter => {
+            let v = panel(state);
+            if let Some(row) = v.applications.get(v.selected).cloned() {
+                v.mode = VettingMode::RequestVetter {
+                    application_id: row.id,
+                    entry: String::new(),
+                    vetter: String::new(),
+                    ticket: None,
+                    note: None,
+                };
+            }
+        }
+        VettingAction::OpenHiddenVetting => {
+            if panel(state).hidden.is_empty() {
+                show(
+                    state,
+                    Status::warning(
+                        "None of the communities you vet for hides its vetters, so there is no \
+                     hidden vetting to show.",
+                    ),
+                );
+            } else {
+                panel(state).mode = VettingMode::HiddenVetting { index: 0 };
+            }
+        }
+        VettingAction::ReviewCard => {
+            let v = panel(state);
+            let Some(row) = v.applications.get(v.selected).cloned() else {
+                return true;
+            };
+            match row.requests.iter().find_map(|r| r.card_session.clone()) {
+                Some(session_id) => {
+                    v.mode = VettingMode::SendCard {
+                        application_id: row.id,
+                        session_id,
+                        preview: None,
+                    };
+                }
+                None => show(
+                    state,
+                    Status::warning("No vetter is waiting for your card."),
+                ),
+            }
+        }
+        VettingAction::NewTicket => {
+            if panel(state).memberships.is_empty() {
+                show(
+                    state,
+                    Status::warning(
+                        "You can hand out tickets once a community you belong to has named you a \
+                     vetter — ask its admins for the vetter role.",
+                    ),
+                );
+            } else {
+                panel(state).mode = VettingMode::NewTicket {
+                    membership_index: 0,
+                    uses_index: 0,
+                    field: 0,
+                };
+            }
+        }
+        VettingAction::DeleteTicket => {
+            let v = panel(state);
+            match v.tickets.get(v.selected).cloned() {
+                Some(row) => v.mode = VettingMode::ConfirmDeleteTicket { ticket_id: row.id },
+                None => show(state, Status::warning("Highlight a ticket to delete.")),
+            }
+        }
+        VettingAction::OpenSession => {
+            let v = panel(state);
+            match v.desk.get(v.selected).cloned() {
+                Some(row) if matches!(row.stage, DeskStage::Accepted | DeskStage::Session) => {
+                    v.mode = VettingMode::OpenSession {
+                        request_id: row.request_id,
+                        method_index: 0,
+                    };
+                }
+                Some(_) => show(
+                    state,
+                    Status::warning("That request has moved past opening a session."),
+                ),
+                None => {}
+            }
+        }
+        VettingAction::StartAttest => {
+            // The form opens on the method the session was opened with: the
+            // statement says how the person was checked, and a default of "in
+            // person" after a video call is a false statement one Enter away.
+            let selected = {
+                let v = panel(state);
+                v.desk.get(v.selected).cloned()
+            };
+            match selected {
+                Some(row) if row.stage == DeskStage::Card => {
+                    let method_index = match config
+                        .private
+                        .vetting
+                        .desk_entry(&row.request_id)
+                        .map(|e| &e.state)
+                    {
+                        Some(DeskState::CardReceived { session, .. }) => VETTING_METHODS
+                            .iter()
+                            .position(|m| *m == session.method)
+                            .unwrap_or(0),
+                        _ => 0,
+                    };
+                    panel(state).mode = VettingMode::Attest {
+                        request_id: row.request_id,
+                        form: AttestForm {
+                            method_index,
+                            ..AttestForm::default()
+                        },
+                    };
+                }
+                Some(_) => show(
+                    state,
+                    Status::warning("You can attest once their card has arrived."),
+                ),
+                None => {}
+            }
+        }
+        VettingAction::ArmDecline => {
+            let v = panel(state);
+            match v.desk.get(v.selected).cloned() {
+                Some(row) if row.stage != DeskStage::Closed => {
+                    v.mode = VettingMode::ConfirmDecline {
+                        request_id: row.request_id,
+                        reason_index: 0,
+                        message: String::new(),
+                        field: 0,
+                    };
+                }
+                Some(_) => show(state, Status::warning("That request is already closed.")),
+                None => {}
+            }
+        }
+        VettingAction::ArmAbandon => {
+            let v = panel(state);
+            match v.applications.get(v.selected).cloned() {
+                Some(row) => {
+                    v.mode = VettingMode::ConfirmAbandon {
+                        application_id: row.id,
+                    };
+                }
+                None => show(
+                    state,
+                    Status::warning("Highlight an application to abandon."),
+                ),
+            }
+        }
+        VettingAction::ArmWithdraw => {
+            let v = panel(state);
+            match v.issued.get(v.selected).cloned() {
+                // Sent but not recorded is not withdrawn: the community may
+                // have refused it, or never heard it, and the core allows the
+                // notice again until it is recorded. Refusing here left a
+                // refused withdrawal with no way forward.
+                Some(row) if !row.withdrawal_recorded => {
+                    v.mode = VettingMode::Withdraw {
+                        statement_id: row.id,
+                        reason_index: 0,
+                    };
+                }
+                Some(_) => show(
+                    state,
+                    Status::warning(
+                        "That statement is already withdrawn — the community recorded it.",
+                    ),
+                ),
+                None => {}
+            }
+        }
+        VettingAction::SwitchTab
+        | VettingAction::DirectoryPage(_)
+        | VettingAction::ChooseFace
+        | VettingAction::RefreshRequirements
+        | VettingAction::SwitchVettingPath
+        | VettingAction::RefreshVetterSide
+        | VettingAction::CheckHiddenKey
+        | VettingAction::DrawNow
+        | VettingAction::Submit => return false,
+    }
+    true
+}
+
+/// What [`plan`] made of an action.
+pub(super) enum Planned {
+    /// The steps the action still owes, for [`run`].
+    Effect(VettingEffect),
+    /// An action [`plan`] does not take: [`on_loop`] handles it.
+    Loop(VettingAction),
+}
+
+/// Plan an action. Pure: no awaits, no spawning, no saving. It makes the
+/// state and book changes the action makes before anything is saved or
+/// signed, and returns what is left. `busy` is whether a vetting job holds
+/// the domain, decided before any preparation, as the job that would claim it
+/// finds it.
+pub(super) fn plan(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
+    action: VettingAction,
+) -> Planned {
+    if reduce(state, config, &action) {
+        return Planned::Effect(VettingEffect::none());
+    }
+    Planned::Effect(match action {
+        VettingAction::DirectoryPage(forward) => plan_directory_page(state, config, busy, forward),
+        VettingAction::SwitchVettingPath => plan_switch_vetting_path(state, config),
+        VettingAction::Submit => match plan_submit(state, config, busy) {
+            Some(effect) => effect,
+            None => return Planned::Loop(VettingAction::Submit),
+        },
+        VettingAction::SwitchTab
+        | VettingAction::ChooseFace
+        | VettingAction::RefreshRequirements
+        | VettingAction::RefreshVetterSide
+        | VettingAction::CheckHiddenKey
+        | VettingAction::DrawNow => return Planned::Loop(action),
+        // View-only: `reduce` handled these.
+        VettingAction::OpenJourney
+        | VettingAction::OpenApplication(_)
+        | VettingAction::CloseJourney
+        | VettingAction::ShowTicket
+        | VettingAction::SwitchDeskView(_)
+        | VettingAction::Select(_)
+        | VettingAction::Back
+        | VettingAction::PasteTicket(_)
+        | VettingAction::FindVetters
+        | VettingAction::AskListedVetter
+        | VettingAction::EditProfile
+        | VettingAction::RemoveEvent
+        | VettingAction::AskResend
+        | VettingAction::AskEventMode
+        | VettingAction::Status(_)
+        | VettingAction::Input(_)
+        | VettingAction::NextField
+        | VettingAction::PrevField
+        | VettingAction::Cycle(_)
+        | VettingAction::Toggle
+        | VettingAction::StartApplication
+        | VettingAction::RequestVetter
+        | VettingAction::OpenHiddenVetting
+        | VettingAction::ReviewCard
+        | VettingAction::NewTicket
+        | VettingAction::DeleteTicket
+        | VettingAction::OpenSession
+        | VettingAction::StartAttest
+        | VettingAction::ArmDecline
+        | VettingAction::ArmAbandon
+        | VettingAction::ArmWithdraw => VettingEffect::none(),
+    })
+}
+
+/// Plan Enter on the open view, or `None` for a view whose submission is
+/// still handled on the loop ([`on_loop`]).
+fn plan_submit(state: &mut State, config: &mut Config, busy: bool) -> Option<VettingEffect> {
+    Some(match panel(state).mode.clone() {
+        VettingMode::List => VettingEffect::none(),
+        // Nothing to submit — it is a code being held up to a phone. Enter
+        // closes it, the same as Esc, because both are what a hand reaches for
+        // when the scan is done.
+        VettingMode::ShowTicket { .. } => {
+            back(panel(state));
+            VettingEffect::none()
+        }
+        // Nor here: it says what to run somewhere else. Enter closes it like
+        // Esc, rather than being the one view where Enter does nothing.
+        VettingMode::HolderGrant { .. } => {
+            back(panel(state));
+            VettingEffect::none()
+        }
+        VettingMode::NewApplication {
+            community,
+            persona_index,
+            context_options,
+            context_index,
+            ..
+        } => {
+            let context = context_options
+                .get(context_index)
+                .map(|o| o.context_id.clone());
+            plan_start_application(state, config, community.trim(), persona_index, context)
+        }
+        VettingMode::ConfirmAbandon { .. } => plan_abandon_application(state, config),
+        VettingMode::RequestVetter {
+            application_id,
+            entry,
+            vetter,
+            ticket,
+            ..
+        } => plan_request_vetter(
+            state,
+            config,
+            busy,
+            &application_id,
+            entry.trim(),
+            vetter.trim(),
+            ticket,
+        ),
+        VettingMode::Directory(view) => match view.result_index() {
+            Some(_) => {
+                ask_listed_vetter(state);
+                VettingEffect::none()
+            }
+            None => plan_search_directory(state, config, busy, vec![None]),
+        },
+        VettingMode::Profile(form) => plan_profile_submit(state, config, busy, *form),
+        VettingMode::Resend { index } => plan_ask_resend(state, config, busy, index),
+        VettingMode::EventMode { index } => plan_ask_event_mode(state, config, busy, index),
+        VettingMode::ConfirmDeleteTicket { .. }
+        | VettingMode::ChooseFace { .. }
+        | VettingMode::NewFace(_)
+        | VettingMode::HiddenVetting { .. }
+        | VettingMode::SendCard { .. }
+        | VettingMode::NewTicket { .. }
+        | VettingMode::OpenSession { .. }
+        | VettingMode::Attest { .. }
+        | VettingMode::ConfirmDecline { .. }
+        | VettingMode::Withdraw { .. } => return None,
+    })
+}
+
+/// Plan a [`Followup`], on the state and book the steps before it left.
+pub(super) fn plan_followup(
+    state: &mut State,
+    config: &Config,
+    busy: bool,
+    followup: Followup,
+) -> VettingEffect {
+    match followup {
+        Followup::Started { application_id } => plan_started(state, config, busy, &application_id),
+    }
+}
+
+/// The actions [`plan`] hands back, handled on the loop: they await
+/// helpers — the desk's refreshes, the face jobs, hidden vetting — that are
+/// not planned yet.
+async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
+    match action {
+        VettingAction::SwitchTab => {
+            let v = page(ctx);
+            v.tab = v.tab.next();
+            v.selected = 0;
+            v.mode = VettingMode::List;
+            v.status_message = None;
+            // Opening the desk: how each community vets is read again where the last reading
+            // is stale, so the badges and the ticket gate are not shown from an old answer.
+            if v.tab == VettingTab::Desk {
+                refresh_stale_modes(ctx).await;
             }
         }
         VettingAction::ChooseFace => {
@@ -280,22 +648,12 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 list_faces(ctx, &id);
             }
         }
-        VettingAction::RequestVetter => {
-            let v = page(ctx);
-            if let Some(row) = v.applications.get(v.selected).cloned() {
-                v.mode = VettingMode::RequestVetter {
-                    application_id: row.id,
-                    entry: String::new(),
-                    vetter: String::new(),
-                    ticket: None,
-                    note: None,
-                };
-            }
-        }
         VettingAction::RefreshRequirements => {
             let v = page(ctx);
             if let Some(row) = v.applications.get(v.selected).cloned() {
-                refresh_requirements(ctx, &row.id).await;
+                let busy = ctx.in_flight.is_busy(DispatchDomain::Vetting);
+                let effect = plan_refresh_requirements(ctx.state, ctx.config, busy, &row.id);
+                run(ctx, effect).await;
                 // A hidden application also needs the community's challenge, and asking early
                 // is free: the community keeps one per applicant, and asking again replaces it.
                 ask_for_challenge(ctx, &row.id).await;
@@ -305,21 +663,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             // vetters. Asking here is what lets a vetter-only member reach the mode at all.
             refresh_vetter_side(ctx).await;
         }
-        VettingAction::SwitchVettingPath => switch_vetting_path(ctx),
         VettingAction::RefreshVetterSide => refresh_vetter_side(ctx).await,
-        VettingAction::OpenHiddenVetting => {
-            if page(ctx).hidden.is_empty() {
-                status(
-                    ctx,
-                    Status::warning(
-                        "None of the communities you vet for hides its vetters, so there is no \
-                     hidden vetting to show.",
-                    ),
-                );
-            } else {
-                page(ctx).mode = VettingMode::HiddenVetting { index: 0 };
-            }
-        }
         VettingAction::CheckHiddenKey => {
             let now = Utc::now();
             let index = match page(ctx).mode {
@@ -387,149 +731,41 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 }),
             );
         }
-        VettingAction::ReviewCard => {
-            let v = page(ctx);
-            let Some(row) = v.applications.get(v.selected).cloned() else {
-                return;
-            };
-            match row.requests.iter().find_map(|r| r.card_session.clone()) {
-                Some(session_id) => {
-                    v.mode = VettingMode::SendCard {
-                        application_id: row.id,
-                        session_id,
-                        preview: None,
-                    };
-                }
-                None => status(ctx, Status::warning("No vetter is waiting for your card.")),
-            }
-        }
-        VettingAction::NewTicket => {
-            if page(ctx).memberships.is_empty() {
-                status(
-                    ctx,
-                    Status::warning(
-                        "You can hand out tickets once a community you belong to has named you a \
-                     vetter — ask its admins for the vetter role.",
-                    ),
-                );
-            } else {
-                page(ctx).mode = VettingMode::NewTicket {
-                    membership_index: 0,
-                    uses_index: 0,
-                    field: 0,
-                };
-            }
-        }
-        VettingAction::DeleteTicket => {
-            let v = page(ctx);
-            match v.tickets.get(v.selected).cloned() {
-                Some(row) => v.mode = VettingMode::ConfirmDeleteTicket { ticket_id: row.id },
-                None => status(ctx, Status::warning("Highlight a ticket to delete.")),
-            }
-        }
-        VettingAction::OpenSession => {
-            let v = page(ctx);
-            match v.desk.get(v.selected).cloned() {
-                Some(row) if matches!(row.stage, DeskStage::Accepted | DeskStage::Session) => {
-                    v.mode = VettingMode::OpenSession {
-                        request_id: row.request_id,
-                        method_index: 0,
-                    };
-                }
-                Some(_) => status(
-                    ctx,
-                    Status::warning("That request has moved past opening a session."),
-                ),
-                None => {}
-            }
-        }
-        VettingAction::StartAttest => {
-            // The form opens on the method the session was opened with: the
-            // statement says how the person was checked, and a default of "in
-            // person" after a video call is a false statement one Enter away.
-            let selected = {
-                let v = page(ctx);
-                v.desk.get(v.selected).cloned()
-            };
-            match selected {
-                Some(row) if row.stage == DeskStage::Card => {
-                    let method_index = match ctx
-                        .config
-                        .private
-                        .vetting
-                        .desk_entry(&row.request_id)
-                        .map(|e| &e.state)
-                    {
-                        Some(DeskState::CardReceived { session, .. }) => VETTING_METHODS
-                            .iter()
-                            .position(|m| *m == session.method)
-                            .unwrap_or(0),
-                        _ => 0,
-                    };
-                    page(ctx).mode = VettingMode::Attest {
-                        request_id: row.request_id,
-                        form: AttestForm {
-                            method_index,
-                            ..AttestForm::default()
-                        },
-                    };
-                }
-                Some(_) => status(
-                    ctx,
-                    Status::warning("You can attest once their card has arrived."),
-                ),
-                None => {}
-            }
-        }
-        VettingAction::ArmDecline => {
-            let v = page(ctx);
-            match v.desk.get(v.selected).cloned() {
-                Some(row) if row.stage != DeskStage::Closed => {
-                    v.mode = VettingMode::ConfirmDecline {
-                        request_id: row.request_id,
-                        reason_index: 0,
-                        message: String::new(),
-                        field: 0,
-                    };
-                }
-                Some(_) => status(ctx, Status::warning("That request is already closed.")),
-                None => {}
-            }
-        }
-        VettingAction::ArmAbandon => {
-            let v = page(ctx);
-            match v.applications.get(v.selected).cloned() {
-                Some(row) => {
-                    v.mode = VettingMode::ConfirmAbandon {
-                        application_id: row.id,
-                    };
-                }
-                None => status(ctx, Status::warning("Highlight an application to abandon.")),
-            }
-        }
-        VettingAction::ArmWithdraw => {
-            let v = page(ctx);
-            match v.issued.get(v.selected).cloned() {
-                // Sent but not recorded is not withdrawn: the community may
-                // have refused it, or never heard it, and the core allows the
-                // notice again until it is recorded. Refusing here left a
-                // refused withdrawal with no way forward.
-                Some(row) if !row.withdrawal_recorded => {
-                    v.mode = VettingMode::Withdraw {
-                        statement_id: row.id,
-                        reason_index: 0,
-                    };
-                }
-                Some(_) => status(
-                    ctx,
-                    Status::warning(
-                        "That statement is already withdrawn — the community recorded it.",
-                    ),
-                ),
-                None => {}
-            }
-        }
         VettingAction::Submit => submit(ctx).await,
+        // Planned by `plan`, which never hands these back.
+        VettingAction::OpenJourney
+        | VettingAction::OpenApplication(_)
+        | VettingAction::CloseJourney
+        | VettingAction::ShowTicket
+        | VettingAction::SwitchDeskView(_)
+        | VettingAction::Select(_)
+        | VettingAction::Back
+        | VettingAction::PasteTicket(_)
+        | VettingAction::FindVetters
+        | VettingAction::DirectoryPage(_)
+        | VettingAction::AskListedVetter
+        | VettingAction::EditProfile
+        | VettingAction::RemoveEvent
+        | VettingAction::AskResend
+        | VettingAction::AskEventMode
+        | VettingAction::Status(_)
+        | VettingAction::Input(_)
+        | VettingAction::NextField
+        | VettingAction::PrevField
+        | VettingAction::Cycle(_)
+        | VettingAction::Toggle
+        | VettingAction::StartApplication
+        | VettingAction::RequestVetter
+        | VettingAction::SwitchVettingPath
+        | VettingAction::OpenHiddenVetting
+        | VettingAction::ReviewCard
+        | VettingAction::NewTicket
+        | VettingAction::DeleteTicket
+        | VettingAction::OpenSession
+        | VettingAction::StartAttest
+        | VettingAction::ArmDecline
+        | VettingAction::ArmAbandon
+        | VettingAction::ArmWithdraw => {}
     }
 }
 
@@ -698,29 +934,9 @@ pub(super) fn cycle(v: &mut VettingState, forward: bool) {
     }
 }
 
+/// Enter on a view whose submission [`plan_submit`] hands back.
 async fn submit(ctx: &mut ActionCtx<'_>) {
     match page(ctx).mode.clone() {
-        VettingMode::List => {}
-        // Nothing to submit — it is a code being held up to a phone. Enter
-        // closes it, the same as Esc, because both are what a hand reaches for
-        // when the scan is done.
-        VettingMode::ShowTicket { .. } => back(page(ctx)),
-        // Nor here: it says what to run somewhere else. Enter closes it like
-        // Esc, rather than being the one view where Enter does nothing.
-        VettingMode::HolderGrant { .. } => back(page(ctx)),
-        VettingMode::NewApplication {
-            community,
-            persona_index,
-            context_options,
-            context_index,
-            ..
-        } => {
-            let context = context_options
-                .get(context_index)
-                .map(|o| o.context_id.clone());
-            start_application(ctx, community.trim(), persona_index, context).await;
-        }
-        VettingMode::ConfirmAbandon { .. } => abandon_application(ctx),
         VettingMode::ConfirmDeleteTicket { ticket_id } => delete_ticket(ctx, &ticket_id),
         VettingMode::ChooseFace {
             application_id,
@@ -735,20 +951,6 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             }
         }
         VettingMode::NewFace(form) => create_face(ctx, *form),
-        VettingMode::RequestVetter {
-            application_id,
-            entry,
-            vetter,
-            ticket,
-            ..
-        } => request_vetter(ctx, &application_id, entry.trim(), vetter.trim(), ticket).await,
-        VettingMode::Directory(view) => match view.result_index() {
-            Some(_) => ask_listed_vetter(ctx),
-            None => search_directory(ctx, vec![None]).await,
-        },
-        VettingMode::Profile(form) => profile_submit(ctx, *form).await,
-        VettingMode::Resend { index } => ask_resend(ctx, index).await,
-        VettingMode::EventMode { index } => ask_event_mode(ctx, index).await,
         // Enter is "draw now", as `d` is: the view's one verb.
         VettingMode::HiddenVetting { .. } => {
             status(
@@ -799,6 +1001,17 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             statement_id,
             reason_index,
         } => withdraw(ctx, &statement_id, reason_index).await,
+        // Planned by `plan_submit`, which never hands these back.
+        VettingMode::List
+        | VettingMode::ShowTicket { .. }
+        | VettingMode::HolderGrant { .. }
+        | VettingMode::NewApplication { .. }
+        | VettingMode::ConfirmAbandon { .. }
+        | VettingMode::RequestVetter { .. }
+        | VettingMode::Directory(_)
+        | VettingMode::Profile(_)
+        | VettingMode::Resend { .. }
+        | VettingMode::EventMode { .. } => {}
     }
 }
 
@@ -806,6 +1019,7 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
 mod tests {
     use super::*;
     use crate::state_handler::main_page::content::{VettingMode, VettingState};
+    use crate::state_handler::state::State;
 
     /// Backing out of the picker a card opened returns to that card; from the
     /// list it returns to the list.
@@ -831,5 +1045,47 @@ mod tests {
         };
         back(&mut v);
         assert!(matches!(v.mode, VettingMode::List));
+    }
+
+    /// View-only actions are reduced; a send is planned; what the loop still
+    /// handles comes back as it was.
+    #[test]
+    fn plan_reduces_plans_or_hands_back() {
+        use crate::state_handler::dispatch_util::test_config;
+        let mut config = test_config();
+        let mut state = State::default();
+
+        let planned = plan(&mut state, &mut config, false, VettingAction::FindVetters);
+        assert!(matches!(planned, Planned::Effect(VettingEffect(steps)) if steps.is_empty()));
+        assert!(
+            panel(&mut state).status_message.is_some(),
+            "reduced: the empty directory is explained"
+        );
+
+        for action in [
+            VettingAction::RefreshRequirements,
+            VettingAction::SwitchTab,
+            VettingAction::DrawNow,
+        ] {
+            let planned = plan(&mut state, &mut config, false, action);
+            assert!(matches!(planned, Planned::Loop(_)));
+        }
+
+        // Enter on a view this module plans is planned; on one it does not
+        // yet, handed back untouched.
+        panel(&mut state).mode = VettingMode::ShowTicket { index: 0 };
+        let planned = plan(&mut state, &mut config, false, VettingAction::Submit);
+        assert!(matches!(planned, Planned::Effect(_)));
+        assert!(matches!(panel(&mut state).mode, VettingMode::List));
+        panel(&mut state).mode = VettingMode::OpenSession {
+            request_id: "r".into(),
+            method_index: 0,
+        };
+        let planned = plan(&mut state, &mut config, true, VettingAction::Submit);
+        assert!(matches!(planned, Planned::Loop(VettingAction::Submit)));
+        assert!(matches!(
+            panel(&mut state).mode,
+            VettingMode::OpenSession { .. }
+        ));
     }
 }
