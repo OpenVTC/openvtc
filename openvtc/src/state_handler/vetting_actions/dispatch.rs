@@ -7,11 +7,9 @@
 //! the book or sends is planned by [`plan`], which is pure: it decides, makes
 //! the state and book changes the action makes before anything is saved or
 //! signed, and returns a [`VettingEffect`] that [`run`] carries out. The
-//! actions [`plan`] does not take come back as [`Planned::Loop`] and are
-//! handled on the loop by [`on_loop`]: the faces and the card, whose plans
-//! also read whether a VTA session is connected, which [`plan`] is not given;
-//! and the actions a loop-side helper follows (the attestation, the vetter
-//! pass, reading requirements again).
+//! actions a loop-side helper follows whatever the plan's run did (reading
+//! requirements again, the attestation) come back as [`Planned::Loop`] and
+//! are handled on the loop by [`on_loop`].
 
 use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
@@ -29,10 +27,9 @@ use super::desk::{
     attest, plan_ask_binding, plan_ask_manifest, plan_decline_submit, plan_open_session,
     plan_session_kept, plan_switch_tab, plan_withdraw, refresh_vetter_side,
 };
-use super::effect::{Followup, VettingEffect, run};
+use super::effect::{Followup, Step, VettingEffect, run};
 use super::faces::{
-    on_loop_inputs, plan_choose_face, plan_create_face, plan_open_new_face, plan_send_card,
-    plan_wear_face,
+    plan_choose_face, plan_create_face, plan_open_new_face, plan_send_card, plan_wear_face,
 };
 use super::hidden::{
     ask_for_challenge, plan_check_hidden_key, plan_draw_now, plan_hidden_view_submit,
@@ -89,7 +86,8 @@ pub(super) fn persist(ctx: &mut ActionCtx<'_>, message: impl Into<String>) {
 /// handle it on the loop when the plan hands it back.
 pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
     let busy = ctx.in_flight.is_busy(DispatchDomain::Vetting);
-    match plan(ctx.state, ctx.config, busy, action) {
+    let has_vta = ctx.admin_vta.is_some();
+    match plan(ctx.state, ctx.config, busy, has_vta, action) {
         Planned::Effect(effect) => run(ctx, effect).await,
         Planned::Loop(action) => on_loop(ctx, action).await,
     }
@@ -466,11 +464,13 @@ pub(super) enum Planned {
 /// state and book changes the action makes before anything is saved or
 /// signed, and returns what is left. `busy` is whether a vetting job holds
 /// the domain, decided before any preparation, as the job that would claim it
-/// finds it.
+/// finds it. `has_vta` is whether the loop holds a VTA session, which a face
+/// or card job runs against.
 pub(super) fn plan(
     state: &mut State,
     config: &mut Config,
     busy: bool,
+    has_vta: bool,
     action: VettingAction,
 ) -> Planned {
     if reduce(state, config, &action) {
@@ -480,15 +480,15 @@ pub(super) fn plan(
         VettingAction::DirectoryPage(forward) => plan_directory_page(state, config, busy, forward),
         VettingAction::SwitchVettingPath => plan_switch_vetting_path(state, config),
         VettingAction::SwitchTab => plan_switch_tab(state, config),
-        VettingAction::Submit => match plan_submit(state, config, busy) {
+        VettingAction::Submit => match plan_submit(state, config, busy, has_vta) {
             Some(effect) => effect,
             None => return Planned::Loop(VettingAction::Submit),
         },
         VettingAction::CheckHiddenKey => plan_check_hidden_key(state, config, Utc::now()),
         VettingAction::DrawNow => plan_draw_now(config, Utc::now()),
-        VettingAction::ChooseFace
-        | VettingAction::RefreshRequirements
-        | VettingAction::RefreshVetterSide => return Planned::Loop(action),
+        VettingAction::ChooseFace => plan_choose_face(state, config, busy, has_vta),
+        VettingAction::RefreshVetterSide => VettingEffect(vec![Step::RefreshVetterSide]),
+        VettingAction::RefreshRequirements => return Planned::Loop(action),
         // View-only: `reduce` handled these.
         VettingAction::OpenJourney
         | VettingAction::OpenApplication(_)
@@ -526,7 +526,12 @@ pub(super) fn plan(
 
 /// Plan Enter on the open view, or `None` for a view whose submission is
 /// still handled on the loop ([`on_loop`]).
-fn plan_submit(state: &mut State, config: &mut Config, busy: bool) -> Option<VettingEffect> {
+fn plan_submit(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
+    has_vta: bool,
+) -> Option<VettingEffect> {
     Some(match panel(state).mode.clone() {
         VettingMode::List => VettingEffect::none(),
         // Nothing to submit — it is a code being held up to a phone. Enter
@@ -606,10 +611,40 @@ fn plan_submit(state: &mut State, config: &mut Config, busy: bool) -> Option<Vet
             reason_index,
         } => plan_withdraw(state, config, busy, &statement_id, reason_index),
         VettingMode::HiddenVetting { .. } => plan_hidden_view_submit(state),
-        VettingMode::ChooseFace { .. }
-        | VettingMode::NewFace(_)
-        | VettingMode::SendCard { .. }
-        | VettingMode::Attest { .. } => return None,
+        VettingMode::ChooseFace {
+            application_id,
+            faces,
+            index,
+            required,
+        } => {
+            if index == faces.len() {
+                plan_open_new_face(state, busy, has_vta, &application_id, required)
+            } else {
+                plan_wear_face(
+                    state,
+                    config,
+                    busy,
+                    has_vta,
+                    &application_id,
+                    faces.get(index).cloned(),
+                )
+            }
+        }
+        VettingMode::NewFace(form) => plan_create_face(state, config, busy, has_vta, *form),
+        VettingMode::SendCard {
+            application_id,
+            session_id,
+            preview,
+        } => plan_send_card(
+            state,
+            config,
+            busy,
+            has_vta,
+            &application_id,
+            &session_id,
+            preview,
+        ),
+        VettingMode::Attest { .. } => return None,
     })
 }
 
@@ -643,13 +678,6 @@ pub(super) fn plan_followup(
 /// session is connected).
 async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
     match action {
-        // Planned, with whether a VTA session is connected — what `plan` is
-        // not given.
-        VettingAction::ChooseFace => {
-            let (busy, has_vta) = on_loop_inputs(ctx);
-            let effect = plan_choose_face(ctx.state, ctx.config, busy, has_vta);
-            run(ctx, effect).await;
-        }
         VettingAction::RefreshRequirements => {
             let v = page(ctx);
             if let Some(row) = v.applications.get(v.selected).cloned() {
@@ -665,10 +693,11 @@ async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             // vetters. Asking here is what lets a vetter-only member reach the mode at all.
             refresh_vetter_side(ctx).await;
         }
-        VettingAction::RefreshVetterSide => refresh_vetter_side(ctx).await,
         VettingAction::Submit => submit(ctx).await,
         // Planned by `plan`, which never hands these back.
         VettingAction::SwitchTab
+        | VettingAction::ChooseFace
+        | VettingAction::RefreshVetterSide
         | VettingAction::OpenJourney
         | VettingAction::OpenApplication(_)
         | VettingAction::CloseJourney
@@ -875,56 +904,14 @@ pub(super) fn cycle(v: &mut VettingState, forward: bool) {
 /// Enter on a view whose submission [`plan_submit`] hands back.
 async fn submit(ctx: &mut ActionCtx<'_>) {
     match page(ctx).mode.clone() {
-        // Planned, with whether a VTA session is connected — what
-        // `plan_submit` is not given.
-        VettingMode::ChooseFace {
-            application_id,
-            faces,
-            index,
-            required,
-        } => {
-            let (busy, has_vta) = on_loop_inputs(ctx);
-            let effect = if index == faces.len() {
-                plan_open_new_face(ctx.state, busy, has_vta, &application_id, required)
-            } else {
-                plan_wear_face(
-                    ctx.state,
-                    ctx.config,
-                    busy,
-                    has_vta,
-                    &application_id,
-                    faces.get(index).cloned(),
-                )
-            };
-            run(ctx, effect).await;
-        }
-        VettingMode::NewFace(form) => {
-            let (busy, has_vta) = on_loop_inputs(ctx);
-            let effect = plan_create_face(ctx.state, ctx.config, busy, has_vta, *form);
-            run(ctx, effect).await;
-        }
-        VettingMode::SendCard {
-            application_id,
-            session_id,
-            preview,
-        } => {
-            let (busy, has_vta) = on_loop_inputs(ctx);
-            let effect = plan_send_card(
-                ctx.state,
-                ctx.config,
-                busy,
-                has_vta,
-                &application_id,
-                &session_id,
-                preview,
-            );
-            run(ctx, effect).await;
-        }
         // Planned, then run here with the hidden attestation and the refresh
         // that enrols, which work on the loop.
         VettingMode::Attest { request_id, form } => attest(ctx, &request_id, &form).await,
         // Planned by `plan_submit`, which never hands these back.
-        VettingMode::ConfirmDeleteTicket { .. }
+        VettingMode::ChooseFace { .. }
+        | VettingMode::NewFace(_)
+        | VettingMode::SendCard { .. }
+        | VettingMode::ConfirmDeleteTicket { .. }
         | VettingMode::NewTicket { .. }
         | VettingMode::OpenSession { .. }
         | VettingMode::ConfirmDecline { .. }
@@ -983,32 +970,39 @@ mod tests {
         let mut config = test_config();
         let mut state = State::default();
 
-        let planned = plan(&mut state, &mut config, false, VettingAction::FindVetters);
+        let planned = plan(
+            &mut state,
+            &mut config,
+            false,
+            false,
+            VettingAction::FindVetters,
+        );
         assert!(matches!(planned, Planned::Effect(VettingEffect(steps)) if steps.is_empty()));
         assert!(
             panel(&mut state).status_message.is_some(),
             "reduced: the empty directory is explained"
         );
 
-        for action in [
+        let planned = plan(
+            &mut state,
+            &mut config,
+            false,
+            false,
             VettingAction::RefreshRequirements,
-            VettingAction::RefreshVetterSide,
-        ] {
-            let planned = plan(&mut state, &mut config, false, action);
-            assert!(matches!(planned, Planned::Loop(_)));
-        }
+        );
+        assert!(matches!(planned, Planned::Loop(_)));
 
         // Enter on a view this module plans is planned; on one it does not
         // yet, handed back untouched.
         panel(&mut state).mode = VettingMode::ShowTicket { index: 0 };
-        let planned = plan(&mut state, &mut config, false, VettingAction::Submit);
+        let planned = plan(&mut state, &mut config, false, false, VettingAction::Submit);
         assert!(matches!(planned, Planned::Effect(_)));
         assert!(matches!(panel(&mut state).mode, VettingMode::List));
         panel(&mut state).mode = VettingMode::Attest {
             request_id: "r".into(),
             form: AttestForm::default(),
         };
-        let planned = plan(&mut state, &mut config, true, VettingAction::Submit);
+        let planned = plan(&mut state, &mut config, true, false, VettingAction::Submit);
         assert!(matches!(planned, Planned::Loop(VettingAction::Submit)));
         assert!(matches!(panel(&mut state).mode, VettingMode::Attest { .. }));
     }

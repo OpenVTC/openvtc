@@ -43,39 +43,48 @@
 //! started), `RefreshVetterSide` (the vetter pass, awaited), and `PcsAnswer`
 //! (one of a PCS job's answers, planned when it is reached, like `Then`).
 //!
-//! # Planning a handler still on the loop
+//! The desk's steps: `KeepSession` (the signed session document recorded in
+//! the book before it is saved and sent), `Statement` (a named Vetting
+//! Statement signed with the assertion key, verified, recorded and
+//! delivered), `Book` (a book change at its place among the sends) and `Ask`
+//! (a question signed and sent, its outcome applied either way, the run going
+//! on). The faces' steps: `CardKeys` (the persona's keys for a card) and
+//! `Face` (a face or card job spawned against the loop's VTA session).
 //!
-//! What stays on the loop is handled by `dispatch::on_loop`
-//! with the `send` helpers (`begin`, `abandon`, `sign_and_send`, `spawn`),
-//! which do the same things the plan and the runner do. To plan one:
+//! # What stays on the loop
+//!
+//! `dispatch::plan` hands back, as `Planned::Loop`, only the actions a
+//! loop-side helper follows whatever the plan's run did:
+//!
+//! - `RefreshRequirements`: its plan is run, then the hidden-vetting
+//!   challenge is asked (`hidden::ask_for_challenge`) and the vetter pass
+//!   runs (`desk::refresh_vetter_side`) — both even after a busy refusal or a
+//!   give-up, which a step after an `Abort` would not be.
+//! - Enter on the attestation form: `desk::plan_attest` decides it; the
+//!   hidden attestation (`hidden::attest_hidden`) and the pass that enrols
+//!   run on the loop after it.
+//!
+//! The loop's own passes — `desk::refresh_vetter_side` and
+//! `refresh_stale_modes` (timers), `pcs::apply_pcs_outcome` (the outcome
+//! arm), `hidden::hidden_vetting_tick` and `pcs::start_pcs_work` (the pass) —
+//! are thin wrappers that plan and run. `tickets::settle_pending_tickets`
+//! sends nothing and saves once; it keeps its `(state, config, save)` shape
+//! for the timer and inbound arms, which hold no `ActionCtx`.
+//!
+//! # Converting a handler
 //!
 //! - Pin it first, in `runtime/tests/vetting.rs` under its own heading: the
 //!   busy refusal, the key-lookup failure (a persona whose `key_info` is
 //!   cleared), and the claimed send, settled through `dispatch_rx`.
 //! - Write `plan_<handler>(state, config, busy, ..) -> VettingEffect`:
-//!   `ctx.config` becomes `config`, `page(ctx)` / `status(ctx, ..)` become
-//!   `panel(state)` / `show(state, ..)`, `begin(ctx)` becomes
-//!   `claimable(state, busy)`, `abandon(ctx, ..)` becomes `give_up(state,
-//!   config, ..)` followed by `return VettingEffect::none()`.
-//! - `persist(ctx, m)` becomes `Step::Persist(m)`, `ctx.save.mark_dirty()`
-//!   `Step::MarkDirty`, a status set after either `Step::Status`, and a
-//!   `sign_and_send` with its error branch
+//!   `panel(state)` / `show(state, ..)` for the page, `claimable(state, busy)`
+//!   for the busy check, `give_up(state, config, ..)` then
+//!   `return VettingEffect::none()` to give up before anything is sent.
+//! - A save is `Step::Persist(m)` or `Step::MarkDirty`, a status set after
+//!   either `Step::Status`, and a signed send with its error branch
 //!   `VettingEffect::sign_and_send(before, persona, document, sent, claim,
 //!   Abort::undoing(what, undo))`, where `before` holds the steps that precede
-//!   it and `undo` replays the error branch's book changes as `Undo` variants
-//!   (add one where none fits).
-//! - A handler that keeps the document it signed — `desk::open_session`
-//!   records it into the book before saving — is `Step::Sign`, then a new
-//!   step that records the held document (its failure an `Abort` like the
-//!   signing's), then `Step::Then` with a `Followup` that reads what was
-//!   recorded and returns `[Step::Persist(..), Step::Send { .. }]`. The held
-//!   document is kept by the runner from `Sign` to `Send`.
-//! - Work that is not a signed document send (a face job, a PCS job) is a new
-//!   step that spawns it with the same `Claim`, as `Step::Face` does for the
-//!   face and card jobs. A loop-side helper still awaited after a plan
-//!   (`refresh_vetter_side`) is run by the `on_loop` arm after `effect::run`,
-//!   as `RefreshRequirements` does, or as a `Step::RefreshVetterSide` among
-//!   the plan's steps.
+//!   it and `undo` replays the error branch's book changes as `Undo` variants.
 //! - Route the action (or the view's Enter, in `plan_submit`) to the plan, and
 //!   move its arm in `on_loop` / `submit` to the "planned" list.
 //!

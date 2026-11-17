@@ -4,7 +4,7 @@
 //! Each handler is a pure `plan_*` (no `.await`, no spawning, no saving) in the
 //! shape of `dispatch::plan`. It reads `busy` and `has_vta` — whether a vetting
 //! job holds the domain and whether a VTA session is connected — as the loop
-//! found them ([`on_loop_inputs`]), says why when there is no session, derives
+//! found them (`dispatch::plan`'s inputs), says why when there is no session, derives
 //! the application's context where the handler needs one, refuses with
 //! `claimable` when the domain is held, and makes the page changes a started
 //! job makes. What is left is a [`FaceWork`] for `effect::Step::Face`, which
@@ -27,7 +27,6 @@ use super::dispatch::{card_mode, panel, show};
 use super::effect::{Abort, Step, VettingEffect};
 use super::jobs::{CardJob, CardStep, FaceJob, Presenting};
 use super::send::{Claim, claimable, resolver, spawn};
-use crate::state_handler::background_dispatch::DispatchDomain;
 use crate::state_handler::main_page::content::{
     CardPreview, FaceChoice, NewFaceForm, NewFaceStep, PoolRow, VettingMode,
 };
@@ -286,15 +285,6 @@ fn connected(state: &mut State, has_vta: bool) -> bool {
         );
     }
     has_vta
-}
-
-/// What a face plan reads off the loop: whether a vetting job holds the
-/// domain, and whether a VTA session is connected.
-pub(super) fn on_loop_inputs(ctx: &ActionCtx<'_>) -> (bool, bool) {
-    (
-        ctx.in_flight.is_busy(DispatchDomain::Vetting),
-        ctx.admin_vta.is_some(),
-    )
 }
 
 /// A face or card job as a plan decides it. The VTA session it runs against
