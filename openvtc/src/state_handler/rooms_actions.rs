@@ -214,8 +214,8 @@ struct Send {
     purpose: Purpose,
     /// Applied once the request is claimed and the view armed.
     commit: Option<Commit>,
-    /// Shown when it was not sent: after the reason, when the key lookup or
-    /// the document failed, or alone on a busy lane.
+    /// Shown when its lane was busy. A key lookup or document that failed
+    /// shows its own reason instead.
     refusal: Option<Refusal>,
 }
 
@@ -250,8 +250,7 @@ impl Commit {
 /// What the view says when a step did not start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
-    /// The acceptance did not start: its lane is busy — said too when its key
-    /// lookup or document failed, over that reason.
+    /// The acceptance did not start: its lane is busy.
     AcceptBusy,
     /// The VTA was not asked which rooms it holds; the record still refreshes.
     CustodyBusy,
@@ -640,11 +639,6 @@ async fn run_send(lp: &mut Loop<'_>, send: Send) -> bool {
         commit,
         refusal,
     } = send;
-    let refuse = |state: &mut State| {
-        if let Some(refusal) = refusal {
-            refusal.show(state);
-        }
-    };
     match community_request::send::<Rooms>(lp, to, persona, request, purpose).await {
         Sent::NoView => false,
         Sent::Waiting => {
@@ -656,9 +650,10 @@ async fn run_send(lp: &mut Loop<'_>, send: Send) -> bool {
             }
             false
         }
+        // The reason stands alone: the lane was never reached, so it is not
+        // said to be busy.
         Sent::Failed(purpose, why) => {
             community_request::fail::<Rooms>(lp.state, &purpose, why);
-            refuse(lp.state);
             false
         }
         Sent::Unthreaded(purpose) => {
@@ -666,7 +661,9 @@ async fn run_send(lp: &mut Loop<'_>, send: Send) -> bool {
             true
         }
         Sent::Busy => {
-            refuse(lp.state);
+            if let Some(refusal) = refusal {
+                refusal.show(lp.state);
+            }
             false
         }
         Sent::Dispatched => {

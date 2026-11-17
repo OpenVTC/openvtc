@@ -209,6 +209,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Rooms: an acceptance that cannot start says why**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). When the persona's key lookup or
+  the request failed, the "busy" note replaced the real reason; the reason is now shown,
+  and "busy" only when the lane is busy.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

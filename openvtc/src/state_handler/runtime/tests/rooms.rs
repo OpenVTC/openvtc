@@ -278,10 +278,10 @@ async fn an_accept_while_waiting_leaves_the_acceptance_set() {
     assert!(!rt.in_flight.is_busy(DispatchDomain::Rooms));
 }
 
-/// An acceptance whose key lookup fails ends with the busy message, not the
-/// lookup's reason (which it overwrites), and no acceptance set.
+/// An acceptance whose key lookup fails says why, not that the lane is busy
+/// (it is not), and leaves no acceptance set.
 #[tokio::test]
-async fn an_accept_whose_key_lookup_fails_shows_the_busy_message() {
+async fn an_accept_whose_key_lookup_fails_shows_the_reason() {
     let mut rt = without_identity().await;
     connect_vta(&mut rt);
     open_quietly(&mut rt).await;
@@ -292,10 +292,7 @@ async fn an_accept_whose_key_lookup_fails_shows_the_busy_message() {
     assert!(v.pending.is_none());
     assert_eq!(
         status(&mut rt),
-        Some((
-            Severity::Warning,
-            InFlight::busy_message(DispatchDomain::Rooms)
-        ))
+        Some((Severity::Error, NO_IDENTITY.to_string()))
     );
     assert!(!rt.in_flight.is_busy(DispatchDomain::Rooms));
 }
