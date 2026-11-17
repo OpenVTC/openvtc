@@ -271,8 +271,10 @@ pub(crate) async fn persona_signer(
 }
 
 /// Fill the workspace when the view opens: the profile's settings and the
-/// persona's signing key. The probe follows.
-pub(crate) async fn open(ctx: &mut ActionCtx<'_>) {
+/// persona's signing key. The probe follows. Returns a warning to say when
+/// the settings could not be read: the caller says it once the read the
+/// open starts has cleared the status line, so it is not lost.
+pub(crate) async fn open(ctx: &mut ActionCtx<'_>) -> Option<String> {
     let Some(persona) = ctx
         .state
         .main_page
@@ -282,7 +284,7 @@ pub(crate) async fn open(ctx: &mut ActionCtx<'_>) {
         .as_ref()
         .map(|v| v.persona)
     else {
-        return;
+        return None;
     };
     // Read on the blocking pool, not on the loop's thread.
     let settings = match WorkspaceSettings::path(ctx.profile) {
@@ -292,21 +294,33 @@ pub(crate) async fn open(ctx: &mut ActionCtx<'_>) {
         Err(e) => Err(e),
     };
     let signer = persona_signer(ctx.config, ctx.tdk, persona).await;
-    let Some(view) = view_mut(ctx.state) else {
-        return;
-    };
-    let ws = &mut view.workspace;
-    ws.profile = ctx.profile.to_string();
-    match settings {
-        Ok(s) => ws.settings = s,
-        Err(e) => view.note(
-            Severity::Warning,
-            format!("couldn't read the workspace settings, using the defaults: {e}"),
-        ),
-    }
-    view.workspace.signer = Some(signer);
-    view.workspace.want_probe(true);
+    let view = view_mut(ctx.state)?;
+    let warning = fill(view, ctx.profile, settings, signer);
     probe_if_due(ctx.state, ctx.dispatch_tx, ctx.in_flight);
+    warning
+}
+
+/// Put what [`open`] read into the view's workspace. Returns the warning for
+/// settings that could not be read (the defaults are used).
+fn fill(
+    view: &mut ReposView,
+    profile: &str,
+    settings: Result<WorkspaceSettings, openvtc_core::errors::OpenVTCError>,
+    signer: Result<PersonaSigner, String>,
+) -> Option<String> {
+    let ws = &mut view.workspace;
+    ws.profile = profile.to_string();
+    ws.signer = Some(signer);
+    ws.want_probe(true);
+    match settings {
+        Ok(s) => {
+            ws.settings = s;
+            None
+        }
+        Err(e) => Some(format!(
+            "couldn't read the workspace settings, using the defaults: {e}"
+        )),
+    }
 }
 
 // ****************************************************************************
@@ -1653,6 +1667,34 @@ mod tests {
             settings: WorkspaceSettings::default(),
             settings_path,
         }
+    }
+
+    /// Settings that cannot be read leave the defaults and come back as a
+    /// warning for the caller to say; read ones are taken.
+    #[test]
+    fn opening_returns_a_settings_warning_rather_than_saying_it() {
+        let mut v = view();
+        let warning = fill(
+            &mut v,
+            "default",
+            Err(openvtc_core::errors::OpenVTCError::Config(
+                "bad json".into(),
+            )),
+            Err("no key".into()),
+        )
+        .expect("a warning");
+        assert!(
+            warning.starts_with("couldn't read the workspace settings, using the defaults: "),
+            "{warning}"
+        );
+        assert!(warning.contains("bad json"), "{warning}");
+        assert!(v.status.is_none(), "said by the caller, after the read");
+        assert_eq!(v.workspace.profile, "default");
+
+        let mut settings = WorkspaceSettings::default();
+        settings.root = PathBuf::from("/srv/code");
+        assert!(fill(&mut v, "default", Ok(settings), Err("no key".into())).is_none());
+        assert_eq!(v.workspace.settings.root, PathBuf::from("/srv/code"));
     }
 
     /// The settings job writes the file and hands back the new settings; a

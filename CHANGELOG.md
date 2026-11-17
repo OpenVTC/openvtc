@@ -312,6 +312,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the file there too. Saving is now a workspace job, shown as running while it writes,
   and refused while another workspace job (which may write the same file) runs; opening
   reads the file on the blocking pool.
+- **Repos: an unreadable workspace settings file is said when the panel opens**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The warning that the settings
+  could not be read (and the defaults are used) was cleared at once by the read the
+  panel starts, so it was never seen. It is now shown after that read starts.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

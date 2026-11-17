@@ -1068,8 +1068,15 @@ pub(crate) async fn run(ctx: &mut ActionCtx<'_>, effect: ReposEffect) {
             return;
         }
         ReposEffect::Opened(steps) => {
-            super::repos_workspace::open(ctx).await;
-            steps
+            let warning = super::repos_workspace::open(ctx).await;
+            run_steps(&mut Loop::from_ctx(ctx), steps).await;
+            // Said after the steps: their read clears the status line first.
+            if let Some(warning) = warning
+                && let Some(view) = view_mut(ctx.state)
+            {
+                view.note(Severity::Warning, warning);
+            }
+            return;
         }
         ReposEffect::Steps(steps) => steps,
     };
