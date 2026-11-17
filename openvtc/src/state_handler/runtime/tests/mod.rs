@@ -560,4 +560,5 @@ mod elections;
 mod fixtures;
 mod repos;
 mod rooms;
+mod sync;
 mod vetting;

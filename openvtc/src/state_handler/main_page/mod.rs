@@ -2087,7 +2087,7 @@ fn credential_resend_note(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Each answer the community can give reads as what it means for the
@@ -2872,12 +2872,13 @@ mod tests {
     // panels render it through `openvtc_core::display::display_identifier`,
     // which is unit-tested in `openvtc-core`.
 
-    const ALICE_DID: &str = "did:webvh:QmScidAliceAAAAAAAAAAAAAAAAAAAA:example.com:alice";
-    const BOB_DID: &str = "did:webvh:QmScidBobBBBBBBBBBBBBBBBBBBBBBB:example.com:bob";
+    pub(crate) const ALICE_DID: &str =
+        "did:webvh:QmScidAliceAAAAAAAAAAAAAAAAAAAA:example.com:alice";
+    pub(crate) const BOB_DID: &str = "did:webvh:QmScidBobBBBBBBBBBBBBBBBBBBBBBB:example.com:bob";
 
     /// A minimally-valid *signed* VRC. `Vrcs::insert` keys on the proof value,
     /// so an unsigned credential cannot be stored.
-    fn signed_vrc(issuer: &str, subject: &str) -> Arc<dtg_credentials::DTGCredential> {
+    pub(crate) fn signed_vrc(issuer: &str, subject: &str) -> Arc<dtg_credentials::DTGCredential> {
         let json = serde_json::json!({
             "@context": [
                 dtg_credentials::W3C_VC_V2_CONTEXT,
@@ -3771,16 +3772,16 @@ mod tests {
         }
     }
 
-    const VTC: &str = "did:web:vtc.example";
-    const SECOND_VTC: &str = "did:web:second.example";
-    const LEFT_VTC: &str = "did:web:left.example";
-    const REJECTED_VTC: &str = "did:web:rejected.example";
-    const PENDING_VTC: &str = "did:web:pending.example";
-    const JOINING_VTC: &str = "did:web:joining.example";
+    pub(crate) const VTC: &str = "did:web:vtc.example";
+    pub(crate) const SECOND_VTC: &str = "did:web:second.example";
+    pub(crate) const LEFT_VTC: &str = "did:web:left.example";
+    pub(crate) const REJECTED_VTC: &str = "did:web:rejected.example";
+    pub(crate) const PENDING_VTC: &str = "did:web:pending.example";
+    pub(crate) const JOINING_VTC: &str = "did:web:joining.example";
 
     /// A page as the loop holds it before any sync: the VIC list comes from
     /// the VTA vault, not from `Config`, so it is there already.
-    fn blank_page() -> MainPageState {
+    pub(crate) fn blank_page() -> MainPageState {
         page_with_vic(VTC)
     }
 
@@ -3812,7 +3813,7 @@ mod tests {
     /// inbox tasks, one an outbound request; keys; a VTA key backend; vetting
     /// applications (one held statement, one still joining), a vetter grant,
     /// and a community's branding and PCS ZKP mode; verified agent names.
-    fn busy_config() -> Config {
+    pub(crate) fn busy_config() -> Config {
         use openvtc_core::config::account::CommunityStatus;
         use openvtc_core::config::protected_config::Contact;
         use openvtc_core::relationships::{Relationship, RelationshipState};
@@ -4196,8 +4197,13 @@ mod tests {
     #[test]
     fn the_protection_reaches_only_settings() {
         assert_change_syncs(Panels::SETTINGS, true, |config, _| {
+            // What `set_passphrase` / `remove_passphrase` change, but the key.
             config.public.protection =
                 openvtc_core::config::ConfigProtectionType::Token("card-1".into());
+            config.private.logs.insert(
+                openvtc_core::logs::LogFamily::Config,
+                "Profile protection changed".to_string(),
+            );
         });
     }
 

@@ -3448,6 +3448,27 @@ mod hidden {
         assert!(rt.save.is_pending());
     }
 
+    /// The challenge's progress note follows a refresh that went out: a
+    /// warning on the status line from before the refresh is not news the
+    /// refresh left, so it does not hold the note back.
+    #[tokio::test]
+    async fn a_challenge_after_a_refresh_that_went_out_says_it_is_asking() {
+        let (mut rt, _h) = runtime().await;
+        let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
+        hidden_application(&mut rt, persona);
+        rt.state.main_page.content_panel.vetting.status_message =
+            Some(Status::warning("from an earlier action"));
+
+        act(&mut rt, VettingAction::RefreshRequirements).await;
+
+        assert!(asked(&rt, QueryKind::Manifest));
+        assert!(asked(&rt, QueryKind::PcsChallenge));
+        assert_eq!(
+            status(&rt),
+            &Status::progress("Asking the community for a submission challenge…")
+        );
+    }
+
     // ---- a refresh's follow-ups, in order ----
 
     #[tokio::test]
