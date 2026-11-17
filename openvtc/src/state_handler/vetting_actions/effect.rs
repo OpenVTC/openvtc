@@ -243,7 +243,10 @@ impl Abort {
         Self { what, undo }
     }
 
-    fn apply(self, state: &mut State, config: &mut Config, error: String) {
+    /// Undo, then say why. A plan whose own build fails after it changed the
+    /// book gives up through this too, so a failure takes back exactly what
+    /// was changed for the attempt, whichever step it fails at.
+    pub(super) fn apply(self, state: &mut State, config: &mut Config, error: impl std::fmt::Display) {
         for undo in self.undo {
             undo.apply(state, config);
         }
@@ -493,7 +496,7 @@ mod tests {
             "Could not search the directory",
             vec![Undo::ForgetQuery("q1".into()), Undo::DirectoryNotPending],
         )
-        .apply(&mut state, &mut config, "no keys".into());
+        .apply(&mut state, &mut config, "no keys");
 
         assert!(config.private.vetting.queries.is_empty());
         let VettingMode::Directory(view) = &panel(&mut state).mode else {

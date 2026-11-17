@@ -230,6 +230,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   row doubles the wait before the next poll, up to 60 s; the panel shows the current
   interval. A send that failed or a poll that went unanswered was silent before and is
   now said too.
+- **Vetting: a vetter request that cannot be built leaves nothing behind**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). If the request document failed
+  to build after the request was prepared, the prepared request stayed in the
+  application as though sent. It is now forgotten, as it already was when the signing or
+  the send failed.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

@@ -388,6 +388,15 @@ pub(super) fn plan_request_vetter(
             return VettingEffect::none();
         }
     };
+    // From here the book holds the prepared request: any failure before it
+    // goes out forgets it again.
+    let abort = Abort::undoing(
+        WHAT,
+        vec![Undo::ForgetUnsent {
+            application_id: application_id.to_string(),
+            document_id: document_id.clone(),
+        }],
+    );
     let document = match wire::document(
         VETTING_REQUEST_TYPE,
         &join_did,
@@ -397,14 +406,14 @@ pub(super) fn plan_request_vetter(
     ) {
         Ok(d) => d,
         Err(e) => {
-            give_up(state, config, WHAT, e);
+            abort.apply(state, config, e);
             return VettingEffect::none();
         }
     };
     panel(state).mode = VettingMode::List;
     let sent = Sent::Request {
         application_id: application_id.to_string(),
-        document_id: document_id.clone(),
+        document_id,
         vetter: vetter.to_string(),
     };
     VettingEffect::sign_and_send(
@@ -413,13 +422,7 @@ pub(super) fn plan_request_vetter(
         document,
         sent,
         Claim::Held,
-        Abort::undoing(
-            WHAT,
-            vec![Undo::ForgetUnsent {
-                application_id: application_id.to_string(),
-                document_id,
-            }],
-        ),
+        abort,
     )
 }
 
@@ -943,6 +946,34 @@ mod tests {
             )
         );
         assert!(matches!(panel(&mut state).mode, VettingMode::List));
+    }
+
+    /// The abort a request is planned with — the one its document build
+    /// applies too, should it fail — forgets the prepared request, so a
+    /// failure at any step leaves nothing of the attempt in the book.
+    #[test]
+    fn a_request_that_fails_before_it_goes_out_leaves_nothing_prepared() {
+        let (mut state, mut config, id, _) = applying();
+        let effect = plan_request_vetter(
+            &mut state,
+            &mut config,
+            false,
+            &id,
+            "",
+            "did:key:zVetter",
+            Some(code_ticket()),
+        );
+        let (_, _, abort) = signed_send(&effect);
+        let abort = abort.clone();
+        assert_eq!(config.private.vetting.applications[0].requests.len(), 1);
+
+        abort.apply(&mut state, &mut config, "the document could not be built");
+
+        assert!(config.private.vetting.applications[0].requests.is_empty());
+        assert_eq!(
+            status(&mut state),
+            Status::error("Could not send the request: the document could not be built")
+        );
     }
 
     #[test]
