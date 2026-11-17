@@ -458,8 +458,10 @@ pub(super) async fn attest_hidden(
 }
 
 /// Plan [`attest_hidden`]: build the job, and hand it to the VTA with whatever else is owed
-/// there. `connected` is whether an admin VTA session is held. The list view and the progress
-/// word follow only a job that started; one that did not says so and leaves the request open.
+/// there. `connected` is whether an admin VTA session is held: without one nothing can be
+/// attested this way, and that is said first, apart from a busy VTA (R6.4). The list view and
+/// the progress word follow only a job that started; one that did not says so and leaves the
+/// request open.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn plan_attest_hidden(
     state: &mut State,
@@ -471,6 +473,10 @@ pub(super) fn plan_attest_hidden(
     attestation: Attestation,
     now: DateTime<Utc>,
 ) -> VettingEffect {
+    if !connected {
+        show(state, Status::error(ATTEST_UNCONNECTED));
+        return VettingEffect::none();
+    }
     let job = match config.private.vetting.hidden_attestation_job(
         request_id,
         vetter_did,
@@ -512,6 +518,10 @@ pub(super) fn plan_attest_hidden(
         ))),
     }])
 }
+
+/// What a hidden attestation says with no VTA session to make it.
+const ATTEST_UNCONNECTED: &str = "A hidden attestation is made by your VTA, and it is not \
+     connected — attest again once it is. Nothing was sent; the request stays open.";
 
 /// Whether a refusal to attest is a state the vetter waits out: no credential yet, or no token.
 fn is_wait(e: &openvtc_core::vetting::vetter::VetterError) -> bool {
@@ -768,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn attesting_on_a_request_not_yet_attestable_says_why_and_starts_nothing() {
+    fn attesting_on_a_request_not_yet_attestable_or_without_a_vta_says_why_and_starts_nothing() {
         use openvtc_core::vetting::vetter::{DeskEntry, DeskState};
         use vta_sdk::protocols::vetting::request;
         let mut config = test_config();
@@ -816,7 +826,7 @@ mod tests {
             "req-1",
             &entry,
             "did:key:zVetter",
-            attestation,
+            attestation.clone(),
             now,
         );
 
@@ -824,5 +834,21 @@ mod tests {
         let word = said(&mut state);
         assert_eq!(word.severity, Severity::Error);
         assert!(word.text.starts_with("Cannot attest: "), "{}", word.text);
+
+        // With no VTA session it says so, not that the VTA is busy.
+        let effect = plan_attest_hidden(
+            &mut state,
+            &mut config,
+            false,
+            "req-1",
+            &entry,
+            "did:key:zVetter",
+            attestation,
+            now,
+        );
+        assert!(effect.0.is_empty());
+        assert_eq!(said(&mut state), Status::error(ATTEST_UNCONNECTED));
+        assert!(ATTEST_UNCONNECTED.contains("not connected"));
+        assert!(!ATTEST_UNCONNECTED.contains("busy"));
     }
 }

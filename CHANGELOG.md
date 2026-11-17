@@ -239,6 +239,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ([#614](https://github.com/OpenVTC/openvtc/pull/614)). When the persona's key lookup or
   signing failed, the challenge question stayed filed as though asked until its reply
   window ran out. It is now un-filed, as it already was when the send failed.
+- **Vetting: a hidden attestation with no VTA connected says so, not "busy"**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Attesting the hidden way with no
+  VTA session said the hidden-vetting work was busy. It now says the VTA is not connected
+  and the request stays open; "busy" is said only when the VTA is busy.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard
