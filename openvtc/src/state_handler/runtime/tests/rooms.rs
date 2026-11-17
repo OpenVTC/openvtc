@@ -130,18 +130,25 @@ fn armed_on(rt: &mut Runtime, purpose: &Purpose) {
 
 // ---- Open / Refresh ----
 
-/// A refresh on a busy Rooms lane sends nothing and says nothing: the panel
-/// stays loading, and with no VTA the custody says why it is not shown.
+/// A refresh on a busy Rooms lane sends nothing and says why: the panel stays
+/// loading with the busy note, and with no VTA the custody says why it is not
+/// shown.
 #[tokio::test]
-async fn a_refresh_on_a_busy_lane_sends_nothing_and_says_nothing() {
+async fn a_refresh_on_a_busy_lane_sends_nothing_and_says_the_lane_is_busy() {
     let mut rt = with_keys().await;
     assert!(rt.in_flight.try_begin(DispatchDomain::Rooms));
     rt.on_action(Action::Rooms(Act::Open(0))).await;
     let v = view(&mut rt);
     assert_eq!(v.phase, RoomsPhase::Loading);
     assert!(v.pending.is_none());
-    assert!(v.status.is_none());
     assert!(v.held.is_none());
+    let (severity, text) = status(&mut rt).expect("the busy lane is said");
+    assert_eq!(severity, Severity::Warning);
+    assert!(
+        text.starts_with(&InFlight::busy_message(DispatchDomain::Rooms)),
+        "{text}"
+    );
+    let v = view(&mut rt);
     assert_eq!(
         v.held_error.as_deref(),
         Some("no VTA is connected, so which rooms it holds keys for can't be shown")
@@ -245,10 +252,11 @@ async fn an_accept_without_a_vta_is_refused() {
     assert!(!rt.in_flight.is_busy(DispatchDomain::Rooms));
 }
 
-/// An acceptance pressed while the view still waits on an earlier request
-/// says so — and leaves the acceptance set, with no request behind it.
+/// An acceptance pressed while the view still waits on an earlier request is
+/// refused: nothing is set, nothing sent, and the press can be made again once
+/// the earlier request answers.
 #[tokio::test]
-async fn an_accept_while_waiting_leaves_the_acceptance_set() {
+async fn an_accept_while_waiting_is_refused_and_can_be_pressed_again() {
     let mut rt = with_keys().await;
     connect_vta(&mut rt);
     open_quietly(&mut rt).await;
@@ -264,24 +272,30 @@ async fn an_accept_while_waiting_leaves_the_acceptance_set() {
     rt.on_action(Action::Rooms(Act::Accept)).await;
 
     let v = view(&mut rt);
-    let flow = v.accept.as_ref().expect("the acceptance is left set");
-    assert_eq!(flow.room, ROOM);
-    assert_eq!(flow.step, AcceptStep::Collecting);
+    assert!(v.accept.is_none());
     assert_eq!(v.pending, Some(earlier));
     assert_eq!(
         status(&mut rt),
         Some((
             Severity::Warning,
-            "Still waiting for the community's answer.".into()
+            "A request to this community is still waiting — try again when it answers.".into()
         ))
     );
     assert!(!rt.in_flight.is_busy(DispatchDomain::Rooms));
+
+    // The earlier request answers; the same press now starts the acceptance.
+    view(&mut rt).pending = None;
+    rt.on_action(Action::Rooms(Act::Accept)).await;
+    assert!(rt.in_flight.is_busy(DispatchDomain::Rooms));
+    armed_on(&mut rt, &Purpose::Offers { room: ROOM.into() });
+    let flow = view(&mut rt).accept.clone().expect("the acceptance is set");
+    assert_eq!(flow.step, AcceptStep::Collecting);
 }
 
-/// An acceptance whose key lookup fails ends with the busy message, not the
-/// lookup's reason (which it overwrites), and no acceptance set.
+/// An acceptance whose key lookup fails says why, not that the lane is busy
+/// (it is not), and leaves no acceptance set.
 #[tokio::test]
-async fn an_accept_whose_key_lookup_fails_shows_the_busy_message() {
+async fn an_accept_whose_key_lookup_fails_shows_the_reason() {
     let mut rt = without_identity().await;
     connect_vta(&mut rt);
     open_quietly(&mut rt).await;
@@ -292,10 +306,7 @@ async fn an_accept_whose_key_lookup_fails_shows_the_busy_message() {
     assert!(v.pending.is_none());
     assert_eq!(
         status(&mut rt),
-        Some((
-            Severity::Warning,
-            InFlight::busy_message(DispatchDomain::Rooms)
-        ))
+        Some((Severity::Error, NO_IDENTITY.to_string()))
     );
     assert!(!rt.in_flight.is_busy(DispatchDomain::Rooms));
 }
@@ -369,23 +380,30 @@ async fn a_refresh_step_on_a_busy_lane_is_kept() {
     assert_eq!(view(&mut rt).next, Some(Next::Refresh));
 }
 
-/// A page step whose key lookup fails says why, and is kept for the next tick.
+/// A page step whose key lookup fails says why and is given up, not retried
+/// on the next tick: the reason stays until the person acts again.
 #[tokio::test]
-async fn a_page_step_whose_key_lookup_fails_is_kept() {
+async fn a_page_step_whose_key_lookup_fails_is_given_up() {
     let mut rt = without_identity().await;
     open_quietly(&mut rt).await;
     with_offered_room(&mut rt);
     let next = Next::MembershipsPage {
         cursor: "c1".into(),
     };
-    view(&mut rt).next = Some(next.clone());
+    view(&mut rt).next = Some(next);
     rt.on_capabilities_sweep().await;
-    assert_eq!(view(&mut rt).next, Some(next));
+    assert!(view(&mut rt).next.is_none());
     assert_eq!(
         status(&mut rt),
         Some((Severity::Error, NO_IDENTITY.to_string()))
     );
     assert!(!rt.in_flight.is_busy(DispatchDomain::Rooms));
+
+    // The next tick neither retries it nor rewrites the reason.
+    view(&mut rt).status.as_mut().unwrap().text = "seen".into();
+    rt.on_capabilities_sweep().await;
+    assert!(view(&mut rt).next.is_none());
+    assert_eq!(status(&mut rt), Some((Severity::Error, "seen".into())));
 }
 
 /// A page step that is sent arms the view and is taken.
@@ -442,17 +460,20 @@ async fn a_renew_step_on_a_busy_vta_lane_keeps_the_renewals_and_the_step() {
     assert_eq!(v.renewals.len(), 1);
 }
 
-/// Without a VTA a renew step is kept, its renewals with it.
+/// Without a VTA a renew step is dropped with its renewals rather than kept
+/// for ever: nothing can store them, and the first read once a VTA is
+/// connected collects them again.
 #[tokio::test]
-async fn a_renew_step_without_a_vta_is_kept() {
+async fn a_renew_step_without_a_vta_is_dropped() {
     let mut rt = with_keys().await;
     open_quietly(&mut rt).await;
     view(&mut rt).renewals = vec![renewal()];
     view(&mut rt).next = Some(Next::Renew);
     rt.on_capabilities_sweep().await;
     let v = view(&mut rt);
-    assert_eq!(v.next, Some(Next::Renew));
-    assert_eq!(v.renewals.len(), 1);
+    assert!(v.next.is_none());
+    assert!(v.renewals.is_empty());
+    assert!(!rt.in_flight.is_busy(DispatchDomain::RoomsVta));
 }
 
 /// A renew step the VTA's lane takes hands the renewals to the job.

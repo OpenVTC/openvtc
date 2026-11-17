@@ -28,7 +28,8 @@
 //! handler made them: after the busy check, before any save or signing.
 //!
 //! `effect::run` does the steps in order: `Persist` (save and sync, showing
-//! and logging the message), `MarkDirty`, `Status`, `Sign` (the persona's key
+//! and logging the message), `MarkDirty`, `Status`, `Summary` (a status that
+//! does not cover a warning or error the steps before it left), `Sign` (the persona's key
 //! lookup and the signing, holding the signed document), `Send` (the signed
 //! document to a `SendJob`, filing a manifest question first, claimed through
 //! `background_dispatch::dispatch` for `Claim::Held` or `spawn_unclaimed` for
@@ -38,7 +39,8 @@
 //! `what` — and the run stops there.
 //!
 //! Hidden vetting's steps are the client's own: `SendOrSay` (signed and sent
-//! unheld; a failure is said and the run goes on), `SendMessage` (an unsigned
+//! unheld; a failure undoes what was filed for it, is said, and the run goes
+//! on), `SendMessage` (an unsigned
 //! message), `StartPcs` (a job at the VTA, its `PcsCommit` applied once it
 //! started), `RefreshVetterSide` (the vetter pass, awaited), and `PcsAnswer`
 //! (one of a PCS job's answers, planned when it is reached, like `Then`).

@@ -11,7 +11,7 @@
 //! requirements again, the attestation) come back as [`Planned::Loop`] and
 //! are handled on the loop by [`on_loop`].
 
-use crate::state_handler::main_page::status::Status;
+use crate::state_handler::main_page::status::{Severity, Status};
 use chrono::Utc;
 use openvtc_core::config::Config;
 use openvtc_core::vetting::vetter::DeskState;
@@ -656,11 +656,16 @@ pub(super) fn plan_followup(
     followup: Followup,
 ) -> VettingEffect {
     match followup {
-        Followup::Started { application_id } => plan_started(state, config, busy, &application_id),
+        Followup::Started {
+            application_id,
+            started,
+        } => plan_started(state, config, busy, &application_id, &started),
         // desk and tickets
-        Followup::SessionKept { request_id, known } => {
-            plan_session_kept(state, config, &request_id, known)
-        }
+        Followup::SessionKept {
+            request_id,
+            known,
+            previous,
+        } => plan_session_kept(state, config, &request_id, known, previous),
         Followup::AskManifest { community, persona } => {
             plan_ask_manifest(config, &community, persona)
         }
@@ -682,11 +687,21 @@ async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             let v = page(ctx);
             if let Some(row) = v.applications.get(v.selected).cloned() {
                 let busy = ctx.in_flight.is_busy(DispatchDomain::Vetting);
+                let before = page(ctx).status_message.clone();
                 let effect = plan_refresh_requirements(ctx.state, ctx.config, busy, &row.id);
                 run(ctx, effect).await;
+                // A refresh refused or given up says why; the challenge's progress note must
+                // not cover that.
+                let refused = {
+                    let now = &page(ctx).status_message;
+                    *now != before
+                        && now.as_ref().is_some_and(|s| {
+                            matches!(s.severity, Severity::Warning | Severity::Error)
+                        })
+                };
                 // A hidden application also needs the community's challenge, and asking early
                 // is free: the community keeps one per applicant, and asking again replaces it.
-                ask_for_challenge(ctx, &row.id).await;
+                ask_for_challenge(ctx, &row.id, !refused).await;
             }
             // A vetter has no application, so nothing else would ever fetch the manifest of a
             // community it vets for — and the manifest is where a community says it hides its

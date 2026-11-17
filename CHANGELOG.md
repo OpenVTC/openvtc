@@ -209,6 +209,124 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Rooms: an acceptance that cannot start says why**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). When the persona's key lookup or
+  the request failed, the "busy" note replaced the real reason; the reason is now shown,
+  and "busy" only when the lane is busy.
+- **Rooms: accepting while a request is still unanswered is refused, not left stuck**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The acceptance was set to
+  "Collecting" with nothing sent, and stayed there. The press now changes nothing and
+  says "A request to this community is still waiting — try again when it answers.",
+  as Elections refuses the same case.
+- **Rooms: a step whose key lookup fails is given up, not retried every tick**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). A follow-on step (a page read,
+  an acceptance step, a renewals check) whose persona key could not be read was retried
+  and its error rewritten on every tick. It now shows the reason once and stops until
+  the person acts again, as Elections does.
+- **Repos: a failing forge-link check is reported once and backs off**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). A link-status poll that kept
+  failing (the persona's key, the send, or no answer) repeated its error every 5 s. A
+  failure is now said once until it changes or a poll is answered, and each failure in a
+  row doubles the wait before the next poll, up to 60 s; the panel shows the current
+  interval. A send that failed or a poll that went unanswered was silent before and is
+  now said too.
+- **Vetting: a vetter request that cannot be built leaves nothing behind**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). If the request document failed
+  to build after the request was prepared, the prepared request stayed in the
+  application as though sent. It is now forgotten, as it already was when the signing or
+  the send failed.
+- **Vetting: a submission-challenge request that cannot be signed is un-filed**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). When the persona's key lookup or
+  signing failed, the challenge question stayed filed as though asked until its reply
+  window ran out. It is now un-filed, as it already was when the send failed.
+- **Vetting: a hidden attestation with no VTA connected says so, not "busy"**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Attesting the hidden way with no
+  VTA session said the hidden-vetting work was busy. It now says the VTA is not connected
+  and the request stays open; "busy" is said only when the VTA is busy.
+- **Six messages no longer show a long run of spaces mid-sentence**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). A line of text wrapped in the
+  source without its trailing `\` carried the next line's indentation into the message:
+  the hidden-vetting key-recovery mismatch, the identity panel's "worlds apart" warning,
+  three wallet join messages (session expired, unreadable answer, no answer) and the
+  unreadable directory-disclosure failure. A source check now catches the mistake.
+- **Vetting: a session that cannot be opened leaves the request as it was**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). When the persona's key lookup or
+  signing failed, the request stayed in an open session in memory (not saved) that no
+  applicant ever received; it is now put back where it stood. And when the question
+  asking the community for its requirements could not be sent, the page still counted
+  it as asked, so the next Enter opened the session without the requirements; it now
+  asks again.
+- **Vetting: a decline or withdrawal that cannot be built is undone**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). If the decline or withdrawal
+  document failed to build, the request stayed declined, or the statement marked
+  withdrawn, in memory with nothing sent. Both are now put back, as they already were
+  when the signing or the send failed.
+- **Hidden vetting: an enrolment or draw that cannot be signed is un-filed**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). When the persona's key lookup or
+  signing failed, the enrolment question, and a draw's question and in-flight record,
+  stayed in the book as though sent until the reply window ran out. They are now taken
+  back, as a failed send already did, so the schedule asks again on its next pass.
+- **Vetting: starting an application while another vetting send runs says it started**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The application was saved, but
+  the busy warning replaced "Application started.", so it read as refused. The status
+  now says it started and that its requirements wait until the other send finishes (m
+  asks then).
+- **Vetting: refreshing a hidden application while busy keeps the busy refusal on screen**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). `m` on a hidden-vetting
+  application while another vetting send ran refused the requirements question, but the
+  submission-challenge request that follows replaced the refusal with "Asking the
+  community for a submission challenge…". The challenge is still asked, quietly, when
+  the requirements were refused or failed.
+- **Hidden vetting: "get tokens" (`d`) no longer covers a failure with its summary**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The per-community summary was
+  shown after the vetter pass even when the pass had just said a warning or an error
+  (a question to a community that could not be sent), which hid it. The failure now
+  stays on the status line; the summary is shown otherwise.
+- **Hidden vetting: a key-binding question that cannot be signed is un-filed**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The question asking a community
+  which hidden-vetting key it bound you to stayed filed as though sent when the signing
+  failed. It is now un-filed, as a failed send already did; it is asked again after the
+  usual re-ask interval.
+- **Rooms: a refresh on a busy lane says so**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Opening the panel or pressing `r`
+  while another Rooms request held the lane read nothing and said nothing, so an empty
+  panel sat at "asking the community…" indefinitely. It now says the lane is busy and to
+  press `r` once it finishes, including on the loading screen.
+- **Rooms: renewals collected before the VTA disconnected are no longer retried for ever**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The step handing them to the VTA
+  was kept and retried on every tick while no VTA was connected. It is now dropped; the
+  first read once a VTA is connected collects the renewals again.
+- **Elections: opening an election on a busy lane changes nothing but the status**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The refused press still reset
+  which community the view reads from and the membership it presented. Those now change
+  only once the read is under way.
+- **Elections: a list refresh on a busy lane says so**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Opening the panel or pressing `r`
+  on the list while another Elections request held the lane read nothing and said
+  nothing. It now says the lane is busy and to press `r` once it finishes, including on
+  the loading screen. The VTA's held election notifications are still read: they come
+  from the VTA on a lane of their own.
+- **Repos: saving the workspace settings no longer blocks the app on the disk**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Saving the settings form checked
+  the directory and wrote the settings file on the event loop, and opening the panel read
+  the file there too. Saving is now a workspace job, shown as running while it writes,
+  and refused while another workspace job (which may write the same file) runs; opening
+  reads the file on the blocking pool.
+- **Repos: an unreadable workspace settings file is said when the panel opens**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The warning that the settings
+  could not be read (and the defaults are used) was cleared at once by the read the
+  panel starts, so it was never seen. It is now shown after that read starts.
+- **Hidden vetting: enrolment, draw and key-binding failures are logged**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). A hidden-vetting enrolment or
+  token draw that could not be signed, and a key-binding question that could not be sent,
+  were shown only on the status line, so the next status replaced them. They now go to
+  the activity log too.
+- **Vetting: the VTA context chosen for an application's face is saved**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Choosing, making or wearing a
+  face, or sending a card, picked the application's VTA context and kept it in memory
+  without saving it, even when the press was then refused as busy. The context is now
+  kept only once the job goes ahead, and saved with it; a card whose key lookup fails
+  takes it back.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

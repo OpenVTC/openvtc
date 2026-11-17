@@ -167,18 +167,23 @@ fn armed_on(rt: &mut Runtime, purpose: &Purpose) -> String {
 
 // ---- Open / Refresh ----
 
-/// Opening on a busy lane sends nothing and says nothing; the held
-/// notifications are due.
+/// Opening on a busy lane sends nothing and says the lane is busy. The held
+/// notifications are still due: they are the VTA's, read on its own lane.
 #[tokio::test]
-async fn an_open_on_a_busy_lane_sends_nothing_and_says_nothing() {
+async fn an_open_on_a_busy_lane_sends_nothing_and_says_the_lane_is_busy() {
     let mut rt = with_keys().await;
     assert!(rt.in_flight.try_begin(DispatchDomain::Elections));
     rt.on_action(Action::Elections(Act::Open(0))).await;
     let v = view(&mut rt);
     assert_eq!(v.phase, ElectionsPhase::Loading);
     assert!(v.pending.is_none());
-    assert!(v.status.is_none());
     assert!(v.notified_due);
+    let (severity, text) = status(&mut rt).expect("the busy lane is said");
+    assert_eq!(severity, Severity::Warning);
+    assert!(
+        text.starts_with(&InFlight::busy_message(DispatchDomain::Elections)),
+        "{text}"
+    );
 }
 
 /// Opening with a key lookup that fails fails the empty list with the reason.
@@ -261,17 +266,22 @@ async fn a_refresh_of_the_detail_whose_key_lookup_fails_says_why() {
 // ---- Show ----
 
 /// Opening an election on a busy lane stays on the list and says the lane is
-/// busy; the earlier read is gone.
+/// busy, changing nothing else: the community the view last read from, and
+/// the membership it presented, stay as they were.
 #[tokio::test]
-async fn a_show_on_a_busy_lane_stays_on_the_list() {
+async fn a_show_on_a_busy_lane_stays_on_the_list_and_keeps_its_target() {
     let mut rt = with_keys().await;
     open_quietly(&mut rt).await;
+    view(&mut rt).target = "did:key:zEarlierHolder".into();
+    view(&mut rt).presenting = Some("did:key:zParty".into());
     assert!(rt.in_flight.try_begin(DispatchDomain::Elections));
     rt.on_action(Action::Elections(Act::Show)).await;
     let v = view(&mut rt);
     assert_eq!(v.screen, Screen::List);
     assert!(v.shown.is_none());
     assert!(v.pending.is_none());
+    assert_eq!(v.target, "did:key:zEarlierHolder");
+    assert_eq!(v.presenting.as_deref(), Some("did:key:zParty"));
     assert_eq!(status(&mut rt), busy());
 }
 

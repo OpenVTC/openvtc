@@ -134,6 +134,11 @@ fn render_list(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
             lines.push(Line::from(dim(
                 "    asking the community which elections you may take part in…",
             )));
+            // Why it is not asking yet (a busy lane), when it is not.
+            if let Some(status) = &view.status {
+                lines.push(Line::from(""));
+                push_status(lines, status);
+            }
             keys(lines, &[k("r", "retry"), k("Esc", "back")]);
             return;
         }

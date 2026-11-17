@@ -549,7 +549,7 @@ pub(crate) fn wallet_answer(
                     None => "The community refused what the wallet presented.".to_string(),
                 }),
                 status::ResponseState::Expired => end(
-                    "The session expired before the wallet answered. Try again when your                      wallet is to hand."
+                    "The session expired before the wallet answered. Try again when your wallet is to hand."
                         .to_string(),
                 ),
                 status::ResponseState::RequestRetrieved => {
@@ -585,7 +585,7 @@ pub(crate) fn wallet_answer(
             detail,
             ..
         } if ours(query) => end(format!(
-            "The community answered in a form this client cannot read — the two disagree about              the task; it is not a refusal ({})",
+            "The community answered in a form this client cannot read — the two disagree about the task; it is not a refusal ({})",
             sanitize_display(detail, 200)
         )),
         _ => None,
@@ -626,7 +626,7 @@ pub(crate) async fn wallet_tick(
     let unanswered = |what: &str| {
         Some(JoinEntry::Wallet {
             end: WalletEnd::Unfinished(format!(
-                "The community did not answer {what} within {} seconds — its service may be                  offline or unreachable.",
+                "The community did not answer {what} within {} seconds — its service may be offline or unreachable.",
                 WALLET_ANSWER_WAIT.as_secs()
             )),
         })

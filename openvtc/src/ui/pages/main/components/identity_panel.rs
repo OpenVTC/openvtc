@@ -780,7 +780,7 @@ fn push_link_summary(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
 
     lines.push(
         Line::from(format!(
-            " {crossing} value{} {} in more than one of your worlds. Keep your worlds apart:              anyone who sees both knows they are the same person.",
+            " {crossing} value{} {} in more than one of your worlds. Keep your worlds apart: anyone who sees both knows they are the same person.",
             if crossing == 1 { "" } else { "s" },
             if crossing == 1 { "is" } else { "are" },
         ))

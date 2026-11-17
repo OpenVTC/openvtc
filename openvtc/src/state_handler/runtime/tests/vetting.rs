@@ -201,7 +201,7 @@ async fn an_application_to_something_not_a_did_is_refused() {
 }
 
 #[tokio::test]
-async fn starting_an_application_while_busy_saves_it_and_asks_nothing() {
+async fn starting_an_application_while_busy_saves_it_and_says_its_requirements_wait() {
     let (mut rt, _h) = runtime().await;
     fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
     rt.state.main_page.sync_from_config(&rt.config);
@@ -215,8 +215,17 @@ async fn starting_an_application_while_busy_saves_it_and_asks_nothing() {
     assert!(logged(&rt.state, "Application started."));
     assert!(matches!(page(&rt).mode, VettingMode::List));
     assert_eq!(page(&rt).tab, VettingTab::Applications);
-    // The refresh that follows is what is refused.
-    assert_busy_refusal(&rt);
+    // The refresh that follows waits on the busy domain, and the status says
+    // both: the application started, and why its requirements wait.
+    let s = status(&rt);
+    assert_eq!(s.severity, Severity::Warning);
+    assert!(s.text.starts_with("Application started."), "{}", s.text);
+    assert!(
+        s.text
+            .contains(&InFlight::busy_message(DispatchDomain::Vetting)),
+        "{}",
+        s.text
+    );
     assert!(!asked(&rt, QueryKind::Manifest));
 }
 
@@ -1031,7 +1040,7 @@ mod faces {
     }
 
     #[tokio::test]
-    async fn choosing_a_face_while_busy_derives_the_context_and_reads_nothing() {
+    async fn choosing_a_face_while_busy_keeps_no_context_and_reads_nothing() {
         let (mut rt, _h) = runtime().await;
         connect(&mut rt);
         let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
@@ -1041,8 +1050,8 @@ mod faces {
         act(&mut rt, VettingAction::ChooseFace).await;
 
         assert_busy_refusal(&rt);
-        // The context is derived before the busy check, in memory only.
-        assert!(context_of(&rt, &id).is_some());
+        // Nothing is kept for a read that never started.
+        assert!(context_of(&rt, &id).is_none());
         assert!(!rt.save.is_pending());
     }
 
@@ -1059,7 +1068,7 @@ mod faces {
         assert_eq!(status(&rt), &Status::progress("Reading your faces…"));
         assert!(context_of(&rt, &id).is_some());
         assert!(matches!(page(&rt).mode, VettingMode::List));
-        assert!(!rt.save.is_pending());
+        assert!(rt.save.is_pending(), "the context kept is saved");
 
         settle(&mut rt).await;
         assert!(!busy(&rt));
@@ -1219,7 +1228,8 @@ mod faces {
 
         assert_busy_refusal(&rt);
         assert!(matches!(page(&rt).mode, VettingMode::ChooseFace { .. }));
-        assert!(context_of(&rt, &id).is_some());
+        // Nothing is kept for a job that never started.
+        assert!(context_of(&rt, &id).is_none());
         assert!(!rt.save.is_pending());
     }
 
@@ -1237,7 +1247,7 @@ mod faces {
         assert_eq!(status(&rt), &Status::progress("Wearing Work…"));
         assert!(matches!(page(&rt).mode, VettingMode::List));
         assert!(context_of(&rt, &id).is_some());
-        assert!(!rt.save.is_pending());
+        assert!(rt.save.is_pending(), "the context kept is saved");
 
         settle(&mut rt).await;
         assert!(!busy(&rt));
@@ -1356,7 +1366,8 @@ mod faces {
 
         assert_busy_refusal(&rt);
         assert!(matches!(page(&rt).mode, VettingMode::NewFace(_)));
-        assert!(context_of(&rt, &id).is_some());
+        // Nothing is kept for a job that never started.
+        assert!(context_of(&rt, &id).is_none());
         assert!(!rt.save.is_pending());
     }
 
@@ -1456,7 +1467,7 @@ mod faces {
     }
 
     #[tokio::test]
-    async fn a_card_while_busy_derives_the_context_and_sends_nothing() {
+    async fn a_card_while_busy_keeps_no_context_and_sends_nothing() {
         let (mut rt, _h) = runtime().await;
         connect(&mut rt);
         let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
@@ -1467,7 +1478,8 @@ mod faces {
         act(&mut rt, VettingAction::Submit).await;
 
         assert_busy_refusal(&rt);
-        assert!(context_of(&rt, &id).is_some());
+        // Nothing is kept for a job that never started.
+        assert!(context_of(&rt, &id).is_none());
         assert!(matches!(
             page(&rt).mode,
             VettingMode::SendCard {
@@ -1494,7 +1506,7 @@ mod faces {
             &Status::progress("Asking your VTA what your face shows this vetter…")
         );
         assert!(context_of(&rt, &id).is_some());
-        assert!(!rt.save.is_pending());
+        assert!(rt.save.is_pending(), "the context kept is saved");
 
         settle(&mut rt).await;
         assert!(!busy(&rt));
@@ -1516,8 +1528,8 @@ mod faces {
         act(&mut rt, VettingAction::Submit).await;
 
         assert_abandoned(&rt, "Could not sign the card");
-        // Derived before the key lookup, and kept.
-        assert!(context_of(&rt, &id).is_some());
+        // The context derived for the card is taken back with it.
+        assert!(context_of(&rt, &id).is_none());
         assert!(!rt.save.is_pending());
     }
 
@@ -1537,7 +1549,7 @@ mod faces {
             &Status::progress("Releasing and signing your card…")
         );
         assert!(context_of(&rt, &id).is_some());
-        assert!(!rt.save.is_pending());
+        assert!(rt.save.is_pending(), "the context kept is saved");
 
         settle(&mut rt).await;
         assert!(!busy(&rt));
@@ -1662,9 +1674,9 @@ async fn opening_a_session_before_the_requirements_without_keys_gives_up_unsent(
 
     assert_abandoned(&rt, "Could not ask the community");
     assert!(!asked(&rt, QueryKind::Manifest));
-    // Marked as asked although nothing went: the next Enter opens the session
-    // without the requirements.
-    assert_eq!(page(&rt).requirements_requested, vec![VTC.to_string()]);
+    // Not marked as asked, since nothing went: the next Enter asks again
+    // rather than opening the session without the requirements.
+    assert!(page(&rt).requirements_requested.is_empty());
     assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
     assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
     assert!(!rt.save.is_pending());
@@ -1751,7 +1763,7 @@ async fn opening_a_session_while_busy_opens_nothing() {
 }
 
 #[tokio::test]
-async fn opening_a_session_without_keys_leaves_it_open_and_unsaved() {
+async fn opening_a_session_without_keys_puts_the_request_back() {
     let (mut rt, _h) = runtime().await;
     let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
     let id = desk_request(&mut rt, persona);
@@ -1761,12 +1773,9 @@ async fn opening_a_session_without_keys_leaves_it_open_and_unsaved() {
     act(&mut rt, VettingAction::Submit).await;
 
     assert_abandoned(&rt, "Could not send the session");
-    // The session the book opened before the signing stays open, its document
-    // never kept, and nothing is saved.
-    let DeskState::Session { session } = desk_state(&rt, &id) else {
-        panic!("the session stays open");
-    };
-    assert!(session.document.is_none());
+    // The session the book opened before the signing is undone: the request
+    // stands where it stood, as on disk, and nothing is saved.
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
     assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
     assert!(!rt.save.is_pending());
 }
@@ -2383,7 +2392,7 @@ async fn refreshing_the_vetter_side_asks_which_key_a_rebound_community_holds() {
 }
 
 #[tokio::test]
-async fn a_binding_question_without_keys_says_so_and_stays_asked() {
+async fn a_binding_question_without_keys_says_so_and_is_unfiled() {
     let (mut rt, _h) = runtime().await;
     let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
     rebound_engine(&mut rt, persona);
@@ -2391,8 +2400,11 @@ async fn a_binding_question_without_keys_says_so_and_stays_asked() {
     act(&mut rt, VettingAction::RefreshVetterSide).await;
 
     assert!(key_check_started(&rt));
-    // Filed and marked asked before the signing failed, and left so.
-    assert!(asked(&rt, QueryKind::PcsBinding));
+    // Filed before the signing and un-filed when it fails; the check keeps
+    // the time it was asked, so it is not asked again before the re-ask
+    // interval.
+    assert!(!asked(&rt, QueryKind::PcsBinding));
+    assert!(!rt.config.private.vetting.hidden_vetter[0].binding_read_due(chrono::Utc::now()));
     assert!(rt.save.is_pending());
     let s = status(&rt);
     assert_eq!(s.severity, Severity::Error);
@@ -2403,7 +2415,8 @@ async fn a_binding_question_without_keys_says_so_and_stays_asked() {
         "{}",
         s.text
     );
-    assert!(!logged(
+    // Logged as well as said, so it outlives the status line (R6.5).
+    assert!(logged(
         &rt.state,
         "which hidden-vetting key it holds for you"
     ));
@@ -2785,7 +2798,7 @@ mod hidden {
     // ---- the submission challenge ----
 
     #[tokio::test]
-    async fn a_challenge_without_keys_gives_up_and_leaves_its_question_filed() {
+    async fn a_challenge_without_keys_gives_up_and_unfiles_its_question() {
         let (mut rt, _h) = runtime().await;
         let persona = persona_without_keys(&mut rt, "did:key:zApplicant").await;
         hidden_application(&mut rt, persona);
@@ -2799,14 +2812,14 @@ mod hidden {
             "the requirements are asked for first"
         );
         assert!(!asked(&rt, QueryKind::Manifest));
-        // Filed before the signing and left filed when it fails: it expires
-        // on its reply window.
-        assert!(asked(&rt, QueryKind::PcsChallenge));
+        // Filed before the signing and un-filed when it fails: nothing waits
+        // on a question that never went.
+        assert!(!asked(&rt, QueryKind::PcsChallenge));
         assert!(!rt.save.is_pending());
     }
 
     #[tokio::test]
-    async fn a_challenge_is_asked_even_while_a_persons_send_holds_the_domain() {
+    async fn a_challenge_asked_while_busy_leaves_the_busy_refusal_said() {
         let (mut rt, _h) = runtime().await;
         let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
         hidden_application(&mut rt, persona);
@@ -2814,13 +2827,11 @@ mod hidden {
 
         act(&mut rt, VettingAction::RefreshRequirements).await;
 
-        // The requirements are refused; the challenge is not, and is said last.
+        // The requirements are refused; the challenge is not, and asks
+        // quietly so the refusal stays on the status line.
         assert!(!asked(&rt, QueryKind::Manifest));
         assert!(asked(&rt, QueryKind::PcsChallenge));
-        assert_eq!(
-            status(&rt),
-            &Status::progress("Asking the community for a submission challenge…")
-        );
+        assert_busy_refusal(&rt);
         assert!(!rt.save.is_pending());
         settle_unheld(&mut rt).await;
         assert!(busy(&rt), "the person's send still holds the domain");
@@ -2959,6 +2970,34 @@ mod hidden {
         // started, so it is owed again.
         assert!(rt.config.private.vetting.vetter_refresh_due);
         assert!(!busy(&rt));
+    }
+
+    /// A pass that fails to ask something says why, and the summary of what
+    /// each community does does not cover it.
+    #[tokio::test]
+    async fn drawing_by_hand_leaves_a_failure_of_the_pass_said() {
+        let (mut rt, _h) = runtime().await;
+        let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+        engine(&mut rt, persona);
+        grant(&mut rt, persona);
+        rt.config
+            .private
+            .vetting
+            .hidden_published
+            .insert(VTC.into(), params());
+        reads_as_hidden(&mut rt);
+        rebound(&mut rt);
+
+        act(&mut rt, VettingAction::DrawNow).await;
+
+        let s = status(&rt);
+        assert_eq!(s.severity, Severity::Error);
+        assert!(
+            s.text
+                .contains(" which hidden-vetting key it holds for you: "),
+            "{}",
+            s.text
+        );
     }
 
     #[tokio::test]
@@ -3137,7 +3176,7 @@ mod hidden {
     }
 
     #[tokio::test]
-    async fn an_enrolment_without_keys_is_said_and_left_filed() {
+    async fn an_enrolment_without_keys_is_said_and_unfiled() {
         let (mut rt, _h) = runtime().await;
         let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
         engine(&mut rt, persona);
@@ -3148,12 +3187,13 @@ mod hidden {
         assert_eq!(s.severity, Severity::Error);
         assert!(s.text.starts_with("Could not ask to enrol: "), "{}", s.text);
         assert!(
-            !logged(&rt.state, "Could not ask to enrol"),
-            "said, not logged"
+            logged(&rt.state, "Could not ask to enrol"),
+            "logged as well as said, so it outlives the status line"
         );
-        // Recorded as asked, and left so: the question expires on its window.
+        // The question is un-filed, as a failed send's is; the time asked
+        // stays, since the VTA holds the request it built either way.
         assert!(held(&rt).enrol_asked_at.is_some());
-        assert!(asked(&rt, QueryKind::PcsRoot));
+        assert!(!asked(&rt, QueryKind::PcsRoot));
         assert!(rt.save.is_pending());
     }
 
@@ -3184,7 +3224,7 @@ mod hidden {
     }
 
     #[tokio::test]
-    async fn a_draw_without_keys_is_said_and_left_in_flight() {
+    async fn a_draw_without_keys_is_said_and_not_left_in_flight() {
         let (mut rt, _h) = runtime().await;
         let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
         engine(&mut rt, persona);
@@ -3194,8 +3234,9 @@ mod hidden {
         let s = status(&rt);
         assert_eq!(s.severity, Severity::Error);
         assert!(s.text.starts_with("Could not draw tokens: "), "{}", s.text);
-        assert!(asked(&rt, QueryKind::PcsTokens));
-        assert_eq!(rt.config.private.vetting.draws_in_flight.len(), 1);
+        assert!(logged(&rt.state, "Could not draw tokens"));
+        assert!(!asked(&rt, QueryKind::PcsTokens));
+        assert!(rt.config.private.vetting.draws_in_flight.is_empty());
     }
 
     #[tokio::test]
@@ -3214,8 +3255,10 @@ mod hidden {
         )
         .await;
 
-        assert!(asked(&rt, QueryKind::PcsRoot));
-        assert!(asked(&rt, QueryKind::PcsTokens));
+        // Each failure undoes its own question; the second still ran.
+        assert!(!asked(&rt, QueryKind::PcsRoot));
+        assert!(!asked(&rt, QueryKind::PcsTokens));
+        assert!(held(&rt).enrol_asked_at.is_some(), "the enrolment ran");
         assert!(
             status(&rt).text.starts_with("Could not draw tokens: "),
             "the last word stands"

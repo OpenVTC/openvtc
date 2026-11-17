@@ -23,7 +23,7 @@ use openvtc_core::vetting::wire;
 
 use super::desk::session_id_of;
 use super::dispatch::{panel, show};
-use super::effect::{Abort, PcsCommit, Step, VettingEffect, run, run_local};
+use super::effect::{Abort, PcsCommit, Step, Undo, VettingEffect, run, run_local};
 use super::jobs::Sent;
 use super::pcs::plan_pcs_work;
 use super::send::{Claim, give_up, persona_did};
@@ -43,19 +43,25 @@ const CHALLENGE_FAILED: &str = "Could not ask for a submission challenge";
 /// on it: a launch asks for a fresh challenge of its own and waits for it
 /// (`join_flow::challenge_step`). The community issues one per applicant and spends it when the
 /// proof is read, so asking twice replaces rather than accumulates — which is why this is safe
-/// to call again on a retry.
-pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &str) {
-    let effect = plan_ask_for_challenge(ctx.state, ctx.config, application_id);
+/// to call again on a retry. `announce` is whether to say it is asking: not when the status
+/// already says why something asked for alongside it did not happen.
+pub(crate) async fn ask_for_challenge(
+    ctx: &mut ActionCtx<'_>,
+    application_id: &str,
+    announce: bool,
+) {
+    let effect = plan_ask_for_challenge(ctx.state, ctx.config, application_id, announce);
     run(ctx, effect).await;
 }
 
-/// Plan [`ask_for_challenge`]: file the question and say so; the effect signs and sends it as
-/// the client's own step, never refused for a busy domain. The question stays filed when the
-/// signing fails, and expires on its reply window.
+/// Plan [`ask_for_challenge`]: file the question and say so (when `announce`); the effect
+/// signs and sends it as the client's own step, never refused for a busy domain. A signing or
+/// send that fails un-files the question, as a send that fails off the loop does.
 pub(super) fn plan_ask_for_challenge(
     state: &mut State,
     config: &mut Config,
     application_id: &str,
+    announce: bool,
 ) -> VettingEffect {
     let Some(app) = config
         .private
@@ -82,12 +88,14 @@ pub(super) fn plan_ask_for_challenge(
         kind: QueryKind::PcsChallenge,
         sent_at: Utc::now(),
     });
-    show(
-        state,
-        Status::progress("Asking the community for a submission challenge…"),
-    );
+    if announce {
+        show(
+            state,
+            Status::progress("Asking the community for a submission challenge…"),
+        );
+    }
     let sent = Sent::Query {
-        document_id,
+        document_id: document_id.clone(),
         community: app.community.clone(),
         kind: QueryKind::PcsChallenge,
     };
@@ -97,7 +105,7 @@ pub(super) fn plan_ask_for_challenge(
         document,
         sent,
         Claim::Unheld,
-        Abort::say(CHALLENGE_FAILED),
+        Abort::undoing(CHALLENGE_FAILED, vec![Undo::ForgetQuery(document_id)]),
     )
 }
 
@@ -387,7 +395,8 @@ pub(super) fn plan_check_hidden_key(
 /// Plan "get tokens" (`d`): whatever the schedule owes, in order — enrol where not enrolled,
 /// then draw every window that has begun — and, per community, exactly what is happening or
 /// what blocks it and until when. Said from the book as it was before the pass, which is what
-/// the pass acts on, once the pass has run.
+/// the pass acts on, once the pass has run — unless the pass said a warning or an error, which
+/// stays on the status line ([`Step::Summary`]).
 pub(super) fn plan_draw_now(config: &mut Config, now: DateTime<Utc>) -> VettingEffect {
     // Asked by hand: a lost enrolment is worth one more ask — the community may now re-issue it
     // to the same identifier, and it bounds how many times it will.
@@ -408,7 +417,7 @@ pub(super) fn plan_draw_now(config: &mut Config, now: DateTime<Utc>) -> VettingE
     };
     VettingEffect(vec![
         Step::RefreshVetterSide,
-        Step::Status(Status::info(if words.is_empty() {
+        Step::Summary(Status::info(if words.is_empty() {
             "None of the communities you vet for proves vetting with PCS ZKP, so there are no \
              tokens to get — hand out tickets with t."
                 .to_string()
@@ -458,8 +467,10 @@ pub(super) async fn attest_hidden(
 }
 
 /// Plan [`attest_hidden`]: build the job, and hand it to the VTA with whatever else is owed
-/// there. `connected` is whether an admin VTA session is held. The list view and the progress
-/// word follow only a job that started; one that did not says so and leaves the request open.
+/// there. `connected` is whether an admin VTA session is held: without one nothing can be
+/// attested this way, and that is said first, apart from a busy VTA (R6.4). The list view and
+/// the progress word follow only a job that started; one that did not says so and leaves the
+/// request open.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn plan_attest_hidden(
     state: &mut State,
@@ -471,6 +482,10 @@ pub(super) fn plan_attest_hidden(
     attestation: Attestation,
     now: DateTime<Utc>,
 ) -> VettingEffect {
+    if !connected {
+        show(state, Status::error(ATTEST_UNCONNECTED));
+        return VettingEffect::none();
+    }
     let job = match config.private.vetting.hidden_attestation_job(
         request_id,
         vetter_did,
@@ -512,6 +527,10 @@ pub(super) fn plan_attest_hidden(
         ))),
     }])
 }
+
+/// What a hidden attestation says with no VTA session to make it.
+const ATTEST_UNCONNECTED: &str = "A hidden attestation is made by your VTA, and it is not \
+     connected — attest again once it is. Nothing was sent; the request stays open.";
 
 /// Whether a refusal to attest is a state the vetter waits out: no credential yet, or no token.
 fn is_wait(e: &openvtc_core::vetting::vetter::VetterError) -> bool {
@@ -599,7 +618,7 @@ mod tests {
             .clone();
 
         // Not a hidden application: nothing asked.
-        let effect = plan_ask_for_challenge(&mut state, &mut config, &id);
+        let effect = plan_ask_for_challenge(&mut state, &mut config, &id, true);
         assert!(effect.0.is_empty());
         assert!(config.private.vetting.queries.is_empty());
 
@@ -612,7 +631,7 @@ mod tests {
             .application_by_id_mut(&id)
             .unwrap()
             .hidden = Some(params);
-        let effect = plan_ask_for_challenge(&mut state, &mut config, &id);
+        let effect = plan_ask_for_challenge(&mut state, &mut config, &id, true);
 
         assert!(
             config
@@ -641,9 +660,20 @@ mod tests {
             panic!("signed, then sent unheld");
         };
         assert_eq!(*signer, persona);
-        // Nothing is undone: the question stays filed until its window.
-        assert_eq!(abort, &Abort::say(CHALLENGE_FAILED));
+        // A failure before it goes out un-files the question.
+        let filed = config.private.vetting.queries[0].document_id.clone();
+        assert_eq!(
+            abort,
+            &Abort::undoing(CHALLENGE_FAILED, vec![Undo::ForgetQuery(filed)])
+        );
         assert_eq!(same, abort);
+
+        // Asked quietly, it leaves the status line to what said why before it.
+        let refused = Status::warning("refused");
+        panel(&mut state).status_message = Some(refused.clone());
+        let effect = plan_ask_for_challenge(&mut state, &mut config, &id, false);
+        assert_eq!(effect.0.len(), 2, "still signed and sent");
+        assert_eq!(said(&mut state), refused);
     }
 
     #[test]
@@ -744,7 +774,7 @@ mod tests {
         let effect = plan_draw_now(&mut config, Utc::now());
 
         assert!(!config.private.vetting.hidden_vetter[0].lost_reasked);
-        let [Step::RefreshVetterSide, Step::Status(word)] = effect.0.as_slice() else {
+        let [Step::RefreshVetterSide, Step::Summary(word)] = effect.0.as_slice() else {
             panic!("the pass, then what it did");
         };
         assert_eq!(word.severity, Severity::Info);
@@ -764,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn attesting_on_a_request_not_yet_attestable_says_why_and_starts_nothing() {
+    fn attesting_on_a_request_not_yet_attestable_or_without_a_vta_says_why_and_starts_nothing() {
         use openvtc_core::vetting::vetter::{DeskEntry, DeskState};
         use vta_sdk::protocols::vetting::request;
         let mut config = test_config();
@@ -812,7 +842,7 @@ mod tests {
             "req-1",
             &entry,
             "did:key:zVetter",
-            attestation,
+            attestation.clone(),
             now,
         );
 
@@ -820,5 +850,21 @@ mod tests {
         let word = said(&mut state);
         assert_eq!(word.severity, Severity::Error);
         assert!(word.text.starts_with("Cannot attest: "), "{}", word.text);
+
+        // With no VTA session it says so, not that the VTA is busy.
+        let effect = plan_attest_hidden(
+            &mut state,
+            &mut config,
+            false,
+            "req-1",
+            &entry,
+            "did:key:zVetter",
+            attestation,
+            now,
+        );
+        assert!(effect.0.is_empty());
+        assert_eq!(said(&mut state), Status::error(ATTEST_UNCONNECTED));
+        assert!(ATTEST_UNCONNECTED.contains("not connected"));
+        assert!(!ATTEST_UNCONNECTED.contains("busy"));
     }
 }

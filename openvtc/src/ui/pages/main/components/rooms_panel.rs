@@ -73,6 +73,11 @@ impl Panel for RoomsPanel {
                 lines.push(Line::from(dim(
                     "    asking the community which rooms it has offered you…",
                 )));
+                // Why it is not asking yet (a busy lane), when it is not.
+                if let Some(status) = &view.status {
+                    lines.push(Line::from(""));
+                    push_status(&mut lines, status);
+                }
                 lines.push(Line::from(""));
                 keymap::footer(&mut lines, "    ", &bindings(view));
                 return lines;

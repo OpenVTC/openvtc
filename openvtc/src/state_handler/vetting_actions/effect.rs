@@ -13,7 +13,7 @@
 
 use std::collections::VecDeque;
 
-use crate::state_handler::main_page::status::Status;
+use crate::state_handler::main_page::status::{Severity, Status};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::vetting::registry::VetterProfileRecord;
@@ -92,6 +92,10 @@ pub(super) enum Step {
     MarkDirty,
     /// Show a status line.
     Status(Status),
+    /// Show a summary of what the steps before it did — unless one of them
+    /// left a warning or an error on the status line, which is the real
+    /// news and stays.
+    Summary(Status),
     /// Look up `persona`'s keys and sign `document` with its authentication
     /// key. The runner holds the signed document for the [`Step::Send`] that
     /// follows.
@@ -141,13 +145,15 @@ pub(super) enum Step {
     },
     // Hidden vetting
     /// Sign `document` as `persona` and send it as the client's own step
-    /// ([`Claim::Unheld`]). A failure is said as `"{failed}: {error}"` in the
-    /// status line, and the steps after it still run.
+    /// ([`Claim::Unheld`]). A failure applies `undo` in order, is said as
+    /// `"{failed}: {error}"` in the status line and the activity log, and the
+    /// steps after it still run.
     SendOrSay {
         persona: PersonaId,
         document: Box<Document>,
         sent: Box<Sent>,
         failed: &'static str,
+        undo: Vec<Undo>,
     },
     /// Hand an unsigned `message` from `from` to `to` to a background job,
     /// held as `claim` says ([`spawn_send`]).
@@ -200,13 +206,21 @@ impl PcsCommit {
 /// they changed — the page a save re-synced, or the domain a send claimed.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Followup {
-    /// An application was started and saved: select its row, then ask its
-    /// community what it requires.
-    Started { application_id: String },
+    /// An application was started and saved, saying `started`: select its
+    /// row, then ask its community what it requires.
+    Started {
+        application_id: String,
+        started: String,
+    },
     // desk and tickets
     /// A session's signed document is kept: close the form, save saying the
-    /// match code, and send it.
-    SessionKept { request_id: String, known: bool },
+    /// match code, and send it — a send that cannot start puts the request
+    /// back to `previous`.
+    SessionKept {
+        request_id: String,
+        known: bool,
+        previous: DeskSnapshot,
+    },
     /// Ask `community` for its manifest as `persona`, unless the questions
     /// before this one just did.
     AskManifest {
@@ -243,7 +257,15 @@ impl Abort {
         Self { what, undo }
     }
 
-    fn apply(self, state: &mut State, config: &mut Config, error: String) {
+    /// Undo, then say why. A plan whose own build fails after it changed the
+    /// book gives up through this too, so a failure takes back exactly what
+    /// was changed for the attempt, whichever step it fails at.
+    pub(super) fn apply(
+        self,
+        state: &mut State,
+        config: &mut Config,
+        error: impl std::fmt::Display,
+    ) {
         for undo in self.undo {
             undo.apply(state, config);
         }
@@ -278,6 +300,14 @@ pub(super) enum Undo {
     },
     /// The withdrawal of statement `0` was never sent.
     NotWithdrawn(String),
+    /// The draw `0` was never sent, so it is not in flight.
+    NotDrawing(String),
+    /// Application `0` keeps no VTA context: the one derived for a job that
+    /// never started is not kept.
+    NoContext(String),
+    /// The page has not asked community `0` what it requires: the question
+    /// never went, so the next session asks again.
+    NotRequested(String),
 }
 
 impl Undo {
@@ -320,6 +350,19 @@ impl Undo {
                     s.withdrawal = None;
                 }
             }
+            Undo::NotDrawing(document_id) => {
+                book.draws_in_flight.remove(&document_id);
+            }
+            Undo::NoContext(application_id) => {
+                if let Some(app) = book.application_by_id_mut(&application_id) {
+                    app.context_id = None;
+                }
+            }
+            Undo::NotRequested(community) => {
+                panel(state)
+                    .requirements_requested
+                    .retain(|c| *c != community);
+            }
         }
     }
 }
@@ -329,11 +372,13 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
     let mut steps: VecDeque<Step> = effect.0.into();
     let mut signed: Option<(PersonaId, Document)> = None;
     let mut keys: Option<CardKeys> = None;
+    let said_before = panel(ctx.state).status_message.clone();
     while let Some(step) = steps.pop_front() {
         match step {
             Step::Persist(message) => persist(ctx, message),
             Step::MarkDirty => ctx.save.mark_dirty(),
             Step::Status(message) => show(ctx.state, message),
+            Step::Summary(message) => summarise(ctx.state, said_before.as_ref(), message),
             Step::Sign {
                 persona,
                 mut document,
@@ -410,9 +455,16 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                 document,
                 sent,
                 failed,
+                undo,
             } => {
                 if let Err(e) = sign_and_send(ctx, persona, *document, *sent, Claim::Unheld).await {
-                    show(ctx.state, Status::error(format!("{failed}: {e}")));
+                    for undo in undo {
+                        undo.apply(ctx.state, ctx.config);
+                    }
+                    let message = format!("{failed}: {e}");
+                    tracing::warn!("{message}");
+                    ctx.state.main_page.log(message.clone());
+                    show(ctx.state, Status::error(message));
                 }
             }
             Step::SendMessage {
@@ -448,6 +500,17 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
     }
 }
 
+/// Show `summary`, unless the status line changed since `said_before` to a
+/// warning or an error ([`Step::Summary`]).
+fn summarise(state: &mut State, said_before: Option<&Status>, summary: Status) {
+    let now = panel(state).status_message.as_ref();
+    let warned = now != said_before
+        && now.is_some_and(|s| matches!(s.severity, Severity::Warning | Severity::Error));
+    if !warned {
+        show(state, summary);
+    }
+}
+
 /// Run an effect of local steps — [`Step::Persist`], [`Step::MarkDirty`],
 /// [`Step::Status`] — without awaiting, for a plan made inside a synchronous
 /// pass ([`hidden_vetting_tick`](super::hidden::hidden_vetting_tick)).
@@ -456,7 +519,7 @@ pub(super) fn run_local(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
         match step {
             Step::Persist(message) => persist(ctx, message),
             Step::MarkDirty => ctx.save.mark_dirty(),
-            Step::Status(message) => show(ctx.state, message),
+            Step::Status(message) | Step::Summary(message) => show(ctx.state, message),
             _ => debug_assert!(false, "a step that awaits, run without awaiting"),
         }
     }
@@ -467,8 +530,29 @@ mod tests {
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
     use crate::state_handler::main_page::content::DirectoryView;
-    use crate::state_handler::main_page::status::Severity;
     use openvtc_core::vetting::queries::{CommunityQuery, QueryKind};
+
+    /// A summary is said over what was there before and over progress, but
+    /// not over a warning or an error the steps before it left.
+    #[test]
+    fn a_summary_does_not_cover_a_warning_said_before_it() {
+        let mut state = State::default();
+        let summary = Status::info("summary");
+        let stale = Status::error("from an earlier action");
+
+        panel(&mut state).status_message = Some(stale.clone());
+        summarise(&mut state, Some(&stale), summary.clone());
+        assert_eq!(panel(&mut state).status_message, Some(summary.clone()));
+
+        panel(&mut state).status_message = Some(Status::progress("working"));
+        summarise(&mut state, None, summary.clone());
+        assert_eq!(panel(&mut state).status_message, Some(summary.clone()));
+
+        let failed = Status::error("could not ask");
+        panel(&mut state).status_message = Some(failed.clone());
+        summarise(&mut state, None, summary);
+        assert_eq!(panel(&mut state).status_message, Some(failed));
+    }
 
     /// Giving up undoes the plan's changes in order, then says why — in the
     /// status line and the activity log.
@@ -493,7 +577,7 @@ mod tests {
             "Could not search the directory",
             vec![Undo::ForgetQuery("q1".into()), Undo::DirectoryNotPending],
         )
-        .apply(&mut state, &mut config, "no keys".into());
+        .apply(&mut state, &mut config, "no keys");
 
         assert!(config.private.vetting.queries.is_empty());
         let VettingMode::Directory(view) = &panel(&mut state).mode else {

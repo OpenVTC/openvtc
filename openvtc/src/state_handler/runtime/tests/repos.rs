@@ -15,7 +15,7 @@ use crate::state_handler::actions::WorkspaceAction;
 use crate::state_handler::background_dispatch::{DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::main_page::repos::{
     ArmedChange, LinkFlow, LinkPhase, NewRepoForm, Pending, Purpose, ReposPhase, ReposScreen,
-    ReposView, Severity, WorkspaceChange,
+    ReposView, Severity, WorkspaceChange, WorkspaceForm,
 };
 use crate::state_handler::repos_actions;
 use openvtc_core::config::account::PersonaId;
@@ -452,7 +452,7 @@ async fn a_link_start_claims_then_shows_the_attempt() {
 
 /// A due poll is sent on the sweep — even while a change awaits its answer,
 /// polls having their own slot — and armed on the link once claimed. One that
-/// never left frees its slot and says nothing.
+/// never left frees its slot, says why once, and backs the next poll off.
 #[tokio::test]
 async fn a_due_link_poll_is_sent_on_the_sweep_beside_a_pending_change() {
     let (mut rt, _h) = runtime().await;
@@ -478,9 +478,17 @@ async fn a_due_link_poll_is_sent_on_the_sweep_beside_a_pending_change() {
     let outcome = git_ns_outcome(&mut rt).await;
     rt.on_dispatch_outcome(outcome).await;
     let v = view(&rt);
-    assert!(v.link.as_ref().unwrap().poll.is_none(), "retried next tick");
+    let link = v.link.as_ref().unwrap();
+    assert!(link.poll.is_none(), "retried once its interval passes");
+    assert_eq!(link.failures, 1);
+    assert!(link.poll_interval() > git_ns::LINK_POLL_INTERVAL);
     assert_eq!(v.pending.as_ref().map(|p| p.thid.as_str()), Some("grant-1"));
-    assert!(v.status.is_none());
+    let (severity, text) = status(&rt).expect("the failure is said");
+    assert_eq!(severity, Severity::Error);
+    assert!(
+        text.starts_with("couldn't check the link with the community: "),
+        "{text}"
+    );
 }
 
 /// A due poll on a busy lane is quiet and leaves the link unpolled.
@@ -500,16 +508,20 @@ async fn a_due_link_poll_on_a_busy_lane_is_quiet() {
     assert!(v.status.is_none());
 }
 
-/// A due poll whose key lookup fails says so, as an error on the status line.
+/// A due poll whose key lookup fails says so, as an error on the status line,
+/// once: the next sweep does not poll before the backed-off interval, and a
+/// poll that fails the same way again does not say it again.
 #[tokio::test]
-async fn a_due_link_poll_whose_key_lookup_fails_says_so() {
+async fn a_due_link_poll_whose_key_lookup_fails_says_so_once_and_backs_off() {
     let (mut rt, _h) = runtime().await;
     open_view(&mut rt, PersonaId::new(), true);
     view_mut(&mut rt).link = Some(waiting_link());
 
     rt.on_capabilities_sweep().await;
 
-    assert!(view(&rt).link.as_ref().unwrap().poll.is_none());
+    let link = view(&rt).link.clone().unwrap();
+    assert!(link.poll.is_none());
+    assert_eq!(link.failures, 1);
     assert_eq!(
         status(&rt),
         Some((
@@ -517,6 +529,22 @@ async fn a_due_link_poll_whose_key_lookup_fails_says_so() {
             "this persona has no messaging identity".into()
         ))
     );
+
+    // Not due again at once: the sweep does not retry it.
+    view_mut(&mut rt).status = None;
+    rt.on_capabilities_sweep().await;
+    assert_eq!(view(&rt).link.as_ref().unwrap().failures, 1);
+    assert!(status(&rt).is_none());
+
+    // Once due, it fails the same way: backed off further, not said again.
+    let interval = link.poll_interval();
+    view_mut(&mut rt).link.as_mut().unwrap().last_poll =
+        Some(Instant::now().checked_sub(interval).unwrap());
+    rt.on_capabilities_sweep().await;
+    let link = view(&rt).link.clone().unwrap();
+    assert_eq!(link.failures, 2);
+    assert!(link.poll_interval() > interval);
+    assert!(status(&rt).is_none(), "the same failure is said once");
 }
 
 /// A change unanswered past its window ends on the sweep, saying it may have
@@ -543,8 +571,8 @@ async fn an_unanswered_change_ends_on_the_sweep() {
 //
 // Set-up is the job pinned end to end: with the test config's keys held
 // locally (no VTA), it fails at once inside the job without touching git,
-// did-git-sign or the filesystem. Saving the settings form writes the
-// profile's settings file and is not driven here.
+// did-git-sign or the filesystem. Saving the settings form is a job too; its
+// write is unit-tested in `repos_workspace`.
 
 fn workspace(w: WorkspaceAction) -> Action {
     Action::Repos(Act::Workspace(w))
@@ -568,6 +596,33 @@ async fn a_workspace_job_while_one_runs_says_what_is_running() {
             "Still cloning acme/gadgets — please wait.".into()
         ))
     );
+}
+
+/// Saving the settings while a job runs is refused like any job: the job
+/// may be writing the same settings file.
+#[tokio::test]
+async fn saving_the_settings_while_a_job_runs_is_refused() {
+    let (mut rt, _h) = runtime().await;
+    open_view(&mut rt, PersonaId::new(), true);
+    view_mut(&mut rt).workspace.busy = Some("cloning acme/gadgets".into());
+    view_mut(&mut rt).workspace.form = Some(WorkspaceForm::Settings {
+        root: "/srv/code".into(),
+        protocol: None,
+        error: None,
+    });
+
+    rt.on_action(workspace(WorkspaceAction::SettingsSubmit))
+        .await;
+
+    assert!(!rt.in_flight.is_busy(DispatchDomain::GitWorkspace));
+    assert_eq!(
+        status(&rt),
+        Some((
+            Severity::Warning,
+            "Still cloning acme/gadgets — please wait.".into()
+        ))
+    );
+    assert!(view(&rt).workspace.form.is_some(), "the form stays");
 }
 
 /// A job refused for want of a target says so and claims nothing.

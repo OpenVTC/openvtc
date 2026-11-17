@@ -639,11 +639,40 @@ fn a_show_is_planned_with_the_detail_screen_as_the_commit() {
             intent: Intent::View
         }
     );
-    assert_eq!(send.commit, Some(Commit::Showing));
+    assert_eq!(
+        send.commit,
+        Some(Commit::Showing {
+            target: VTC.into(),
+            opening: None,
+        })
+    );
     assert_eq!(send.refusal, Some(super::Refusal::Busy));
     let v = view(&mut state);
     assert_eq!(v.screen, Screen::List);
     assert!(v.status.is_none());
+}
+
+/// Planning a show changes no target: a read refused on a busy lane leaves
+/// the one an earlier read set, and the commit sets it once under way.
+#[test]
+fn a_show_keeps_the_earlier_target_until_its_read_is_under_way() {
+    let mut state = with_listed();
+    view(&mut state).target = "did:key:zEarlierHolder".into();
+    view(&mut state).presenting = Some("did:key:zParty".into());
+    let config = crate::state_handler::dispatch_util::test_config();
+    let effect = plan(&mut state, &config, false, Act::Show);
+    let v = view(&mut state);
+    assert_eq!(v.target, "did:key:zEarlierHolder");
+    assert_eq!(v.presenting.as_deref(), Some("did:key:zParty"));
+
+    let Some(Step::Send(send)) = effect.steps.into_iter().last() else {
+        panic!("a send");
+    };
+    send.commit.unwrap().apply(view(&mut state));
+    let v = view(&mut state);
+    assert_eq!(v.target, VTC);
+    assert!(v.presenting.is_none());
+    assert_eq!(v.screen, Screen::Detail);
 }
 
 /// A ticket is planned as the election's read again, the flow committed only

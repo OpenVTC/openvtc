@@ -84,12 +84,18 @@ pub(super) fn plan_open_session(
         panel(state)
             .requirements_requested
             .push(entry.community.clone());
-        const WHAT: &str = "Could not ask the community";
+        // Marked asked only while the question can still go: a failure before
+        // it does un-marks it, so the next Enter asks again rather than opening
+        // the session without the requirements.
+        let abort = Abort::undoing(
+            "Could not ask the community",
+            vec![Undo::NotRequested(entry.community.clone())],
+        );
         let protocol = config.private.vetting.protocol_for(&entry.community);
         let document = match wire::manifest_request(&vetter_did, &entry.community, protocol) {
             Ok(d) => d,
             Err(e) => {
-                give_up(state, config, WHAT, e);
+                abort.apply(state, config, e);
                 return VettingEffect::none();
             }
         };
@@ -102,14 +108,7 @@ pub(super) fn plan_open_session(
         let sent = Sent::Manifest {
             community: entry.community.clone(),
         };
-        return VettingEffect::sign_and_send(
-            [],
-            entry.persona,
-            document,
-            sent,
-            Claim::Held,
-            Abort::say(WHAT),
-        );
+        return VettingEffect::sign_and_send([], entry.persona, document, sent, Claim::Held, abort);
     }
     if !claimable(state, busy) {
         return VettingEffect::none();
@@ -117,6 +116,7 @@ pub(super) fn plan_open_session(
     const OPEN: &str = "Could not open the session";
     let session_id = wire::new_id();
     let method: VettingMethod = VETTING_METHODS[method_index.min(VETTING_METHODS.len() - 1)];
+    let previous = DeskSnapshot(Box::new(entry.state.clone()));
     let body = match config.private.vetting.open_session(
         request_id,
         method,
@@ -131,6 +131,12 @@ pub(super) fn plan_open_session(
             return VettingEffect::none();
         }
     };
+    // From here the book holds the session: a failure before it goes out puts
+    // the request back where it stood.
+    let restore = vec![Undo::RestoreDesk {
+        request_id: request_id.to_string(),
+        previous: previous.clone(),
+    }];
     let document = match wire::document(
         VETTING_SESSION_TYPE,
         &vetter_did,
@@ -140,27 +146,27 @@ pub(super) fn plan_open_session(
     ) {
         Ok(d) => d,
         Err(e) => {
-            give_up(state, config, OPEN, e);
+            Abort::undoing(OPEN, restore).apply(state, config, e);
             return VettingEffect::none();
         }
     };
     // Signed, then kept in the desk exactly as it goes out, before the save:
     // the Vetting Statement that closes this session cites it by
-    // `taskDigestMultibase`, which `vetted/1` requires. Nothing here undoes
-    // the session the book opened.
+    // `taskDigestMultibase`, which `vetted/1` requires.
     VettingEffect(vec![
         Step::Sign {
             persona: entry.persona,
             document: Box::new(document),
-            abort: Abort::say(SEND_SESSION),
+            abort: Abort::undoing(SEND_SESSION, restore.clone()),
         },
         Step::KeepSession {
             request_id: request_id.to_string(),
-            abort: Abort::say(SEND_SESSION),
+            abort: Abort::undoing(SEND_SESSION, restore),
         },
         Step::Then(Followup::SessionKept {
             request_id: request_id.to_string(),
             known,
+            previous,
         }),
     ])
 }
@@ -187,12 +193,15 @@ pub(super) fn keep_session(
 }
 
 /// The session's signed document is kept: close the form, then save saying
-/// the match code, and send the document [`Step::Sign`] signed.
+/// the match code, and send the document [`Step::Sign`] signed. A send that
+/// cannot start puts the request back to `previous`, and the pending save
+/// writes it so.
 pub(super) fn plan_session_kept(
     state: &mut State,
     config: &Config,
     request_id: &str,
     known: bool,
+    previous: DeskSnapshot,
 ) -> VettingEffect {
     let code = config
         .private
@@ -215,7 +224,13 @@ pub(super) fn plan_session_kept(
                 request_id: request_id.to_string(),
             }),
             claim: Claim::Held,
-            abort: Abort::say(SEND_SESSION),
+            abort: Abort::undoing(
+                SEND_SESSION,
+                vec![Undo::RestoreDesk {
+                    request_id: request_id.to_string(),
+                    previous,
+                }],
+            ),
         },
     ])
 }
@@ -324,8 +339,9 @@ fn plan_ask_bindings(config: &mut Config, now: DateTime<Utc>) -> VettingEffect {
 }
 
 /// Ask `community` which key it bound `persona` to: mark the engine's check asked and file
-/// the question, then send it as the client's own. A failed send is said, and the question
-/// stays filed.
+/// the question, then send it as the client's own. A signing that fails un-files the question,
+/// as a send that fails off the loop does, and is said; the check keeps the time it was asked,
+/// so it is asked again only after [`BINDING_REASK`](openvtc_core::vetting::binding::BINDING_REASK).
 pub(super) fn plan_ask_binding(
     config: &Config,
     community: &str,
@@ -356,13 +372,14 @@ pub(super) fn plan_ask_binding(
             persona,
             document: Box::new(document),
             sent: Box::new(Sent::Query {
-                document_id,
+                document_id: document_id.clone(),
                 community: community.to_string(),
                 kind: QueryKind::PcsBinding,
             }),
             claim: Claim::Unheld,
             then: Asked::Binding {
                 community: community.to_string(),
+                document_id,
             },
         },
     ])
@@ -524,8 +541,12 @@ pub(super) enum Asked {
         community: String,
         now: DateTime<Utc>,
     },
-    /// The client's own binding question to `community`: a failure is said.
-    Binding { community: String },
+    /// The client's own binding question `document_id` to `community`: a
+    /// failure un-files it, and is said and logged.
+    Binding {
+        community: String,
+        document_id: String,
+    },
     /// A ticket's question about how its community vets: it waits on the
     /// answer, or is refused as unconfirmed.
     Ticket(PendingTicket),
@@ -561,13 +582,19 @@ impl Asked {
                     book.vetter_refresh_due = true;
                 }
             }
-            Asked::Binding { community } => show(
-                state,
-                Status::error(format!(
+            Asked::Binding {
+                community,
+                document_id,
+            } => {
+                config.private.vetting.forget_query(&document_id);
+                let message = format!(
                     "Could not ask {} which hidden-vetting key it holds for you: {error}",
                     community_display(config, &community)
-                )),
-            ),
+                );
+                tracing::warn!(community = %community, "{message}");
+                state.main_page.log(message.clone());
+                show(state, Status::error(message));
+            }
             Asked::Ticket(pending) => ticket_unsent(state, config, pending, error),
         }
     }
@@ -917,8 +944,12 @@ pub(super) fn plan_decline(
             return VettingEffect::none();
         }
     };
-    // A document that cannot be built leaves the request declined in the
-    // book, unsaved: nothing here puts it back.
+    // From here the book holds the request declined: a failure before the
+    // decline goes out puts it back where it stood.
+    let restore = vec![Undo::RestoreDesk {
+        request_id: request_id.to_string(),
+        previous: DeskSnapshot(Box::new(entry.state.clone())),
+    }];
     let document = match wire::document(
         VETTING_DECLINE_TYPE,
         &vetter_did,
@@ -928,7 +959,7 @@ pub(super) fn plan_decline(
     ) {
         Ok(d) => d,
         Err(e) => {
-            give_up(state, config, WHAT, e);
+            Abort::undoing(WHAT, restore).apply(state, config, e);
             return VettingEffect::none();
         }
     };
@@ -943,13 +974,7 @@ pub(super) fn plan_decline(
         document,
         sent,
         Claim::Held,
-        Abort::undoing(
-            "Could not send the decline",
-            vec![Undo::RestoreDesk {
-                request_id: request_id.to_string(),
-                previous: DeskSnapshot(Box::new(entry.state)),
-            }],
-        ),
+        Abort::undoing("Could not send the decline", restore),
     )
 }
 
@@ -996,8 +1021,9 @@ pub(super) fn plan_withdraw(
             return VettingEffect::none();
         }
     };
-    // A document that cannot be built leaves the withdrawal recorded as sent,
-    // unsaved: nothing here clears it.
+    // From here the book holds the withdrawal as sent: a failure before it
+    // goes out clears it.
+    let unwithdraw = vec![Undo::NotWithdrawn(statement_id.to_string())];
     let document = match wire::document(
         VETTING_REVOKE_STATEMENT_TYPE,
         &vetter_did,
@@ -1007,7 +1033,7 @@ pub(super) fn plan_withdraw(
     ) {
         Ok(d) => d,
         Err(e) => {
-            give_up(state, config, WHAT, e);
+            Abort::undoing(WHAT, unwithdraw).apply(state, config, e);
             return VettingEffect::none();
         }
     };
@@ -1021,10 +1047,7 @@ pub(super) fn plan_withdraw(
         document,
         sent,
         Claim::Held,
-        Abort::undoing(
-            "Could not send the withdrawal",
-            vec![Undo::NotWithdrawn(statement_id.to_string())],
-        ),
+        Abort::undoing("Could not send the withdrawal", unwithdraw),
     )
 }
 
@@ -1231,19 +1254,53 @@ mod tests {
             config.private.vetting.desk_entry(&id).unwrap().state,
             DeskState::Accepted
         ));
+        // A question that cannot go un-marks it as asked.
+        let Step::Send { abort, .. } = &effect.0[1] else {
+            panic!("the send");
+        };
+        assert_eq!(
+            abort,
+            &Abort::undoing(
+                "Could not ask the community",
+                vec![Undo::NotRequested(VTC.into())],
+            )
+        );
+        abort.clone().apply(&mut state, &mut config, "no keys");
+        assert!(panel(&mut state).requirements_requested.is_empty());
+        panel(&mut state).requirements_requested.push(VTC.into());
 
         let effect = plan_open_session(&mut state, &mut config, false, &id, 0);
-        assert!(matches!(
-            effect.0.as_slice(),
-            [
-                Step::Sign { .. },
-                Step::KeepSession { .. },
-                Step::Then(Followup::SessionKept { known: false, .. })
-            ]
-        ));
+        let [
+            Step::Sign { abort, .. },
+            Step::KeepSession { abort: kept, .. },
+            Step::Then(Followup::SessionKept {
+                known: false,
+                previous,
+                ..
+            }),
+        ] = effect.0.as_slice()
+        else {
+            panic!("sign, keep, then follow up");
+        };
         assert!(matches!(
             config.private.vetting.desk_entry(&id).unwrap().state,
             DeskState::Session { .. }
+        ));
+        // A session that cannot be signed, kept or sent puts the request back.
+        let restore = Abort::undoing(
+            SEND_SESSION,
+            vec![Undo::RestoreDesk {
+                request_id: id.clone(),
+                previous: DeskSnapshot(Box::new(DeskState::Accepted)),
+            }],
+        );
+        assert_eq!(abort, &restore);
+        assert_eq!(kept, &restore);
+        assert_eq!(previous, &DeskSnapshot(Box::new(DeskState::Accepted)));
+        restore.apply(&mut state, &mut config, "no keys");
+        assert!(matches!(
+            config.private.vetting.desk_entry(&id).unwrap().state,
+            DeskState::Accepted
         ));
     }
 
@@ -1304,11 +1361,18 @@ mod tests {
             &Abort::undoing(
                 "Could not send the decline",
                 vec![Undo::RestoreDesk {
-                    request_id: id,
+                    request_id: id.clone(),
                     previous: DeskSnapshot(Box::new(DeskState::Accepted)),
                 }],
             )
         );
+        // The same undo a document that cannot be built applies: the request
+        // stands where it stood.
+        abort.clone().apply(&mut state, &mut config, "no keys");
+        assert!(matches!(
+            config.private.vetting.desk_entry(&id).unwrap().state,
+            DeskState::Accepted
+        ));
     }
 
     /// A decline note over the limit is refused before anything else.

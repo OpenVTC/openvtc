@@ -214,8 +214,8 @@ struct Send {
     purpose: Purpose,
     /// Applied once the request is claimed and the view armed.
     commit: Option<Commit>,
-    /// Shown when it was not sent: after the reason, when the key lookup or
-    /// the document failed, or alone on a busy lane.
+    /// Shown when its lane was busy. A key lookup or document that failed
+    /// shows its own reason instead.
     refusal: Option<Refusal>,
 }
 
@@ -247,14 +247,15 @@ impl Commit {
     }
 }
 
-/// What the view says when a step did not start.
+/// What the view says when a step did not start because its lane was busy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
-    /// The acceptance did not start: its lane is busy — said too when its key
-    /// lookup or document failed, over that reason.
-    AcceptBusy,
+    /// The acceptance did not start.
+    Accept,
     /// The VTA was not asked which rooms it holds; the record still refreshes.
-    CustodyBusy,
+    Custody,
+    /// The record was not read again.
+    Record,
 }
 
 impl Refusal {
@@ -263,8 +264,15 @@ impl Refusal {
             return;
         };
         match self {
-            Refusal::AcceptBusy => view.note(Severity::Warning, InFlight::busy_message(SEND)),
-            Refusal::CustodyBusy => {
+            Refusal::Accept => view.note(Severity::Warning, InFlight::busy_message(SEND)),
+            Refusal::Record => view.note(
+                Severity::Warning,
+                format!(
+                    "{} The rooms were not read again — press r once it finishes.",
+                    InFlight::busy_message(SEND)
+                ),
+            ),
+            Refusal::Custody => {
                 view.held_error
                     .get_or_insert_with(|| "your VTA is busy".into());
             }
@@ -334,7 +342,7 @@ fn plan_refresh(state: &mut State, has_vta: bool) -> Vec<Step> {
                 member: view.me.clone(),
             },
             commit: None,
-            refusal: Some(Refusal::CustodyBusy),
+            refusal: Some(Refusal::Custody),
         });
     } else {
         view.held = None;
@@ -346,7 +354,7 @@ fn plan_refresh(state: &mut State, has_vta: bool) -> Vec<Step> {
         Request::Memberships { cursor: None },
         Purpose::Memberships,
         None,
-        None,
+        Some(Refusal::Record),
     ));
     steps
 }
@@ -380,6 +388,10 @@ fn open(state: &mut State, config: &Config, index: usize) {
         .unwrap_or_default();
     state.main_page.content_panel.rooms.view = Some(RoomsView::new(vtc, persona, me, name));
 }
+
+/// An acceptance pressed while the view still waits on an earlier request.
+const ACCEPT_WAITING: &str =
+    "A request to this community is still waiting — try again when it answers.";
 
 /// `⏎` on a room: accept its offer, or finish an acceptance begun elsewhere.
 fn plan_accept(state: &mut State, has_vta: bool) -> RoomsEffect {
@@ -451,17 +463,10 @@ fn plan_accept(state: &mut State, has_vta: bool) -> RoomsEffect {
         community_rooms::display_label(&row.room)
     );
     if view.pending.is_some() {
-        // The view still waits on an earlier request, so the offers read is
-        // not sent; the acceptance is set regardless and said to be waiting.
-        view.accept = Some(AcceptFlow {
-            room,
-            step: AcceptStep::Collecting,
-            offer: None,
-        });
-        view.note(
-            Severity::Warning,
-            "Still waiting for the community's answer.",
-        );
+        // The view still waits on an earlier request: one request to a
+        // community at a time, so the press is refused and nothing is set,
+        // leaving it to be pressed again, as Elections refuses.
+        view.note(Severity::Warning, ACCEPT_WAITING);
         return RoomsEffect::done();
     }
     // Not sent (lane busy): the press is dropped with the busy message, to be
@@ -471,7 +476,7 @@ fn plan_accept(state: &mut State, has_vta: bool) -> RoomsEffect {
         Request::Offers { cursor: None },
         Purpose::Offers { room: room.clone() },
         Some(Commit::Accepting { room, progress }),
-        Some(Refusal::AcceptBusy),
+        Some(Refusal::Accept),
     ))
 }
 
@@ -568,6 +573,16 @@ fn plan_next(state: &mut State, has_vta: bool, send_busy: bool, next: Next) -> R
         )),
         // The renewals stay in the view until the VTA's lane takes them.
         Next::Renew if view.renewals.is_empty() => RoomsEffect::done(),
+        // The VTA went away since they were collected: nothing can store them
+        // now, and the first read once one is connected collects them again.
+        Next::Renew if !has_vta => {
+            tracing::debug!(
+                renewals = view.renewals.len(),
+                "rooms renewals dropped: no VTA is connected to store them"
+            );
+            view.renewals.clear();
+            RoomsEffect::done()
+        }
         Next::Renew => RoomsEffect::one(Step::Ask {
             ask: VtaAsk::Renew {
                 renewals: view.renewals.clone(),
@@ -630,7 +645,11 @@ async fn run(lp: &mut Loop<'_>, effect: RoomsEffect) -> bool {
 
 /// Send a planned request: look up the key, build, claim and arm
 /// ([`community_request::send`]), then commit — or say why not. Returns
-/// whether it was dispatched; a failure the view shows is not.
+/// whether it was dispatched or failed in a way the view now shows; `false`
+/// only when nothing happened (a busy lane, a view still waiting). A shown
+/// failure counts as taken, so a [`Next`] whose key lookup fails is not
+/// retried every tick: the reason stays until the person acts again, as in
+/// Elections.
 async fn run_send(lp: &mut Loop<'_>, send: Send) -> bool {
     let Send {
         to,
@@ -640,11 +659,6 @@ async fn run_send(lp: &mut Loop<'_>, send: Send) -> bool {
         commit,
         refusal,
     } = send;
-    let refuse = |state: &mut State| {
-        if let Some(refusal) = refusal {
-            refusal.show(state);
-        }
-    };
     match community_request::send::<Rooms>(lp, to, persona, request, purpose).await {
         Sent::NoView => false,
         Sent::Waiting => {
@@ -656,17 +670,20 @@ async fn run_send(lp: &mut Loop<'_>, send: Send) -> bool {
             }
             false
         }
+        // The reason stands alone: the lane was never reached, so it is not
+        // said to be busy.
         Sent::Failed(purpose, why) => {
             community_request::fail::<Rooms>(lp.state, &purpose, why);
-            refuse(lp.state);
-            false
+            true
         }
         Sent::Unthreaded(purpose) => {
             community_request::fail::<Rooms>(lp.state, &purpose, UNTHREADED.into());
             true
         }
         Sent::Busy => {
-            refuse(lp.state);
+            if let Some(refusal) = refusal {
+                refusal.show(lp.state);
+            }
             false
         }
         Sent::Dispatched => {
@@ -1397,27 +1414,24 @@ mod tests {
                 progress: "Accepting Board pack… collecting the offer".into(),
             })
         );
-        assert_eq!(send.refusal, Some(Refusal::AcceptBusy));
+        assert_eq!(send.refusal, Some(Refusal::Accept));
         let view = view_mut(&mut state).unwrap();
         assert!(view.accept.is_none());
         assert!(view.status.is_none());
     }
 
-    /// An acceptance while an earlier request is unanswered sends nothing, and
-    /// is left set saying it waits.
+    /// An acceptance while an earlier request is unanswered sends nothing,
+    /// sets nothing and says to try again.
     #[test]
-    fn an_accept_while_waiting_is_planned_with_nothing_to_send() {
+    fn an_accept_while_waiting_is_refused_with_nothing_set() {
         let mut state = with_offered_room();
         arm(&mut state, Purpose::Memberships);
         let config = crate::state_handler::dispatch_util::test_config();
         let effect = plan(&mut state, &config, true, Act::Accept);
         assert!(effect.steps.is_empty());
         let view = view_mut(&mut state).unwrap();
-        assert!(view.accept.is_some());
-        assert_eq!(
-            view.status.as_ref().unwrap().text,
-            "Still waiting for the community's answer."
-        );
+        assert!(view.accept.is_none());
+        assert_eq!(view.status.as_ref().unwrap().text, ACCEPT_WAITING);
     }
 
     /// Without a VTA a refresh says why the custody is not shown and reads only
@@ -1445,7 +1459,7 @@ mod tests {
             Some(Step::Ask {
                 ask: VtaAsk::Held { .. },
                 commit: None,
-                refusal: Some(Refusal::CustodyBusy),
+                refusal: Some(Refusal::Custody),
             })
         ));
         assert_eq!(the_send(&effect).purpose, Purpose::Memberships);
