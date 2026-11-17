@@ -343,8 +343,13 @@ struct Send {
 /// A view change made only once its request or question is under way.
 #[derive(Debug, PartialEq, Eq)]
 enum Commit {
-    /// The detail screen, reading the election.
-    Showing,
+    /// The detail screen, reading the election held by `target` — opened
+    /// from `opening` when it came from a notification. The earlier target,
+    /// and what was shown, are replaced only now.
+    Showing {
+        target: String,
+        opening: Option<Box<NotifiedElection>>,
+    },
     /// A ticket or a vote begins by reading the election again.
     Reading(Flow),
     /// The held notifications were asked for.
@@ -354,7 +359,11 @@ enum Commit {
 impl Commit {
     fn apply(self, view: &mut ElectionsView) {
         match self {
-            Commit::Showing => {
+            Commit::Showing { target, opening } => {
+                view.reset_target();
+                view.target = target;
+                view.opening = opening.map(|n| *n);
+                view.shown = None;
                 view.screen = Screen::Detail;
                 view.note(Severity::Progress, "Reading the election…");
             }
@@ -549,12 +558,10 @@ fn plan_show(state: &mut State) -> ElectionsEffect {
     if view.screen != Screen::List || view.pending.is_some() {
         return ElectionsEffect::done();
     }
-    let election = match view.selected_row() {
-        Some(Row::Listed(e)) => {
-            let election = e.election_id.to_string();
-            view.reset_target();
-            election
-        }
+    // What the read changes is its commit, applied once it is under way: a
+    // busy lane leaves the earlier target as it was.
+    let (election, target, opening) = match view.selected_row() {
+        Some(Row::Listed(e)) => (e.election_id.to_string(), view.vtc_did.clone(), None),
         Some(Row::Notified(n)) => {
             let n = n.clone();
             if !n.opens_with_a_served_version() {
@@ -565,32 +572,28 @@ fn plan_show(state: &mut State) -> ElectionsEffect {
                 );
                 return ElectionsEffect::done();
             }
-            let election = n.election_id.clone();
             // Read without presenting anything first: an election the member can already see
             // shows the community nothing (VTI-VOT-016).
-            view.reset_target();
-            view.target = n.held_by.clone();
-            view.opening = Some(n);
-            election
+            (n.election_id.clone(), n.held_by.clone(), Some(Box::new(n)))
         }
         None => return ElectionsEffect::done(),
     };
-    view.shown = None;
     view.status = None;
     // Not sent (lane busy): the list stays, saying so.
     ElectionsEffect {
-        steps: vec![request(
-            view,
-            Request::Show {
+        steps: vec![Step::Send(Box::new(Send {
+            to: target.clone(),
+            persona: view.persona,
+            request: Outgoing::Build(Request::Show {
                 election_id: election.clone(),
-            },
-            Purpose::Show {
+            }),
+            purpose: Purpose::Show {
                 election,
                 intent: Intent::View,
             },
-            Some(Commit::Showing),
-            Some(Refusal::Busy),
-        )],
+            commit: Some(Commit::Showing { target, opening }),
+            refusal: Some(Refusal::Busy),
+        }))],
         taken: Taken::Yes,
     }
 }

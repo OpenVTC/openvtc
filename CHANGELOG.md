@@ -296,6 +296,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The step handing them to the VTA
   was kept and retried on every tick while no VTA was connected. It is now dropped; the
   first read once a VTA is connected collects the renewals again.
+- **Elections: opening an election on a busy lane changes nothing but the status**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The refused press still reset
+  which community the view reads from and the membership it presented. Those now change
+  only once the read is under way.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard
