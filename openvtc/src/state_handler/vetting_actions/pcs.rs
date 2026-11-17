@@ -301,7 +301,10 @@ pub(super) fn plan_pcs_answer(
             }
             // Anything that arrived while the job ran goes on the next sweep.
             book.pcs_due = !book.pcs_inbox.is_empty();
-            state.main_page.sync_from_config(config);
+            state.main_page.sync_panels(
+                config,
+                crate::state_handler::main_page::Panels::FROM_VETTING_BOOK,
+            );
             VettingEffect(vec![Step::MarkDirty])
         }
     }

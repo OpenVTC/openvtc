@@ -497,7 +497,10 @@ impl RelationshipOutcome {
                             if outcome == Some(false) {
                                 // R11: coalesced save (was inline `save_config`).
                                 save.mark_dirty();
-                                state.main_page.sync_from_config(config);
+                                state.main_page.sync_panels(
+                                    config,
+                                    crate::state_handler::main_page::Panels::FROM_RELATIONSHIPS,
+                                );
                             }
                             return;
                         }
@@ -539,7 +542,9 @@ impl RelationshipOutcome {
                             &mut state.main_page,
                             config,
                             save,
-                            dispatch_util::Persist::SaveAndSync,
+                            dispatch_util::Persist::SaveAndSync(
+                                crate::state_handler::main_page::Panels::FROM_RELATIONSHIPS,
+                            ),
                             status,
                             format!("Request sent to {display_name}"),
                             dispatch_util::SyncLog::Detailed {
@@ -609,7 +614,9 @@ impl RelationshipOutcome {
                         &mut state.main_page,
                         config,
                         save,
-                        dispatch_util::Persist::SaveAndSync,
+                        dispatch_util::Persist::SaveAndSync(
+                            crate::state_handler::main_page::Panels::FROM_RELATIONSHIPS,
+                        ),
                         status,
                         "Ping sent",
                         dispatch_util::SyncLog::Detailed {
@@ -670,7 +677,9 @@ impl RelationshipOutcome {
                         &mut state.main_page,
                         config,
                         save,
-                        dispatch_util::Persist::SaveAndSync,
+                        dispatch_util::Persist::SaveAndSync(
+                            crate::state_handler::main_page::Panels::FROM_RELATIONSHIPS,
+                        ),
                         status,
                         format!("VRC requested from {display_name}"),
                         dispatch_util::SyncLog::Detailed {
@@ -723,7 +732,9 @@ impl RelationshipOutcome {
                     &mut state.main_page,
                     config,
                     save,
-                    dispatch_util::Persist::SaveAndSync,
+                    dispatch_util::Persist::SaveAndSync(
+                        crate::state_handler::main_page::Panels::FROM_RELATIONSHIPS,
+                    ),
                     status,
                     "Relationship removed",
                     dispatch_util::SyncLog::Plain("Relationship removed".to_string()),
@@ -1232,7 +1243,10 @@ fn handle_edit_alias(
 
     // R11: coalesced save (was inline `save_config`).
     save.mark_dirty();
-    state.main_page.sync_from_config(config);
+    state.main_page.sync_panels(
+        config,
+        crate::state_handler::main_page::Panels::FROM_RELATIONSHIPS,
+    );
     let index = state
         .main_page
         .content_panel

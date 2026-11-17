@@ -393,9 +393,9 @@ impl VettingOutcome {
             config,
             save,
             if persist {
-                Persist::SaveAndSync
+                Persist::SaveAndSync(crate::state_handler::main_page::Panels::FROM_VETTING_BOOK)
             } else {
-                Persist::SyncOnly
+                Persist::SyncOnly(crate::state_handler::main_page::Panels::FROM_VETTING_BOOK)
             },
             |mp| &mut mp.content_panel.vetting.status_message,
             message.clone(),

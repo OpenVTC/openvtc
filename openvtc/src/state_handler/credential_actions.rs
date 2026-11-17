@@ -93,7 +93,9 @@ impl VrcRequestOutcome {
                     &mut state.main_page,
                     config,
                     save,
-                    dispatch_util::Persist::SaveAndSync,
+                    dispatch_util::Persist::SaveAndSync(
+                        crate::state_handler::main_page::Panels::FROM_RELATIONSHIPS,
+                    ),
                     |mp| &mut mp.content_panel.credentials.status_message,
                     format!("VRC request sent to {display_name}"),
                     dispatch_util::SyncLog::Plain(format!("VRC request sent to {display_name}")),
@@ -246,7 +248,9 @@ fn handle_remove(
         &mut state.main_page,
         config,
         save,
-        dispatch_util::Persist::SaveAndSync,
+        dispatch_util::Persist::SaveAndSync(
+            crate::state_handler::main_page::Panels::FROM_RELATIONSHIPS,
+        ),
         |mp| &mut mp.content_panel.credentials.status_message,
         "VRC removed",
         dispatch_util::SyncLog::Plain("VRC removed".to_string()),

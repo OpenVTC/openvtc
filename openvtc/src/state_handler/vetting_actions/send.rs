@@ -81,7 +81,10 @@ pub(super) fn give_up(
 ) {
     let message = format!("{what}: {error}");
     state.main_page.log(message.clone());
-    state.main_page.sync_from_config(config);
+    state.main_page.sync_panels(
+        config,
+        crate::state_handler::main_page::Panels::FROM_VETTING_BOOK,
+    );
     show(state, Status::error(message));
 }
 

@@ -7,9 +7,8 @@
 //! (`plan_*`, [`hidden_vetting_tick`]'s plan, [`ensure_hidden_vetter`]) that
 //! returns a [`VettingEffect`]; the sends are the client's own
 //! ([`Claim::Unheld`]), and the work for the VTA goes through
-//! [`super::pcs`]. [`ask_for_challenge`], [`hidden_vetting_tick`] and
-//! [`attest_hidden`] keep the signatures their loop-side callers use, and plan
-//! then run.
+//! [`super::pcs`]. [`hidden_vetting_tick`] keeps the signature its loop-side
+//! caller uses, and plans then runs.
 
 use crate::state_handler::main_page::status::Status;
 use chrono::{DateTime, Utc};
@@ -23,7 +22,7 @@ use openvtc_core::vetting::wire;
 
 use super::desk::session_id_of;
 use super::dispatch::{panel, show};
-use super::effect::{Abort, PcsCommit, Step, Undo, VettingEffect, run, run_local};
+use super::effect::{Abort, PcsCommit, Step, Undo, VettingEffect, run_local};
 use super::jobs::Sent;
 use super::pcs::plan_pcs_work;
 use super::send::{Claim, give_up, persona_did};
@@ -45,18 +44,10 @@ const CHALLENGE_FAILED: &str = "Could not ask for a submission challenge";
 /// proof is read, so asking twice replaces rather than accumulates — which is why this is safe
 /// to call again on a retry. `announce` is whether to say it is asking: not when the status
 /// already says why something asked for alongside it did not happen.
-pub(crate) async fn ask_for_challenge(
-    ctx: &mut ActionCtx<'_>,
-    application_id: &str,
-    announce: bool,
-) {
-    let effect = plan_ask_for_challenge(ctx.state, ctx.config, application_id, announce);
-    run(ctx, effect).await;
-}
-
-/// Plan [`ask_for_challenge`]: file the question and say so (when `announce`); the effect
-/// signs and sends it as the client's own step, never refused for a busy domain. A signing or
-/// send that fails un-files the question, as a send that fails off the loop does.
+///
+/// The plan files the question and says so (when `announce`); the effect signs and sends it as
+/// the client's own step, never refused for a busy domain. A signing or send that fails
+/// un-files the question, as a send that fails off the loop does.
 pub(super) fn plan_ask_for_challenge(
     state: &mut State,
     config: &mut Config,
@@ -221,7 +212,10 @@ pub(super) fn plan_hidden_vetting_tick(
     }
     if changed {
         steps.push(Step::MarkDirty);
-        state.main_page.sync_from_config(config);
+        state.main_page.sync_panels(
+            config,
+            crate::state_handler::main_page::Panels::FROM_VETTING_BOOK,
+        );
     }
     let Some(did) = persona_did(config, held.persona) else {
         return VettingEffect(steps);
@@ -440,34 +434,12 @@ pub(super) fn plan_hidden_view_submit(state: &mut State) -> VettingEffect {
 
 /// Attest the hidden way: no statement, no signature, nothing that names this vetter.
 ///
-/// Split from [`attest`](crate::state_handler::vetting_actions::desk::attest) rather than branched inside it because the two paths diverge at every
-/// step after the draft — what is produced, what is recorded, what is sent, and what the operator
+/// Split from [`plan_attest`](crate::state_handler::vetting_actions::desk::plan_attest) rather
+/// than branched inside it because the two paths diverge at every step after the draft — what is produced, what is recorded, what is sent, and what the operator
 /// is told. The refusals an operator can act on are surfaced in their own words: a vetter with no
 /// tokens left has not failed, it is at capacity until the next drip.
-pub(super) async fn attest_hidden(
-    ctx: &mut ActionCtx<'_>,
-    request_id: &str,
-    entry: &openvtc_core::vetting::vetter::DeskEntry,
-    vetter_did: &str,
-    attestation: Attestation,
-    now: DateTime<Utc>,
-) {
-    let connected = ctx.admin_vta.is_some();
-    let effect = plan_attest_hidden(
-        ctx.state,
-        ctx.config,
-        connected,
-        request_id,
-        entry,
-        vetter_did,
-        attestation,
-        now,
-    );
-    run(ctx, effect).await;
-}
-
-/// Plan [`attest_hidden`]: build the job, and hand it to the VTA with whatever else is owed
-/// there. `connected` is whether an admin VTA session is held: without one nothing can be
+///
+/// The plan builds the job, and hands it to the VTA with whatever else is owed there. `connected` is whether an admin VTA session is held: without one nothing can be
 /// attested this way, and that is said first, apart from a busy VTA (R6.4). The list view and
 /// the progress word follow only a job that started; one that did not says so and leaves the
 /// request open.

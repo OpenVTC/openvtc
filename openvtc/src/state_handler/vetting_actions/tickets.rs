@@ -332,7 +332,7 @@ fn mint_ticket(
         &mut state.main_page,
         config,
         save,
-        Persist::SaveAndSync,
+        Persist::SaveAndSync(crate::state_handler::main_page::Panels::FROM_VETTING_BOOK),
         |mp| &mut mp.content_panel.vetting.status_message,
         message.clone(),
         SyncLog::Plain(message),

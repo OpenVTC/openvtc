@@ -2,8 +2,9 @@
 //! `Config`.
 //!
 //! `sync_from_config` maps the account (personas, memberships, credentials,
-//! relationships, vetting, tasks) to the display rows each panel shows; it
-//! reads `Config` and never writes it, and does no I/O. The activity log, the
+//! relationships, vetting, tasks) to the display rows each panel shows, and
+//! `sync_panels` does the same for a set of panels ([`Panels`]); both read
+//! `Config` and never write it, and do no I/O. The activity log, the
 //! menu badges and the display helpers (`shorten_did`, `sanitize_display`)
 //! live here too. Per-panel view state is in [`content`] and the feature
 //! submodules.
@@ -113,7 +114,7 @@ pub struct MainPageState {
 }
 
 /// The post-quantum flag of every VRC row, by credential id, kept from one
-/// [`MainPageState::sync_from_config`] to the next.
+/// sync of the credentials panel ([`Panels::CREDENTIALS`]) to the next.
 ///
 /// Answering it for a VRC means serialising the credential, and the sync runs on
 /// every config mutation — once per inbound message in a redelivery burst. A VRC's
@@ -242,6 +243,74 @@ impl MainPageState {
     }
 }
 
+/// A set of main-page panels whose display state is rebuilt from `Config`
+/// ([`MainPageState::sync_panels`]).
+///
+/// The `FROM_*` sets name the panels that read one part of `Config`, so a
+/// caller says what it changed rather than listing panels. Nothing records
+/// which panels are out of date: a caller syncs every panel that reads what it
+/// changed, at the change, and [`Panels::ALL`] where it cannot say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Panels(u16);
+
+impl Panels {
+    /// The top bar: the working community and the persona it is shown as.
+    pub const HEADER: Self = Self(1);
+    /// The Vetting page.
+    pub const VETTING: Self = Self(1 << 1);
+    /// The inbox's tasks.
+    pub const INBOX: Self = Self(1 << 2);
+    /// The relationships, with their VRCs and witnessings.
+    pub const RELATIONSHIPS: Self = Self(1 << 3);
+    /// The credentials: VRCs, membership credentials and vetting statements.
+    pub const CREDENTIALS: Self = Self(1 << 4);
+    /// The settings panel.
+    pub const SETTINGS: Self = Self(1 << 5);
+    /// The VTA panel.
+    pub const VTA: Self = Self(1 << 6);
+    /// The persona pane: personas, memberships and the agent credential.
+    pub const IDENTITY: Self = Self(1 << 7);
+    /// The Communities overview, with the applications still joining.
+    pub const COMMUNITIES: Self = Self(1 << 8);
+    /// Every panel.
+    pub const ALL: Self = Self((1 << 9) - 1);
+
+    /// What reads the inbox's tasks (`private.tasks`).
+    pub const FROM_TASKS: Self = Self::INBOX;
+    /// What reads the relationships, contacts, VRCs, witnessings and key
+    /// records: the inbox (an outbound request names our DID in it), the
+    /// relationships, the credentials (a VRC is scoped by its relationship),
+    /// and the VTA panel (its key counts and R-DIDs).
+    pub const FROM_RELATIONSHIPS: Self =
+        Self(Self::INBOX.0 | Self::RELATIONSHIPS.0 | Self::CREDENTIALS.0 | Self::VTA.0);
+    /// What reads the vetting book, and the tasks a vetting outcome clears:
+    /// the Vetting page, the Communities overview (branding, PCS ZKP, the
+    /// applications still joining), the credentials (vetting statements), and
+    /// the inbox.
+    pub const FROM_VETTING_BOOK: Self =
+        Self(Self::VETTING.0 | Self::COMMUNITIES.0 | Self::CREDENTIALS.0 | Self::INBOX.0);
+    /// What reads a membership's favourite or archived mark: the Communities
+    /// overview, and the header, which names the first Active community in
+    /// display order.
+    pub const FROM_DISPLAY_ORDER: Self = Self(Self::COMMUNITIES.0 | Self::HEADER.0);
+    /// What reads the friendly name: the header and the settings panel.
+    pub const FROM_FRIENDLY_NAME: Self = Self(Self::HEADER.0 | Self::SETTINGS.0);
+
+    /// Whether every panel in `other` is in this set.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for Panels {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
 /// What each menu item has waiting for the user, for its badge (#584).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MenuBadges {
@@ -295,23 +364,62 @@ where
 }
 
 impl MainPageState {
-    /// Rebuilds all display state from the current Config.
+    /// Rebuilds every panel's display state from the current Config.
     ///
-    /// Called after Config is loaded at startup and after every Config mutation
-    /// (message processing, user actions, etc.).
+    /// For startup, a load, and any change whose reach is global: the working
+    /// persona, the account's personas or memberships, or the agent-name
+    /// cache, each of which every panel reads. A change to one part of
+    /// `Config` syncs only the panels that read it ([`Self::sync_panels`]).
     pub fn sync_from_config(&mut self, config: &Config) {
-        // Update header config
-        self.config = MainMenuConfigState::from(config);
+        self.sync_panels(config, Panels::ALL);
+    }
 
-        crate::state_handler::vetting_actions::sync(&mut self.content_panel.vetting, config);
+    /// Rebuilds the display state of `panels` from the current Config, and
+    /// leaves every other panel as it is.
+    ///
+    /// Each panel's rebuild reads `Config` and that panel's own state only, so
+    /// syncing a set of panels gives each exactly what [`Self::sync_from_config`]
+    /// gives it. A caller names every panel that reads what it changed — the
+    /// `Panels::FROM_*` sets name them by what changed — and syncs
+    /// [`Panels::ALL`] when it cannot say.
+    pub fn sync_panels(&mut self, config: &Config, panels: Panels) {
+        if panels.contains(Panels::HEADER) {
+            self.config = MainMenuConfigState::from(config);
+        }
+        if panels.contains(Panels::VETTING) {
+            crate::state_handler::vetting_actions::sync(&mut self.content_panel.vetting, config);
+        }
+        if panels.contains(Panels::INBOX) {
+            self.sync_inbox(config);
+        }
+        if panels.contains(Panels::RELATIONSHIPS) {
+            self.sync_relationships(config);
+        }
+        if panels.contains(Panels::CREDENTIALS) {
+            self.sync_credentials(config);
+        }
+        if panels.contains(Panels::SETTINGS) {
+            self.sync_settings(config);
+        }
+        if panels.contains(Panels::VTA) {
+            self.sync_vta(config);
+        }
+        if panels.contains(Panels::IDENTITY) {
+            self.sync_identity(config);
+        }
+        if panels.contains(Panels::COMMUNITIES) {
+            self.sync_communities(config);
+        }
+    }
 
+    /// The inbox's tasks, scoped to the working community's persona.
+    fn sync_inbox(&mut self, config: &Config) {
         // The working community's persona scopes the relationship/inbox/VRC
         // panels (D10 / R-C-6): only items owned by it (plus untagged legacy
         // items in a single-persona account) are shown.
         let active_persona = config.active_persona;
         let persona_count = config.account.personas.len();
 
-        // Sync inbox tasks
         let mut inbox_tasks: Vec<TaskSummary> = config
             .private
             .tasks
@@ -449,8 +557,13 @@ impl MainPageState {
         // Sort tasks by most recent first
         inbox_tasks.sort_by(|a, b| b.created.cmp(&a.created));
         self.content_panel.inbox.tasks = inbox_tasks.into();
+    }
 
-        // Sync relationships (scoped to the working community's persona)
+    /// The relationships, scoped to the working community's persona, each
+    /// with its VRCs and witnessings.
+    fn sync_relationships(&mut self, config: &Config) {
+        let active_persona = config.active_persona;
+        let persona_count = config.account.personas.len();
         self.content_panel.relationships.relationships = config
             .private
             .relationships
@@ -548,8 +661,13 @@ impl MainPageState {
                 }
             })
             .collect();
+    }
 
-        // Sync credentials (scoped to the working community's persona)
+    /// The credentials: VRCs scoped to the working community's persona, then
+    /// every membership credential and vetting statement.
+    fn sync_credentials(&mut self, config: &Config) {
+        let active_persona = config.active_persona;
+        let persona_count = config.account.personas.len();
         let memo = &mut self.post_quantum;
         let persona_labels = persona_labels_by_did(config);
         self.content_panel.credentials.received = finish_credential_rows(
@@ -587,8 +705,10 @@ impl MainPageState {
                 .memberships()
                 .map(|m| m.vrcs_received.retired() + m.vrcs_issued.retired())
                 .sum::<usize>();
+    }
 
-        // Sync settings
+    /// The settings panel.
+    fn sync_settings(&mut self, config: &Config) {
         self.content_panel.settings.friendly_name = config.public.friendly_name.clone();
         self.content_panel.settings.mediator_did = config.mediator_did().to_string();
         self.content_panel.settings.persona_did = config.persona_did().to_string();
@@ -601,7 +721,25 @@ impl MainPageState {
             self.content_panel.settings.did_git_sign = None;
         }
         self.content_panel.settings.context_id = config.account.top_context_id.clone();
-        // Sync VTA info
+        self.content_panel.settings.protection_type = match &config.public.protection {
+            openvtc_core::config::ConfigProtectionType::Token(id) => {
+                format!(
+                    "Hardware Token ({})",
+                    openvtc_core::display::truncate_chars(id, 20)
+                )
+            }
+            openvtc_core::config::ConfigProtectionType::Encrypted => {
+                "Passphrase Encrypted".to_string()
+            }
+            openvtc_core::config::ConfigProtectionType::Plaintext => {
+                "Keyring Only (no additional encryption)".to_string()
+            }
+        };
+    }
+
+    /// The VTA panel: the agent, its keys, the DIDs in use, and the agent
+    /// names on the held VICs.
+    fn sync_vta(&mut self, config: &Config) {
         self.content_panel.vta.persona_did = config.persona_did().to_string();
         self.content_panel.vta.persona_agent_name = config
             .agent_name_for(config.persona_did())
@@ -623,7 +761,6 @@ impl MainPageState {
                 self.content_panel.vta.vta_agent_name =
                     config.agent_name_for(vta_did).map(str::to_owned);
                 self.content_panel.vta.credential_did = credential_did.clone();
-                self.content_panel.identity.agent_credential_did = Some(credential_did.clone());
                 self.content_panel.vta.is_vta_managed = true;
                 // Same condition `build_runtime_vta_client` branches on, so the
                 // panel names the transport this process actually connects over
@@ -638,7 +775,6 @@ impl MainPageState {
             }
             _ => {
                 self.content_panel.vta.is_vta_managed = false;
-                self.content_panel.identity.agent_credential_did = None;
             }
         }
         self.content_panel.vta.key_count = config.key_info.len();
@@ -707,6 +843,20 @@ impl MainPageState {
         }
         self.content_panel.vta.active_dids = active_dids.into();
 
+        // The VIC list is not derived from `Config` (it comes from the VTA
+        // credential vault), so it is annotated rather than rebuilt here.
+        self.sync_vic_agent_names(config);
+    }
+
+    /// The persona pane: the agent credential, every persona, and every
+    /// membership.
+    fn sync_identity(&mut self, config: &Config) {
+        self.content_panel.identity.agent_credential_did = match &config.key_backend {
+            KeyBackend::Vta { credential_did, .. } => Some(credential_did.clone()),
+            _ => None,
+        };
+        let persona_did = config.persona_did();
+
         // Personas: every persona in the account, with how many communities
         // present it. A persona bound to zero communities is an orphan (e.g.
         // left by a failed join before the rollback fix) — surfaced so the
@@ -750,26 +900,11 @@ impl MainPageState {
             .persona_selected
             .min(personas.len().saturating_sub(1));
         identity.personas = personas.into();
+        self.sync_memberships(config);
+    }
 
-        // The VIC list is not derived from `Config` (it comes from the VTA
-        // credential vault), so it is annotated rather than rebuilt here.
-        self.sync_vic_agent_names(config);
-
-        self.content_panel.settings.protection_type = match &config.public.protection {
-            openvtc_core::config::ConfigProtectionType::Token(id) => {
-                format!(
-                    "Hardware Token ({})",
-                    openvtc_core::display::truncate_chars(id, 20)
-                )
-            }
-            openvtc_core::config::ConfigProtectionType::Encrypted => {
-                "Passphrase Encrypted".to_string()
-            }
-            openvtc_core::config::ConfigProtectionType::Plaintext => {
-                "Keyring Only (no additional encryption)".to_string()
-            }
-        };
-
+    /// The Communities overview.
+    fn sync_communities(&mut self, config: &Config) {
         // Sync the Communities overview (R-C-*): display order from the model,
         // archived excluded, with the actions-required count for the badge.
         let mut community_items = Vec::new();
@@ -917,7 +1052,10 @@ impl MainPageState {
         if self.content_panel.communities.selected_index >= row_count {
             self.content_panel.communities.selected_index = row_count.saturating_sub(1);
         }
+    }
 
+    /// The persona pane's Communities tab.
+    fn sync_memberships(&mut self, config: &Config) {
         // The persona pane's Communities tab: one row per membership, not per
         // community. A community the holder joined twice under two personas is two
         // rows here, because the question this tab answers — which persona does
@@ -984,9 +1122,9 @@ impl MainPageState {
     ///
     /// The list itself comes from the VTA credential vault, not from `Config`
     /// (`VicSummary::from_descriptor` has no `Config` to consult), so the names
-    /// are attached here instead of at construction. Called from
-    /// [`sync_from_config`](Self::sync_from_config) — so a background agent-name
-    /// sweep lands on the list — and again straight after each vault reload, so
+    /// are attached here instead of at construction. Called from the VTA
+    /// panel's sync ([`Panels::VTA`]) — so a background agent-name sweep lands
+    /// on the list — and again straight after each vault reload, so
     /// a freshly loaded list is named without waiting for the next sync.
     ///
     /// Verified-only: the name always comes from `Config::agent_name_for`, and a
@@ -3528,5 +3666,319 @@ mod tests {
                 status::Severity::Error
             ]
         );
+    }
+
+    // ─── Per-panel sync ─────────────────────────────────────────────────
+
+    /// Every panel, one at a time.
+    const EACH_PANEL: [Panels; 9] = [
+        Panels::HEADER,
+        Panels::VETTING,
+        Panels::INBOX,
+        Panels::RELATIONSHIPS,
+        Panels::CREDENTIALS,
+        Panels::SETTINGS,
+        Panels::VTA,
+        Panels::IDENTITY,
+        Panels::COMMUNITIES,
+    ];
+
+    /// What `panel` shows, as text: the view model `sync_panels` rebuilds
+    /// for it. Compared as `Debug`, which every view model has.
+    fn shown(page: &MainPageState, panel: Panels) -> String {
+        let c = &page.content_panel;
+        match panel {
+            p if p == Panels::HEADER => format!("{:?}", page.config),
+            p if p == Panels::VETTING => format!("{:?}", c.vetting),
+            p if p == Panels::INBOX => format!("{:?}", c.inbox),
+            p if p == Panels::RELATIONSHIPS => format!("{:?}", c.relationships),
+            p if p == Panels::CREDENTIALS => format!("{:?}", c.credentials),
+            p if p == Panels::SETTINGS => format!("{:?}", c.settings),
+            p if p == Panels::VTA => format!("{:?}", c.vta),
+            p if p == Panels::IDENTITY => format!("{:?}", c.identity),
+            p if p == Panels::COMMUNITIES => format!("{:?}", c.communities),
+            _ => panic!("one panel at a time"),
+        }
+    }
+
+    /// Every panel's view model, as text.
+    fn shown_all(page: &MainPageState) -> Vec<String> {
+        EACH_PANEL.iter().map(|p| shown(page, *p)).collect()
+    }
+
+    /// An account with something on every panel: a persona in an Active
+    /// community, a relationship with VRCs both ways and an alias, inbox
+    /// tasks, keys, a vetting application holding a statement, a VTA key
+    /// backend, and verified agent names.
+    fn busy_config() -> Config {
+        use openvtc_core::config::protected_config::Contact;
+        use openvtc_core::relationships::{Relationship, RelationshipState};
+        use openvtc_core::vetting::applicant::HeldStatement;
+        use vta_sdk::protocols::vetting::{VettingMethod, VettingRelationship};
+
+        let vtc = "did:web:vtc.example";
+        let mut config = with_active_persona(config_with_membership(
+            ALICE_DID,
+            Some("Work"),
+            vtc,
+            Some("Kernel Developers"),
+        ));
+        let persona = config.active_persona.unwrap();
+        let now = chrono::Utc::now();
+
+        let remote = Arc::new(BOB_DID.to_string());
+        config.private.relationships.relationships.insert(
+            remote.clone(),
+            Relationship {
+                task_id: Arc::new("task-r".to_string()),
+                our_did: Arc::new("did:key:zRelationshipDid".to_string()),
+                remote_did: remote.clone(),
+                remote_p_did: remote.clone(),
+                created: now,
+                state: RelationshipState::Established,
+                our_persona: Some(persona),
+                needs_reestablishment: false,
+            },
+        );
+        config.private.contacts.contacts.insert(
+            remote.clone(),
+            Arc::new(Contact {
+                did: remote.clone(),
+                alias: Some("Bob".into()),
+            }),
+        );
+        config
+            .private
+            .vrcs_issued
+            .insert(&remote, signed_vrc(ALICE_DID, BOB_DID))
+            .unwrap();
+        config
+            .private
+            .vrcs_received
+            .insert(&remote, signed_vrc(BOB_DID, ALICE_DID))
+            .unwrap();
+        config.private.tasks.new_task_for(
+            &Arc::new("task-ping".to_string()),
+            TaskType::TrustPing {
+                from: Arc::new(ALICE_DID.to_string()),
+                to: remote.clone(),
+                remote_p_did: remote.clone(),
+            },
+            Some(persona),
+        );
+        config.private.tasks.new_task_for(
+            &Arc::new("task-accepted".to_string()),
+            TaskType::RelationshipRequestAccepted,
+            Some(persona),
+        );
+        config.key_info.insert(
+            format!("{ALICE_DID}#key-0"),
+            key_info(KeyTypes::PersonaSigning),
+        );
+        config.key_info.insert(
+            "did:key:zRelationshipDid#key-0".into(),
+            key_info(KeyTypes::RelationshipVerification),
+        );
+
+        let app = config
+            .private
+            .vetting
+            .start_application(vtc, persona, ALICE_DID, now)
+            .unwrap();
+        app.statements.push(HeldStatement {
+            id: "urn:uuid:statement-1".into(),
+            vetter: BOB_DID.into(),
+            method: VettingMethod::InPerson,
+            declared_relationship: VettingRelationship::CommunityColleague,
+            document_classes: vec!["passport".into()],
+            claims_verified: vec!["name.legal".into()],
+            identity_commitment: "zCommitment".into(),
+            valid_from: now,
+            valid_until: now + chrono::Duration::days(120),
+            received_at: now,
+            credential: serde_json::json!({ "id": "urn:uuid:statement-1" }),
+        });
+
+        config.key_backend = KeyBackend::Vta {
+            vta_url: "https://vta.example".into(),
+            vta_did: "did:web:vta.example".into(),
+            credential_did: "did:key:zAgentCredential".into(),
+            mediator_did: Some("did:web:mediator.example".into()),
+            credential_bundle: secrecy::SecretString::new("bundle".into()),
+            credential_private_key: secrecy::SecretString::new("z".into()),
+            encryption_seed: secrecy::SecretBox::new(Box::new(vec![0u8; 32])),
+        };
+        config.set_cached_agent_name(BOB_DID, Some("example.com/@bob".into()), now);
+        config.set_cached_agent_name(vtc, Some("vtc.example/@club".into()), now);
+        config
+    }
+
+    /// Each panel synced alone shows exactly what the full sync shows it, and
+    /// leaves every other panel as it was.
+    #[test]
+    fn each_panel_synced_alone_shows_what_the_full_sync_shows() {
+        let config = busy_config();
+        let mut full = MainPageState::default();
+        full.sync_from_config(&config);
+        let untouched = MainPageState::default();
+
+        for panel in EACH_PANEL {
+            let mut alone = MainPageState::default();
+            alone.sync_panels(&config, panel);
+            assert_eq!(shown(&alone, panel), shown(&full, panel), "{panel:?}");
+            for other in EACH_PANEL.into_iter().filter(|p| *p != panel) {
+                assert_eq!(
+                    shown(&alone, other),
+                    shown(&untouched, other),
+                    "syncing {panel:?} left {other:?} alone"
+                );
+            }
+        }
+        // The account fills every panel, so each comparison above compared
+        // something.
+        for panel in EACH_PANEL {
+            assert_ne!(shown(&full, panel), shown(&untouched, panel), "{panel:?}");
+        }
+    }
+
+    /// The full sync is every panel synced, in any order.
+    #[test]
+    fn the_full_sync_is_every_panel_synced() {
+        let config = busy_config();
+        let mut full = MainPageState::default();
+        full.sync_from_config(&config);
+
+        let mut one_by_one = MainPageState::default();
+        for panel in EACH_PANEL.into_iter().rev() {
+            one_by_one.sync_panels(&config, panel);
+        }
+        assert_eq!(shown_all(&one_by_one), shown_all(&full));
+
+        let union = EACH_PANEL
+            .into_iter()
+            .fold(Panels::HEADER, |all, panel| all | panel);
+        assert_eq!(union, Panels::ALL);
+        let mut all = MainPageState::default();
+        all.sync_panels(&config, Panels::ALL);
+        assert_eq!(shown_all(&all), shown_all(&full));
+    }
+
+    /// After `change`, syncing only `panels` leaves the page as a full sync
+    /// would, and the change shows on at least one of them.
+    fn assert_reaches_only(panels: Panels, change: impl FnOnce(&mut Config, &mut MainPageState)) {
+        let mut config = busy_config();
+        let mut page = MainPageState::default();
+        page.sync_from_config(&config);
+        let before = shown_all(&page);
+
+        change(&mut config, &mut page);
+        let mut partial = page.clone();
+        partial.sync_panels(&config, panels);
+        let mut full = page;
+        full.sync_from_config(&config);
+
+        assert_eq!(shown_all(&partial), shown_all(&full));
+        assert_ne!(shown_all(&full), before, "the change shows somewhere");
+    }
+
+    #[test]
+    fn a_task_change_reaches_only_the_inbox() {
+        assert_reaches_only(Panels::FROM_TASKS, |config, _| {
+            config.private.tasks.clear();
+        });
+    }
+
+    #[test]
+    fn a_relationship_change_reaches_only_the_panels_that_read_it() {
+        use openvtc_core::config::protected_config::Contact;
+        assert_reaches_only(Panels::FROM_RELATIONSHIPS, |config, _| {
+            let remote = Arc::new(BOB_DID.to_string());
+            config.private.contacts.contacts.insert(
+                remote.clone(),
+                Arc::new(Contact {
+                    did: remote.clone(),
+                    alias: Some("Robert".into()),
+                }),
+            );
+            config.private.vrcs_received.remove_relationship(&remote);
+            config.key_info.insert(
+                "did:key:zOther#key-0".into(),
+                key_info(KeyTypes::RelationshipEncryption),
+            );
+            if let Some(r) = config.private.relationships.relationships.get_mut(&remote) {
+                r.our_did = Arc::new("did:key:zAnotherRelationshipDid".to_string());
+            }
+        });
+    }
+
+    #[test]
+    fn a_vetting_book_change_reaches_only_the_panels_that_read_it() {
+        assert_reaches_only(Panels::FROM_VETTING_BOOK, |config, _| {
+            config.private.vetting.applications[0].statements.clear();
+            let persona = config.active_persona.unwrap();
+            config
+                .private
+                .vetting
+                .start_application(
+                    "did:web:other.example",
+                    persona,
+                    ALICE_DID,
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn a_favourite_or_archive_mark_reaches_only_the_panels_that_read_it() {
+        assert_reaches_only(Panels::FROM_DISPLAY_ORDER, |config, _| {
+            for c in config.account.communities.values_mut().flatten() {
+                c.toggle_favourite();
+                c.archived = true;
+            }
+        });
+    }
+
+    #[test]
+    fn the_friendly_name_reaches_only_the_header_and_settings() {
+        assert_reaches_only(Panels::FROM_FRIENDLY_NAME, |config, _| {
+            config.public.friendly_name = "Someone Else".into();
+        });
+    }
+
+    #[test]
+    fn the_protection_reaches_only_settings() {
+        assert_reaches_only(Panels::SETTINGS, |config, _| {
+            config.public.protection =
+                openvtc_core::config::ConfigProtectionType::Token("card-1".into());
+        });
+    }
+
+    #[test]
+    fn showing_archived_reaches_only_the_communities() {
+        assert_reaches_only(Panels::COMMUNITIES, |config, page| {
+            for c in config.account.communities.values_mut().flatten() {
+                c.archived = true;
+            }
+            // Archived, then shown: only the communities overview reads the
+            // toggle. The header's reach of the mark itself is pinned above.
+            page.content_panel.communities.show_archived = true;
+            page.sync_panels(config, Panels::HEADER);
+        });
+    }
+
+    #[test]
+    fn an_acknowledgement_reaches_only_the_communities() {
+        use openvtc_core::config::account::CommunityStatus;
+        assert_reaches_only(Panels::COMMUNITIES, |config, page| {
+            for c in config.account.communities.values_mut().flatten() {
+                c.status = CommunityStatus::Rejected;
+                c.acknowledged = false;
+            }
+            page.sync_from_config(config);
+            for c in config.account.communities.values_mut().flatten() {
+                c.acknowledge();
+            }
+        });
     }
 }

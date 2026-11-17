@@ -6,7 +6,7 @@
 //!
 //! 1. set the panel's `status_message`,
 //! 2. persist the config (now `SaveScheduler::mark_dirty`),
-//! 3. rebuild UI state from config (`sync_from_config`),
+//! 3. rebuild the panels that read what changed (`sync_panels`),
 //! 4. push an activity-log entry (`log` or `log_detailed`).
 //!
 //! The helpers here generalize that block over the panel-specific status slot
@@ -16,8 +16,8 @@
 
 use openvtc_core::config::Config;
 
-use crate::state_handler::main_page::MainPageState;
 use crate::state_handler::main_page::status::Status;
+use crate::state_handler::main_page::{MainPageState, Panels};
 use crate::state_handler::save_coalesce::SaveScheduler;
 
 /// Activity-log entry to write after an action completes.
@@ -39,14 +39,15 @@ impl SyncLog {
 
 /// How to persist + refresh UI after a successful action.
 pub(crate) enum Persist {
-    /// Request a **coalesced** save (mark the config dirty — R11), then sync UI
-    /// from config immediately. The persistence is debounced + offloaded to a
-    /// blocking thread by the loop's [`SaveScheduler`]; the UI rebuild still
-    /// happens synchronously on the loop thread, exactly as before.
-    SaveAndSync,
-    /// The action already requested/performed the save itself; only sync UI from
-    /// config.
-    SyncOnly,
+    /// Request a **coalesced** save (mark the config dirty — R11), then sync
+    /// the panels that read what the action changed, immediately. The
+    /// persistence is debounced + offloaded to a blocking thread by the loop's
+    /// [`SaveScheduler`]; the UI rebuild happens synchronously on the loop
+    /// thread.
+    SaveAndSync(Panels),
+    /// The action already requested/performed the save itself; only sync the
+    /// panels that read what it changed.
+    SyncOnly(Panels),
     /// The action already requested/performed the save and no UI sync is required.
     None,
 }
@@ -57,11 +58,11 @@ impl Persist {
             // R11: was a synchronous `Config::save` on the loop thread. Now it
             // only marks the config dirty — the actual save is debounced and run
             // on a blocking thread. The UI sync stays immediate.
-            Persist::SaveAndSync => {
+            Persist::SaveAndSync(panels) => {
                 save.mark_dirty();
-                main_page.sync_from_config(config);
+                main_page.sync_panels(config, panels);
             }
-            Persist::SyncOnly => main_page.sync_from_config(config),
+            Persist::SyncOnly(panels) => main_page.sync_panels(config, panels),
             Persist::None => {}
         }
     }

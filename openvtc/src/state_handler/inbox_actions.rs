@@ -263,7 +263,9 @@ fn save_and_sync(
         &mut state.main_page,
         config,
         save,
-        dispatch_util::Persist::SaveAndSync,
+        dispatch_util::Persist::SaveAndSync(
+            crate::state_handler::main_page::Panels::FROM_RELATIONSHIPS,
+        ),
         |mp| &mut mp.content_panel.inbox.status_message,
         success_status.to_string(),
         dispatch_util::SyncLog::Plain(success_log.to_string()),
@@ -974,7 +976,9 @@ fn handle_dismiss_task(
     state.main_page.content_panel.inbox.active_task = None;
     // R11: coalesced save (was inline `save_config`).
     save.mark_dirty();
-    state.main_page.sync_from_config(config);
+    state
+        .main_page
+        .sync_panels(config, crate::state_handler::main_page::Panels::FROM_TASKS);
     state.main_page.log("Task dismissed");
 }
 
@@ -988,7 +992,9 @@ fn handle_clear_all(config: &mut Box<Config>, state: &mut State, save: &mut Save
     state.main_page.content_panel.inbox.active_task = None;
     // R11: coalesced save (was inline `save_config`).
     save.mark_dirty();
-    state.main_page.sync_from_config(config);
+    state
+        .main_page
+        .sync_panels(config, crate::state_handler::main_page::Panels::FROM_TASKS);
     state.main_page.log("All inbox tasks cleared");
 }
 

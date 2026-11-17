@@ -11,7 +11,8 @@
 //!
 //! [`dispatch()`] offers each action to `dispatch::reduce` (view-only: it
 //! changes the page and at most reads the book), then to `dispatch::plan`,
-//! which is pure — no `.await`, no spawning, no saving. A plan:
+//! which is pure — no `.await`, no spawning, no saving — and runs the effect
+//! it returns. Every action is plan + run. A plan:
 //!
 //! 1. reads `busy` (whether a vetting job holds [`DispatchDomain::Vetting`](crate::state_handler::background_dispatch::DispatchDomain::Vetting),
 //!    sampled once by the loop) and refuses with `send::claimable` before it
@@ -36,7 +37,8 @@
 //! `Claim::Unheld`), and `Then` (a `Followup` planned on the state the steps
 //! before left, with `busy` sampled again). A `Sign` or `Send` that fails
 //! applies its `Abort` — each `Undo` in order, then `give_up` with its
-//! `what` — and the run stops there.
+//! `what` — and the run skips every step after it except an `Always` one: a
+//! step that follows the action whatever became of it.
 //!
 //! Hidden vetting's steps are the client's own: `SendOrSay` (signed and sent
 //! unheld; a failure undoes what was filed for it, is said, and the run goes
@@ -53,25 +55,25 @@
 //! on). The faces' steps: `CardKeys` (the persona's keys for a card) and
 //! `Face` (a face or card job spawned against the loop's VTA session).
 //!
-//! # What stays on the loop
+//! # What follows an action regardless
 //!
-//! `dispatch::plan` hands back, as `Planned::Loop`, only the actions a
-//! loop-side helper follows whatever the plan's run did:
+//! - `RefreshRequirements`: the refresh's steps, then, as `Always` steps,
+//!   the hidden-vetting challenge (`Followup::AskChallenge`, planned once the
+//!   refresh ran, quiet when it was refused or gave up) and the vetter pass
+//!   (`RefreshVetterSide`) — both even after a busy refusal or a give-up.
+//! - Enter on the attestation form: `desk::plan_attest` decides it, and the
+//!   plan is the named statement, the hidden attestation
+//!   (`hidden::plan_attest_hidden`, against the VTA session the loop holds),
+//!   or the vetter pass that enrols.
 //!
-//! - `RefreshRequirements`: its plan is run, then the hidden-vetting
-//!   challenge is asked (`hidden::ask_for_challenge`) and the vetter pass
-//!   runs (`desk::refresh_vetter_side`) — both even after a busy refusal or a
-//!   give-up, which a step after an `Abort` would not be.
-//! - Enter on the attestation form: `desk::plan_attest` decides it; the
-//!   hidden attestation (`hidden::attest_hidden`) and the pass that enrols
-//!   run on the loop after it.
+//! # The loop's own passes
 //!
-//! The loop's own passes — `desk::refresh_vetter_side` and
-//! `refresh_stale_modes` (timers), `pcs::apply_pcs_outcome` (the outcome
-//! arm), `hidden::hidden_vetting_tick` and `pcs::start_pcs_work` (the pass) —
-//! are thin wrappers that plan and run. `tickets::settle_pending_tickets`
-//! sends nothing and saves once; it keeps its `(state, config, save)` shape
-//! for the timer and inbound arms, which hold no `ActionCtx`.
+//! `desk::refresh_vetter_side` and `refresh_stale_modes` (timers),
+//! `pcs::apply_pcs_outcome` (the outcome arm), `hidden::hidden_vetting_tick`
+//! and `pcs::start_pcs_work` (the pass) are thin wrappers that plan and run.
+//! `tickets::settle_pending_tickets` sends nothing and saves once; it keeps its
+//! `(state, config, save)` shape for the timer and inbound arms, which hold no
+//! `ActionCtx`.
 //!
 //! # Converting a handler
 //!
@@ -87,8 +89,7 @@
 //!   `VettingEffect::sign_and_send(before, persona, document, sent, claim,
 //!   Abort::undoing(what, undo))`, where `before` holds the steps that precede
 //!   it and `undo` replays the error branch's book changes as `Undo` variants.
-//! - Route the action (or the view's Enter, in `plan_submit`) to the plan, and
-//!   move its arm in `on_loop` / `submit` to the "planned" list.
+//! - Route the action (or the view's Enter, in `plan_submit`) to the plan.
 //!
 //! A step is added only when a handler needs it.
 

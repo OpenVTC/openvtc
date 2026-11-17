@@ -25,13 +25,12 @@ use vta_sdk::vetting::statement::{StatementDraft, sign_statement};
 
 use super::dispatch::{panel, persist, show};
 use super::effect::{Abort, Followup, Step, Undo, VettingEffect, run};
-use super::hidden::{attest_hidden, hidden_vetting_tick};
+use super::hidden::hidden_vetting_tick;
 use super::jobs::Sent;
 use super::pcs::start_pcs_work;
 use super::send::{Claim, abandon, claimable, give_up, persona_did, resolver, spawn_send};
 use super::tickets::{ticket_sent, ticket_unsent};
 use super::words::{community_display, hidden_without_id_words, hides_vetters};
-use crate::state_handler::background_dispatch::DispatchDomain;
 use crate::state_handler::main_page::content::{
     AttestForm, DECLINE_MESSAGE_MAX, PendingTicket, VETTING_METHODS, VETTING_RELATIONSHIPS,
     VETTING_WITHDRAWAL_REASONS, VettingMode, VettingTab,
@@ -778,26 +777,6 @@ pub(super) fn plan_attest(
             now,
         },
     ))]))
-}
-
-/// Attest on the desk: [`plan_attest`], then the named statement's effect, the
-/// hidden attestation, or the refresh that enrols.
-pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
-    let busy = ctx.in_flight.is_busy(DispatchDomain::Vetting);
-    match plan_attest(ctx.state, ctx.config, busy, request_id, form) {
-        Attesting::Effect(effect) => run(ctx, effect).await,
-        Attesting::Hidden(h) => {
-            let HiddenAttest {
-                request_id,
-                entry,
-                vetter_did,
-                attestation,
-                now,
-            } = *h;
-            attest_hidden(ctx, &request_id, &entry, &vetter_did, attestation, now).await;
-        }
-        Attesting::Enrol => refresh_vetter_side(ctx).await,
-    }
 }
 
 /// Sign the drafted statement with the persona's assertion key, record it

@@ -308,7 +308,9 @@ fn handle_submit_edit(
         &mut state.main_page,
         config,
         save,
-        dispatch_util::Persist::SaveAndSync,
+        dispatch_util::Persist::SaveAndSync(
+            crate::state_handler::main_page::Panels::FROM_FRIENDLY_NAME,
+        ),
         |mp| &mut mp.content_panel.settings.status_message,
         "Setting saved",
         dispatch_util::SyncLog::Plain(format!("{} updated", setting_name)),
@@ -444,7 +446,7 @@ async fn handle_set_passphrase(
                 &mut state.main_page,
                 config,
                 save,
-                dispatch_util::Persist::SyncOnly,
+                dispatch_util::Persist::SyncOnly(crate::state_handler::main_page::Panels::SETTINGS),
                 |mp| &mut mp.content_panel.settings.status_message,
                 "Unlock code protection enabled",
                 dispatch_util::SyncLog::Plain("Unlock code protection enabled".to_string()),
@@ -482,7 +484,7 @@ async fn handle_remove_passphrase(
                 &mut state.main_page,
                 config,
                 save,
-                dispatch_util::Persist::SyncOnly,
+                dispatch_util::Persist::SyncOnly(crate::state_handler::main_page::Panels::SETTINGS),
                 |mp| &mut mp.content_panel.settings.status_message,
                 "Protection reverted to keyring only",
                 dispatch_util::SyncLog::Plain("Protection reverted to keyring only".to_string()),
@@ -573,7 +575,7 @@ fn handle_wipe_confirm(state: &mut State, config: &Config, profile: &str) -> boo
 
 /// Detect the did-git-sign install for the persona shown in Settings, off the
 /// loop: the read is two small files, but on a slow or network home directory
-/// that is the stall, and `sync_from_config` runs on every config change. The
+/// that is the stall, and the settings panel is synced on every change it shows. The
 /// answer arrives as [`DispatchOutcome::DidGitSign`] and is stored by
 /// [`apply_did_git_sign`].
 ///
