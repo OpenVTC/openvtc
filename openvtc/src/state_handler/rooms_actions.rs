@@ -25,17 +25,26 @@
 //! answer sets the view's [`Next`]; [`advance`], which the loop calls after applying
 //! replies and outcomes, takes it. After an acceptance ends, either way, the view is read
 //! again: the community and the VTA are the record.
+//!
+//! An action that sends is planned by [`plan`], and a [`Next`] by [`plan_next`]: both are
+//! pure, make the changes due before anything is claimed, and return a [`RoomsEffect`] — the
+//! steps in order. [`run`] takes them: a send looks up the persona's key, builds, claims and
+//! arms ([`community_request::send`]); a question to the VTA claims its lane; each applies
+//! its [`Commit`] only once under way and shows its [`Refusal`] when not.
 
 use openvtc_core::community_rooms::{
     self, Joined, Offer, Prepared, Renewal, Reply, Request, RoomCondition, Standing,
 };
+use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::RoomsAction as Act;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 pub(crate) use crate::state_handler::community_request::CommunityLoop as Loop;
-use crate::state_handler::community_request::{self, CommunityFeature, Doc, SendOutcome, sender};
+use crate::state_handler::community_request::{
+    self, CommunityFeature, Doc, SendOutcome, Sender, Sent, UNTHREADED,
+};
 use crate::state_handler::main_page::rooms::{
     AcceptFlow, AcceptStep, Next, Purpose, RoomsPhase, RoomsView, Severity,
 };
@@ -88,6 +97,7 @@ impl CommunityFeature for Rooms {
     type Purpose = Purpose;
     type Reply = Reply;
     type Next = Next;
+    type Request = Request;
     const NAME: &'static str = "rooms";
     const SEND: DispatchDomain = SEND;
     /// Only a community the persona belongs to answers the Rooms panel.
@@ -111,6 +121,17 @@ impl CommunityFeature for Rooms {
     fn outcome(outcome: SendOutcome) -> DispatchOutcome {
         DispatchOutcome::Rooms(outcome)
     }
+    fn build(
+        _config: &Config,
+        sender: &mut Sender,
+        to: &str,
+        _persona: PersonaId,
+        request: Request,
+    ) -> Result<Doc, String> {
+        community_rooms::build(&request, &sender.persona_did, to)
+            .map(|doc| Doc::Unsigned(Box::new(doc)))
+            .map_err(|e| format!("couldn't send: {e}"))
+    }
     fn is_refusal(reply: &Reply) -> bool {
         matches!(reply, Reply::Refused(_))
     }
@@ -131,50 +152,530 @@ impl CommunityFeature for Rooms {
     }
 }
 
-/// Send `request` to the open view's community, armed on `purpose`. Returns whether
-/// it was dispatched; every early return says why in the view.
-async fn send(lp: &mut Loop<'_>, request: Request, purpose: Purpose) -> bool {
-    let Some((vtc_did, persona, waiting)) = lp
-        .state
-        .main_page
-        .content_panel
-        .rooms
-        .view
-        .as_ref()
-        .map(|v| (v.vtc_did.clone(), v.persona, v.pending.is_some()))
-    else {
-        return false;
+// ****************************************************************************
+// The loop's side: the reducer
+// ****************************************************************************
+
+/// What an action or a [`Next`] asks of the loop once [`plan`] or
+/// [`plan_next`] has made its own changes: the steps, in order, and whether a
+/// [`Next`] it came from counts as taken.
+struct RoomsEffect {
+    steps: Vec<Step>,
+    taken: Taken,
+}
+
+impl RoomsEffect {
+    /// Nothing to send or ask; a [`Next`] counts as taken.
+    fn done() -> Self {
+        Self {
+            steps: Vec::new(),
+            taken: Taken::Yes,
+        }
+    }
+
+    /// One step, whose own answer says whether a [`Next`] was taken.
+    fn one(step: Step) -> Self {
+        Self {
+            steps: vec![step],
+            taken: Taken::ByLastStep,
+        }
+    }
+}
+
+/// Whether a [`Next`] counts as taken; one that is not is kept for the next
+/// tick.
+#[derive(Debug, PartialEq, Eq)]
+enum Taken {
+    Yes,
+    /// Its lane is busy, or the view still waits.
+    No,
+    /// As the last step answered.
+    ByLastStep,
+}
+
+/// One thing the runner does.
+enum Step {
+    /// Send to the open view's community ([`community_request::send`]).
+    Send(Box<Send>),
+    /// Ask the VTA: claimed in [`DispatchDomain::RoomsVta`], then `commit`
+    /// applied; `refusal` shown when it was not asked.
+    Ask {
+        ask: VtaAsk,
+        commit: Option<Commit>,
+        refusal: Option<Refusal>,
+    },
+}
+
+/// A request to the community, planned to everything but the persona's key.
+struct Send {
+    to: String,
+    persona: PersonaId,
+    request: Request,
+    purpose: Purpose,
+    /// Applied once the request is claimed and the view armed.
+    commit: Option<Commit>,
+    /// Shown when it was not sent: after the reason, when the key lookup or
+    /// the document failed, or alone on a busy lane.
+    refusal: Option<Refusal>,
+}
+
+/// A view change made only once its request or question is under way.
+#[derive(Debug, PartialEq, Eq)]
+enum Commit {
+    /// An acceptance of `room` is collecting the offer, saying `progress`.
+    Accepting { room: String, progress: String },
+    /// The view's renewals went to the VTA.
+    RenewalsHandedOver,
+}
+
+impl Commit {
+    fn apply(self, state: &mut State) {
+        let Some(view) = view_mut(state) else {
+            return;
+        };
+        match self {
+            Commit::Accepting { room, progress } => {
+                view.accept = Some(AcceptFlow {
+                    room,
+                    step: AcceptStep::Collecting,
+                    offer: None,
+                });
+                view.note(Severity::Progress, progress);
+            }
+            Commit::RenewalsHandedOver => view.renewals.clear(),
+        }
+    }
+}
+
+/// What the view says when a step did not start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// The acceptance did not start: its lane is busy — said too when its key
+    /// lookup or document failed, over that reason.
+    AcceptBusy,
+    /// The VTA was not asked which rooms it holds; the record still refreshes.
+    CustodyBusy,
+}
+
+impl Refusal {
+    fn show(self, state: &mut State) {
+        let Some(view) = view_mut(state) else {
+            return;
+        };
+        match self {
+            Refusal::AcceptBusy => view.note(Severity::Warning, InFlight::busy_message(SEND)),
+            Refusal::CustodyBusy => {
+                view.held_error
+                    .get_or_insert_with(|| "your VTA is busy".into());
+            }
+        }
+    }
+}
+
+/// A request to the open view's community.
+fn to_community(
+    view: &RoomsView,
+    request: Request,
+    purpose: Purpose,
+    commit: Option<Commit>,
+    refusal: Option<Refusal>,
+) -> Step {
+    Step::Send(Box::new(Send {
+        to: view.vtc_did.clone(),
+        persona: view.persona,
+        request,
+        purpose,
+        commit,
+        refusal,
+    }))
+}
+
+/// Plan an action that reads the config or sends. Pure: it makes the changes
+/// the action makes before anything is claimed and returns the steps the loop
+/// still owes. `has_vta` is whether a VTA session is connected.
+fn plan(state: &mut State, config: &Config, has_vta: bool, action: Act) -> RoomsEffect {
+    match action {
+        Act::Open(index) => {
+            open(state, config, index);
+            plan_reread(state, has_vta)
+        }
+        Act::Refresh => plan_reread(state, has_vta),
+        Act::Accept => plan_accept(state, has_vta),
+        Act::Back | Act::Select(_) => RoomsEffect::done(),
+    }
+}
+
+/// `r`, or the panel opening: show it loading when it has nothing yet, clear
+/// the status line, and read both again.
+fn plan_reread(state: &mut State, has_vta: bool) -> RoomsEffect {
+    if let Some(view) = view_mut(state) {
+        if view.rooms.is_empty() {
+            view.phase = RoomsPhase::Loading;
+        }
+        view.status = None;
+    }
+    RoomsEffect {
+        steps: plan_refresh(state, has_vta),
+        taken: Taken::Yes,
+    }
+}
+
+/// Read the community's record and the VTA's custody again.
+fn plan_refresh(state: &mut State, has_vta: bool) -> Vec<Step> {
+    let Some(view) = view_mut(state) else {
+        return Vec::new();
     };
-    if waiting {
-        if let Some(view) = view_mut(lp.state) {
+    view.restart_pages();
+    let mut steps = Vec::new();
+    if has_vta {
+        // Busy with an acceptance step; the record still refreshes.
+        steps.push(Step::Ask {
+            ask: VtaAsk::Held {
+                member: view.me.clone(),
+            },
+            commit: None,
+            refusal: Some(Refusal::CustodyBusy),
+        });
+    } else {
+        view.held = None;
+        view.held_error =
+            Some("no VTA is connected, so which rooms it holds keys for can't be shown".into());
+    }
+    steps.push(to_community(
+        view,
+        Request::Memberships { cursor: None },
+        Purpose::Memberships,
+        None,
+        None,
+    ));
+    steps
+}
+
+/// Open the panel for the Active community at a Communities display index.
+fn open(state: &mut State, config: &Config, index: usize) {
+    let target = config
+        .account
+        .communities_for_display(state.main_page.content_panel.communities.show_archived)
+        .get(index)
+        .filter(|c| c.status.is_active())
+        .map(|c| {
+            (
+                c.vtc_did.clone(),
+                c.persona_ref,
+                crate::state_handler::community_label(
+                    config,
+                    &c.vtc_did,
+                    c.display_name.as_deref(),
+                    256,
+                ),
+            )
+        });
+    let Some((vtc, persona, name)) = target else {
+        return;
+    };
+    let me = config
+        .identities
+        .get(&persona)
+        .map(|id| id.persona_did().to_string())
+        .unwrap_or_default();
+    state.main_page.content_panel.rooms.view = Some(RoomsView::new(vtc, persona, me, name));
+}
+
+/// `⏎` on a room: accept its offer, or finish an acceptance begun elsewhere.
+fn plan_accept(state: &mut State, has_vta: bool) -> RoomsEffect {
+    let Some(view) = view_mut(state) else {
+        return RoomsEffect::done();
+    };
+    if view.accept.is_some() {
+        view.note(Severity::Warning, "An acceptance is already in progress.");
+        return RoomsEffect::done();
+    }
+    let Some(row) = view.selected_row() else {
+        return RoomsEffect::done();
+    };
+    // An archived room, or one being removed, admits nobody: the community would refuse.
+    let condition = RoomCondition::of(&row.room);
+    if !condition.admits() && row.standing.acceptable() {
+        view.note(
+            Severity::Warning,
+            condition
+                .explain()
+                .unwrap_or_else(|| "This room admits nobody now.".into()),
+        );
+        return RoomsEffect::done();
+    }
+    match row.standing {
+        s if s.acceptable() => {}
+        Standing::NeedsReadmission => {
             view.note(
                 Severity::Warning,
-                "Still waiting for the community's answer.",
+                "Your VTA never joined this room and the community no longer keeps what it \
+                 needs to finish: ask an administrator to remove and re-admit you.",
             );
+            return RoomsEffect::done();
         }
-        return false;
+        Standing::Suspended => {
+            view.note(
+                Severity::Info,
+                condition.explain().unwrap_or_else(|| {
+                    "Your access to this room is withdrawn while it is closed; it is restored \
+                     if the community reopens it."
+                        .into()
+                }),
+            );
+            return RoomsEffect::done();
+        }
+        Standing::Admitted if !has_vta => {
+            view.note(
+                Severity::Warning,
+                "Whether this room is joined needs your VTA, which holds its keys — none is \
+                 connected.",
+            );
+            return RoomsEffect::done();
+        }
+        _ => {
+            view.note(Severity::Info, "Nothing to accept here.");
+            return RoomsEffect::done();
+        }
     }
-    let sender = match sender(lp.config, lp.tdk, persona, &vtc_did).await {
-        Ok(s) => s,
-        Err(e) => {
-            community_request::fail::<Rooms>(lp.state, &purpose, e);
-            return false;
-        }
+    if !has_vta {
+        view.note(
+            Severity::Error,
+            "Accepting a room needs your VTA: it holds the room's keys and credentials.",
+        );
+        return RoomsEffect::done();
+    }
+    let room = row.room.room_id.to_string();
+    let progress = format!(
+        "Accepting {}… collecting the offer",
+        community_rooms::display_label(&row.room)
+    );
+    if view.pending.is_some() {
+        // The view still waits on an earlier request, so the offers read is
+        // not sent; the acceptance is set regardless and said to be waiting.
+        view.accept = Some(AcceptFlow {
+            room,
+            step: AcceptStep::Collecting,
+            offer: None,
+        });
+        view.note(
+            Severity::Warning,
+            "Still waiting for the community's answer.",
+        );
+        return RoomsEffect::done();
+    }
+    // Not sent (lane busy): the press is dropped with the busy message, to be
+    // pressed again.
+    RoomsEffect::one(to_community(
+        view,
+        Request::Offers { cursor: None },
+        Purpose::Offers { room: room.clone() },
+        Some(Commit::Accepting { room, progress }),
+        Some(Refusal::AcceptBusy),
+    ))
+}
+
+/// Plan one [`Next`]. Pure, like [`plan`]; `send_busy` is whether the
+/// community lane is held.
+fn plan_next(state: &mut State, has_vta: bool, send_busy: bool, next: Next) -> RoomsEffect {
+    // [`advance`] takes a step only from an open view.
+    let Some(view) = view_mut(state) else {
+        return RoomsEffect::done();
     };
-    let doc = match community_rooms::build(&request, &sender.persona_did, &vtc_did) {
-        Ok(doc) => doc,
-        Err(e) => {
-            community_request::fail::<Rooms>(lp.state, &purpose, format!("couldn't send: {e}"));
-            return false;
+    match next {
+        Next::Refresh => {
+            if send_busy || view.pending.is_some() {
+                RoomsEffect {
+                    steps: Vec::new(),
+                    taken: Taken::No,
+                }
+            } else {
+                RoomsEffect {
+                    steps: plan_refresh(state, has_vta),
+                    taken: Taken::Yes,
+                }
+            }
         }
-    };
-    lp.spawn_send::<Rooms>(
-        sender,
-        vtc_did,
+        Next::MembershipsPage { cursor } => RoomsEffect::one(to_community(
+            view,
+            Request::Memberships {
+                cursor: Some(cursor),
+            },
+            Purpose::Memberships,
+            None,
+            None,
+        )),
+        Next::OffersPage { room, cursor } => RoomsEffect::one(to_community(
+            view,
+            Request::Offers {
+                cursor: Some(cursor),
+            },
+            Purpose::Offers { room },
+            None,
+            None,
+        )),
+        Next::Prepare => match view.accept.as_ref().and_then(|a| a.offer.clone()) {
+            Some(offer) => RoomsEffect::one(Step::Ask {
+                ask: VtaAsk::Prepare {
+                    offer,
+                    member: view.me.clone(),
+                },
+                commit: None,
+                refusal: None,
+            }),
+            None => RoomsEffect::done(),
+        },
+        Next::SendAccept { room, key_package } => RoomsEffect::one(to_community(
+            view,
+            Request::Accept {
+                room_id: room.clone(),
+                key_package,
+            },
+            Purpose::Accept { room },
+            None,
+            None,
+        )),
+        Next::Join {
+            room,
+            welcome,
+            ratchet_tree,
+        } => match view
+            .accept
+            .as_ref()
+            .and_then(|a| a.offer.as_ref())
+            .map(|o| o.credentials.invitation.to_string())
+        {
+            Some(invitation) => RoomsEffect::one(Step::Ask {
+                ask: VtaAsk::Join {
+                    room,
+                    invitation,
+                    welcome,
+                    ratchet_tree,
+                },
+                commit: None,
+                refusal: None,
+            }),
+            None => RoomsEffect::done(),
+        },
+        // Without a VTA there is nowhere to store a renewal, so nothing to read.
+        Next::CheckRenewals if !has_vta => RoomsEffect::done(),
+        Next::CheckRenewals => RoomsEffect::one(to_community(
+            view,
+            Request::Offers { cursor: None },
+            Purpose::Renewals,
+            None,
+            None,
+        )),
+        // The renewals stay in the view until the VTA's lane takes them.
+        Next::Renew if view.renewals.is_empty() => RoomsEffect::done(),
+        Next::Renew => RoomsEffect::one(Step::Ask {
+            ask: VtaAsk::Renew {
+                renewals: view.renewals.clone(),
+                member: view.me.clone(),
+            },
+            commit: Some(Commit::RenewalsHandedOver),
+            refusal: None,
+        }),
+    }
+}
+
+// ****************************************************************************
+// The loop's side: the effect runner
+// ****************************************************************************
+
+/// Service an action that reads the config or sends: [`plan`] it, then
+/// [`run`] what it asks for.
+pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
+    let effect = plan(ctx.state, ctx.config, ctx.admin_vta.is_some(), action);
+    run(&mut Loop::from_ctx(ctx), effect).await;
+}
+
+/// Take one step the view's last answer called for: [`plan_next`], then
+/// [`run`]. Returns whether it was taken (a busy lane keeps it).
+async fn step(lp: &mut Loop<'_>, next: Next) -> bool {
+    let effect = plan_next(lp.state, lp.vta.is_some(), lp.in_flight.is_busy(SEND), next);
+    run(lp, effect).await
+}
+
+/// Run an effect's steps in order. Returns whether a [`Next`] it came from
+/// was taken.
+async fn run(lp: &mut Loop<'_>, effect: RoomsEffect) -> bool {
+    let mut last = true;
+    for step in effect.steps {
+        last = match step {
+            Step::Send(send) => run_send(lp, *send).await,
+            Step::Ask {
+                ask,
+                commit,
+                refusal,
+            } => {
+                let asked = ask_vta(lp, ask);
+                if asked {
+                    if let Some(commit) = commit {
+                        commit.apply(lp.state);
+                    }
+                } else if let Some(refusal) = refusal {
+                    refusal.show(lp.state);
+                }
+                asked
+            }
+        };
+    }
+    match effect.taken {
+        Taken::Yes => true,
+        Taken::No => false,
+        Taken::ByLastStep => last,
+    }
+}
+
+/// Send a planned request: look up the key, build, claim and arm
+/// ([`community_request::send`]), then commit — or say why not. Returns
+/// whether it was dispatched; a failure the view shows is not.
+async fn run_send(lp: &mut Loop<'_>, send: Send) -> bool {
+    let Send {
+        to,
         persona,
-        Doc::Unsigned(Box::new(doc)),
+        request,
         purpose,
-    )
+        commit,
+        refusal,
+    } = send;
+    let refuse = |state: &mut State| {
+        if let Some(refusal) = refusal {
+            refusal.show(state);
+        }
+    };
+    match community_request::send::<Rooms>(lp, to, persona, request, purpose).await {
+        Sent::NoView => false,
+        Sent::Waiting => {
+            if let Some(view) = view_mut(lp.state) {
+                view.note(
+                    Severity::Warning,
+                    "Still waiting for the community's answer.",
+                );
+            }
+            false
+        }
+        Sent::Failed(purpose, why) => {
+            community_request::fail::<Rooms>(lp.state, &purpose, why);
+            refuse(lp.state);
+            false
+        }
+        Sent::Unthreaded(purpose) => {
+            community_request::fail::<Rooms>(lp.state, &purpose, UNTHREADED.into());
+            true
+        }
+        Sent::Busy => {
+            refuse(lp.state);
+            false
+        }
+        Sent::Dispatched => {
+            if let Some(commit) = commit {
+                commit.apply(lp.state);
+            }
+            true
+        }
+    }
 }
 
 /// Ask the VTA. Returns whether it was dispatched.
@@ -224,36 +725,6 @@ impl background_dispatch::Job for VtaJob {
     }
 }
 
-/// Read the community's record and the VTA's custody again.
-pub(crate) async fn refresh(lp: &mut Loop<'_>) {
-    let me = match view_mut(lp.state) {
-        Some(view) => {
-            view.restart_pages();
-            view.me.clone()
-        }
-        None => return,
-    };
-    if lp.vta.is_none() {
-        if let Some(view) = view_mut(lp.state) {
-            view.held = None;
-            view.held_error =
-                Some("no VTA is connected, so which rooms it holds keys for can't be shown".into());
-        }
-    } else if !ask_vta(lp, VtaAsk::Held { member: me })
-        && let Some(view) = view_mut(lp.state)
-    {
-        // Busy with an acceptance step; the record still refreshes.
-        view.held_error
-            .get_or_insert_with(|| "your VTA is busy".into());
-    }
-    send(
-        lp,
-        Request::Memberships { cursor: None },
-        Purpose::Memberships,
-    )
-    .await;
-}
-
 /// Say a request never left, where the view shows it.
 fn failed(view: &mut RoomsView, purpose: &Purpose, why: String) {
     match purpose {
@@ -268,279 +739,10 @@ fn failed(view: &mut RoomsView, purpose: &Purpose, why: String) {
     }
 }
 
-/// Service an action that reads the config or sends.
-pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
-    if let Act::Open(index) = action {
-        open(ctx, index);
-    }
-    let mut lp = Loop::from_ctx(ctx);
-    match action {
-        Act::Open(_) | Act::Refresh => {
-            if let Some(view) = view_mut(lp.state) {
-                if view.rooms.is_empty() {
-                    view.phase = RoomsPhase::Loading;
-                }
-                view.status = None;
-            }
-            refresh(&mut lp).await;
-        }
-        Act::Accept => start_accept(&mut lp).await,
-        Act::Back | Act::Select(_) => {}
-    }
-}
-
-/// Open the panel for the Active community at a Communities display index.
-fn open(ctx: &mut ActionCtx<'_>, index: usize) {
-    let target = ctx
-        .config
-        .account
-        .communities_for_display(ctx.state.main_page.content_panel.communities.show_archived)
-        .get(index)
-        .filter(|c| c.status.is_active())
-        .map(|c| {
-            (
-                c.vtc_did.clone(),
-                c.persona_ref,
-                crate::state_handler::community_label(
-                    ctx.config,
-                    &c.vtc_did,
-                    c.display_name.as_deref(),
-                    256,
-                ),
-            )
-        });
-    let Some((vtc, persona, name)) = target else {
-        return;
-    };
-    let me = ctx
-        .config
-        .identities
-        .get(&persona)
-        .map(|id| id.persona_did().to_string())
-        .unwrap_or_default();
-    ctx.state.main_page.content_panel.rooms.view = Some(RoomsView::new(vtc, persona, me, name));
-}
-
-/// `⏎` on a room: accept its offer, or finish an acceptance begun elsewhere.
-async fn start_accept(lp: &mut Loop<'_>) {
-    let has_vta = lp.vta.is_some();
-    let Some(view) = view_mut(lp.state) else {
-        return;
-    };
-    if view.accept.is_some() {
-        view.note(Severity::Warning, "An acceptance is already in progress.");
-        return;
-    }
-    let Some(row) = view.selected_row() else {
-        return;
-    };
-    // An archived room, or one being removed, admits nobody: the community would refuse.
-    let condition = RoomCondition::of(&row.room);
-    if !condition.admits() && row.standing.acceptable() {
-        view.note(
-            Severity::Warning,
-            condition
-                .explain()
-                .unwrap_or_else(|| "This room admits nobody now.".into()),
-        );
-        return;
-    }
-    match row.standing {
-        s if s.acceptable() => {}
-        Standing::NeedsReadmission => {
-            view.note(
-                Severity::Warning,
-                "Your VTA never joined this room and the community no longer keeps what it \
-                 needs to finish: ask an administrator to remove and re-admit you.",
-            );
-            return;
-        }
-        Standing::Suspended => {
-            view.note(
-                Severity::Info,
-                condition.explain().unwrap_or_else(|| {
-                    "Your access to this room is withdrawn while it is closed; it is restored \
-                     if the community reopens it."
-                        .into()
-                }),
-            );
-            return;
-        }
-        Standing::Admitted if !has_vta => {
-            view.note(
-                Severity::Warning,
-                "Whether this room is joined needs your VTA, which holds its keys — none is \
-                 connected.",
-            );
-            return;
-        }
-        _ => {
-            view.note(Severity::Info, "Nothing to accept here.");
-            return;
-        }
-    }
-    if !has_vta {
-        view.note(
-            Severity::Error,
-            "Accepting a room needs your VTA: it holds the room's keys and credentials.",
-        );
-        return;
-    }
-    let room = row.room.room_id.to_string();
-    view.accept = Some(AcceptFlow {
-        room: room.clone(),
-        step: AcceptStep::Collecting,
-        offer: None,
-    });
-    view.note(
-        Severity::Progress,
-        format!(
-            "Accepting {}… collecting the offer",
-            community_rooms::display_label(&row.room)
-        ),
-    );
-    if !send(
-        lp,
-        Request::Offers { cursor: None },
-        Purpose::Offers { room },
-    )
-    .await
-        && let Some(view) = view_mut(lp.state)
-        && view.pending.is_none()
-    {
-        // Not armed (lane busy): try again on the next tick rather than drop the press.
-        view.accept = None;
-        view.note(Severity::Warning, InFlight::busy_message(SEND));
-    }
-}
-
 /// Take the step the view's last answer called for, if its lane is free. The loop calls
 /// this after applying replies and outcomes, and on its tick.
 pub(crate) async fn advance(lp: &mut Loop<'_>) {
     community_request::advance::<Rooms>(lp).await;
-}
-
-/// Take one step. Returns whether it was taken (a busy lane keeps it).
-async fn step(lp: &mut Loop<'_>, next: Next) -> bool {
-    match next {
-        Next::Refresh => {
-            if lp.in_flight.is_busy(SEND)
-                || lp
-                    .state
-                    .main_page
-                    .content_panel
-                    .rooms
-                    .view
-                    .as_ref()
-                    .is_some_and(|v| v.pending.is_some())
-            {
-                false
-            } else {
-                refresh(lp).await;
-                true
-            }
-        }
-        Next::MembershipsPage { cursor } => {
-            send(
-                lp,
-                Request::Memberships {
-                    cursor: Some(cursor),
-                },
-                Purpose::Memberships,
-            )
-            .await
-        }
-        Next::OffersPage { room, cursor } => {
-            send(
-                lp,
-                Request::Offers {
-                    cursor: Some(cursor),
-                },
-                Purpose::Offers { room },
-            )
-            .await
-        }
-        Next::Prepare => {
-            let ask = lp
-                .state
-                .main_page
-                .content_panel
-                .rooms
-                .view
-                .as_ref()
-                .and_then(|v| {
-                    v.accept
-                        .as_ref()
-                        .and_then(|a| a.offer.clone())
-                        .map(|offer| VtaAsk::Prepare {
-                            offer,
-                            member: v.me.clone(),
-                        })
-                });
-            match ask {
-                Some(ask) => ask_vta(lp, ask),
-                None => true,
-            }
-        }
-        Next::SendAccept { room, key_package } => {
-            send(
-                lp,
-                Request::Accept {
-                    room_id: room.clone(),
-                    key_package,
-                },
-                Purpose::Accept { room },
-            )
-            .await
-        }
-        Next::Join {
-            room,
-            welcome,
-            ratchet_tree,
-        } => {
-            let invitation = view_mut(lp.state)
-                .and_then(|v| v.accept.as_ref())
-                .and_then(|a| a.offer.as_ref())
-                .map(|o| o.credentials.invitation.to_string());
-            match invitation {
-                Some(invitation) => ask_vta(
-                    lp,
-                    VtaAsk::Join {
-                        room,
-                        invitation,
-                        welcome,
-                        ratchet_tree,
-                    },
-                ),
-                None => true,
-            }
-        }
-        // Without a VTA there is nowhere to store a renewal, so nothing to read.
-        Next::CheckRenewals if lp.vta.is_none() => true,
-        Next::CheckRenewals => send(lp, Request::Offers { cursor: None }, Purpose::Renewals).await,
-        Next::Renew => {
-            let ask = view_mut(lp.state).map(|v| VtaAsk::Renew {
-                renewals: std::mem::take(&mut v.renewals),
-                member: v.me.clone(),
-            });
-            match ask {
-                Some(VtaAsk::Renew { renewals, member }) if !renewals.is_empty() => {
-                    let taken = ask_vta(
-                        lp,
-                        VtaAsk::Renew {
-                            renewals: renewals.clone(),
-                            member,
-                        },
-                    );
-                    if !taken && let Some(view) = view_mut(lp.state) {
-                        view.renewals = renewals;
-                    }
-                    taken
-                }
-                _ => true,
-            }
-        }
-    }
 }
 
 /// The loop's periodic pass: reply windows, and any step left waiting on a busy lane.
@@ -1149,5 +1351,154 @@ mod tests {
         assert_eq!(row.standing, Standing::Suspended);
         assert_eq!(RoomCondition::of(&row.room), RoomCondition::Closed);
         assert!(!RoomCondition::of(&row.room).admits());
+    }
+
+    // ---- plan / plan_next: pure, nothing changed before a claim ----
+
+    fn with_offered_room() -> State {
+        let mut state = state_with_view();
+        let view = view_mut(&mut state).unwrap();
+        view.take_page(
+            vec![serde_json::from_value(room("did:key:zR1", "offered", false)).unwrap()],
+            true,
+        );
+        view.held = Some(vec![]);
+        state
+    }
+
+    fn the_send(effect: &RoomsEffect) -> &Send {
+        match effect.steps.last() {
+            Some(Step::Send(send)) => send,
+            _ => panic!("the last step is a send"),
+        }
+    }
+
+    /// An acceptance is planned as the offers read, its flow committed only once
+    /// the read is under way: planning sets nothing.
+    #[test]
+    fn an_accept_is_planned_with_its_flow_as_the_commit() {
+        let mut state = with_offered_room();
+        let config = crate::state_handler::dispatch_util::test_config();
+        let effect = plan(&mut state, &config, true, Act::Accept);
+        assert_eq!(effect.steps.len(), 1);
+        let send = the_send(&effect);
+        assert_eq!(send.to, "did:key:zVtc");
+        assert_eq!(send.request, Request::Offers { cursor: None });
+        assert_eq!(
+            send.purpose,
+            Purpose::Offers {
+                room: "did:key:zR1".into()
+            }
+        );
+        assert_eq!(
+            send.commit,
+            Some(Commit::Accepting {
+                room: "did:key:zR1".into(),
+                progress: "Accepting Board pack… collecting the offer".into(),
+            })
+        );
+        assert_eq!(send.refusal, Some(Refusal::AcceptBusy));
+        let view = view_mut(&mut state).unwrap();
+        assert!(view.accept.is_none());
+        assert!(view.status.is_none());
+    }
+
+    /// An acceptance while an earlier request is unanswered sends nothing, and
+    /// is left set saying it waits.
+    #[test]
+    fn an_accept_while_waiting_is_planned_with_nothing_to_send() {
+        let mut state = with_offered_room();
+        arm(&mut state, Purpose::Memberships);
+        let config = crate::state_handler::dispatch_util::test_config();
+        let effect = plan(&mut state, &config, true, Act::Accept);
+        assert!(effect.steps.is_empty());
+        let view = view_mut(&mut state).unwrap();
+        assert!(view.accept.is_some());
+        assert_eq!(
+            view.status.as_ref().unwrap().text,
+            "Still waiting for the community's answer."
+        );
+    }
+
+    /// Without a VTA a refresh says why the custody is not shown and reads only
+    /// the record; with one, it asks the VTA first.
+    #[test]
+    fn a_refresh_asks_the_vta_first_when_there_is_one() {
+        let config = crate::state_handler::dispatch_util::test_config();
+        let mut state = state_with_view();
+        let effect = plan(&mut state, &config, false, Act::Refresh);
+        assert_eq!(effect.steps.len(), 1);
+        assert_eq!(the_send(&effect).purpose, Purpose::Memberships);
+        let view = view_mut(&mut state).unwrap();
+        assert_eq!(view.phase, RoomsPhase::Loading);
+        assert!(
+            view.held_error
+                .as_deref()
+                .unwrap()
+                .starts_with("no VTA is connected")
+        );
+
+        let mut state = state_with_view();
+        let effect = plan(&mut state, &config, true, Act::Refresh);
+        assert!(matches!(
+            effect.steps.first(),
+            Some(Step::Ask {
+                ask: VtaAsk::Held { .. },
+                commit: None,
+                refusal: Some(Refusal::CustodyBusy),
+            })
+        ));
+        assert_eq!(the_send(&effect).purpose, Purpose::Memberships);
+        assert!(view_mut(&mut state).unwrap().held_error.is_none());
+    }
+
+    /// A refresh step on a busy lane, or while the view waits, is not taken.
+    #[test]
+    fn a_refresh_step_on_a_busy_lane_is_planned_as_not_taken() {
+        let mut state = state_with_view();
+        let effect = plan_next(&mut state, true, true, Next::Refresh);
+        assert!(effect.steps.is_empty());
+        assert_eq!(effect.taken, Taken::No);
+        arm(&mut state, Purpose::Memberships);
+        assert_eq!(
+            plan_next(&mut state, true, false, Next::Refresh).taken,
+            Taken::No
+        );
+    }
+
+    /// The renewals stay in the view until the VTA's lane takes them.
+    #[test]
+    fn a_renew_step_hands_over_the_renewals_only_as_its_commit() {
+        let mut state = state_with_view();
+        view_mut(&mut state).unwrap().renewals = vec![
+            serde_json::from_value(json!({
+                "roomId": "did:key:zR1", "host": "did:key:zVtc", "label": "Board pack",
+                "visibility": "private", "actions": ["read"],
+                "validUntil": "2027-11-10T00:00:00Z", "renewsAt": "2027-10-01T00:00:00Z",
+                "issuedAt": "2026-11-03T09:00:00Z",
+                "credentials": { "membership": "{}", "authority": "{}" },
+            }))
+            .unwrap(),
+        ];
+        let effect = plan_next(&mut state, true, false, Next::Renew);
+        assert_eq!(effect.taken, Taken::ByLastStep);
+        assert!(matches!(
+            effect.steps.as_slice(),
+            [Step::Ask {
+                ask: VtaAsk::Renew { renewals, .. },
+                commit: Some(Commit::RenewalsHandedOver),
+                ..
+            }] if renewals.len() == 1
+        ));
+        assert_eq!(view_mut(&mut state).unwrap().renewals.len(), 1);
+    }
+
+    /// Without a VTA the check for renewals has nothing to do, and is taken.
+    #[test]
+    fn a_renewals_check_without_a_vta_is_planned_as_done() {
+        let mut state = state_with_view();
+        let effect = plan_next(&mut state, false, false, Next::CheckRenewals);
+        assert!(effect.steps.is_empty());
+        assert_eq!(effect.taken, Taken::Yes);
     }
 }

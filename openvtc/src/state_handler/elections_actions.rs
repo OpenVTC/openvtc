@@ -41,7 +41,7 @@ use crate::state_handler::actions::ElectionsAction as Act;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 pub(crate) use crate::state_handler::community_request::CommunityLoop as Loop;
 use crate::state_handler::community_request::{
-    self, CommunityFeature, Doc, SendOutcome, capitalise, fail, sender,
+    self, CommunityFeature, Doc, SendOutcome, Sender, capitalise, fail, sender,
 };
 use crate::state_handler::main_page::elections::{
     BallotForm, Disclose, ElectionsPhase, ElectionsView, Flow, Intent, Next, NotifiedPhase,
@@ -183,6 +183,7 @@ impl CommunityFeature for Elections {
     type Purpose = Purpose;
     type Reply = Reply;
     type Next = Next;
+    type Request = Outgoing;
     const NAME: &'static str = "elections";
     const SEND: DispatchDomain = SEND;
     /// A notified election is read from the community holding it, which may be one this
@@ -207,6 +208,39 @@ impl CommunityFeature for Elections {
     }
     fn outcome(outcome: SendOutcome) -> DispatchOutcome {
         DispatchOutcome::Elections(outcome)
+    }
+    fn build(
+        config: &Config,
+        sender: &mut Sender,
+        to: &str,
+        persona: PersonaId,
+        outgoing: Outgoing,
+    ) -> Result<Doc, String> {
+        // A community this persona is not a member of (one holding a notified election) has
+        // no membership transport to follow: TSP when the persona speaks it anywhere, so the
+        // answer comes back on the socket TSP answers arrive on; DIDComm otherwise.
+        if config.account.membership(to, persona).is_none() {
+            sender.over_tsp = config
+                .account
+                .memberships()
+                .any(|c| c.persona_ref == persona && c.joined_over_tsp());
+        }
+        match outgoing {
+            Outgoing::Build(request) => elections::build(&request, &sender.persona_did, to)
+                .map(|doc| Doc::Unsigned(Box::new(doc)))
+                .map_err(|e| format!("couldn't send: {e}")),
+            Outgoing::Signed(document) => {
+                let addressed = document
+                    .get("recipient")
+                    .and_then(serde_json::Value::as_str);
+                if !addressed.is_some_and(|r| vta_sdk::did_scid::same_reference(r, to)) {
+                    return Err(
+                        "your VTA signed the request for another community than this one".into(),
+                    );
+                }
+                Ok(Doc::Signed(document))
+            }
+        }
     }
     fn is_refusal(reply: &Reply) -> bool {
         matches!(reply, Reply::Refused(_))
@@ -275,37 +309,11 @@ async fn send_to(lp: &mut Loop<'_>, outgoing: Outgoing, purpose: Purpose, to_tar
             return true;
         }
     };
-    // A community this persona is not a member of (one holding a notified election) has
-    // no membership transport to follow: TSP when the persona speaks it anywhere, so the
-    // answer comes back on the socket TSP answers arrive on; DIDComm otherwise.
-    if lp.config.account.membership(&to, persona).is_none() {
-        sender.over_tsp = lp
-            .config
-            .account
-            .memberships()
-            .any(|c| c.persona_ref == persona && c.joined_over_tsp());
-    }
-    let doc = match outgoing {
-        Outgoing::Build(request) => match elections::build(&request, &sender.persona_did, &to) {
-            Ok(doc) => Doc::Unsigned(Box::new(doc)),
-            Err(e) => {
-                fail::<Elections>(lp.state, &purpose, format!("couldn't send: {e}"));
-                return true;
-            }
-        },
-        Outgoing::Signed(document) => {
-            let addressed = document
-                .get("recipient")
-                .and_then(serde_json::Value::as_str);
-            if !addressed.is_some_and(|r| vta_sdk::did_scid::same_reference(r, &to)) {
-                fail::<Elections>(
-                    lp.state,
-                    &purpose,
-                    "your VTA signed the request for another community than this one".into(),
-                );
-                return true;
-            }
-            Doc::Signed(document)
+    let doc = match Elections::build(lp.config, &mut sender, &to, persona, outgoing) {
+        Ok(doc) => doc,
+        Err(why) => {
+            fail::<Elections>(lp.state, &purpose, why);
+            return true;
         }
     };
     lp.spawn_send::<Elections>(sender, to, persona, doc, purpose)
@@ -482,7 +490,7 @@ async fn read_election(lp: &mut Loop<'_>, election: String, intent: Intent) -> b
 }
 
 /// What a send carries: a request built and signed here, or a document the VTA signed.
-enum Outgoing {
+pub(crate) enum Outgoing {
     Build(Request),
     Signed(serde_json::Value),
 }
