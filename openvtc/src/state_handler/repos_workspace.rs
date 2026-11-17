@@ -19,15 +19,15 @@
 //!   shows here without a refresh. The keyring is read only when asked, not on
 //!   the periodic probe.
 //! - **Jobs** ([`DispatchDomain::GitWorkspace`]) change something: clone,
-//!   set up, enable, disable, remove. Each is one key, and does everything it
+//!   set up, enable, disable, remove, save the settings. Each is one key, and does everything it
 //!   needs: `c` clones, sets did-git-sign up if it is not, and enables the new
 //!   checkout, so a member goes from "not here" to "commits are signed as me"
 //!   in one step. A job is planned by [`plan`], which is pure and returns a
 //!   [`WorkspaceEffect`]; [`run`] claims the lane and only once claimed marks
 //!   the workspace busy.
 //!
-//! Opening ([`open`]) reads the profile's settings file and the persona's
-//! signing key on the loop, then starts the first probe.
+//! Opening ([`open`]) reads the profile's settings file (on the blocking
+//! pool) and the persona's signing key, then starts the first probe.
 //!
 //! `f` chooses the forge account a repository (or every repository of the
 //! community on that forge) uses for clone, fetch and push
@@ -36,7 +36,7 @@
 //! the checkouts it covers.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use affinidi_tdk::TDK;
@@ -284,8 +284,13 @@ pub(crate) async fn open(ctx: &mut ActionCtx<'_>) {
     else {
         return;
     };
-    let settings =
-        WorkspaceSettings::path(ctx.profile).and_then(|p| WorkspaceSettings::load_from(&p));
+    // Read on the blocking pool, not on the loop's thread.
+    let settings = match WorkspaceSettings::path(ctx.profile) {
+        Ok(path) => blocking(move || WorkspaceSettings::load_from(&path))
+            .await
+            .unwrap_or_else(|e| Err(openvtc_core::errors::OpenVTCError::Config(e))),
+        Err(e) => Err(e),
+    };
     let signer = persona_signer(ctx.config, ctx.tdk, persona).await;
     let Some(view) = view_mut(ctx.state) else {
         return;
@@ -492,6 +497,14 @@ enum Work {
         coords: RepoCoords,
         linked_login: Option<String>,
     },
+    /// Save the settings form: checkouts under `root`, cloned over
+    /// `protocol`. Checking `root` against the disk and writing the profile's
+    /// settings file are the job's, off the loop.
+    Settings {
+        root: PathBuf,
+        shown_root: String,
+        protocol: Option<CloneProtocol>,
+    },
     /// Store a forge-account choice (`None` removes it) and write it into
     /// every located checkout it covers, with each one's `origin`.
     Account {
@@ -549,7 +562,11 @@ impl WorkspaceOutcome {
             Ok(done) => {
                 if matches!(
                     view.workspace.form,
-                    Some(WorkspaceForm::UsePath { .. } | WorkspaceForm::Account(_))
+                    Some(
+                        WorkspaceForm::UsePath { .. }
+                            | WorkspaceForm::Account(_)
+                            | WorkspaceForm::Settings { .. }
+                    )
                 ) {
                     view.workspace.form = None;
                 }
@@ -563,6 +580,7 @@ impl WorkspaceOutcome {
                 match view.workspace.form.as_mut() {
                     Some(WorkspaceForm::UsePath { error, .. }) => *error = Some(e.clone()),
                     Some(WorkspaceForm::Account(form)) => form.error = Some(e.clone()),
+                    Some(WorkspaceForm::Settings { error, .. }) => *error = Some(e.clone()),
                     _ => {}
                 }
                 view.note(Severity::Error, e);
@@ -731,6 +749,17 @@ impl WorkspaceJob {
                     git_ns_short(&coords.resource())
                 ))
             }
+            Work::Settings {
+                root,
+                shown_root,
+                protocol,
+            } => match self.save_settings(root, shown_root, *protocol).await {
+                Ok((updated, done)) => {
+                    settings = Some(updated);
+                    Ok(done)
+                }
+                Err(e) => Err(e),
+            },
             Work::Account {
                 coords,
                 scope,
@@ -987,6 +1016,39 @@ impl WorkspaceJob {
 }
 
 impl WorkspaceJob {
+    /// Check the chosen root against the disk and write the settings file.
+    /// Returns the new settings and what to say.
+    async fn save_settings(
+        &self,
+        root: &Path,
+        shown_root: &str,
+        protocol: Option<CloneProtocol>,
+    ) -> Result<(WorkspaceSettings, String), String> {
+        let Some(file) = self.settings_path.clone() else {
+            return Err("this profile has no settings file to write to".into());
+        };
+        let mut settings = self.settings.clone();
+        settings.root = root.to_path_buf();
+        settings.protocol = protocol;
+        let (s, r, shown) = (settings.clone(), root.to_path_buf(), shown_root.to_string());
+        blocking(move || {
+            if r.exists() && !r.is_dir() {
+                return Err(format!("{shown} is a file, not a directory."));
+            }
+            s.save_to(&file).map_err(|e| e.to_string())
+        })
+        .await??;
+        let how = protocol.map_or_else(
+            || "the forge account's protocol, else gh's, else HTTPS".to_string(),
+            |p| p.label().to_string(),
+        );
+        let done = format!(
+            "Checkouts go under {}, cloned over {how}.",
+            git_workspace::display_path(&settings.root),
+        );
+        Ok((settings, done))
+    }
+
     /// Check a forge-account choice, store it, and write what each covered
     /// checkout now uses into it. Returns the new settings and what to say.
     async fn choose_account(
@@ -1121,59 +1183,6 @@ pub(crate) fn own_did(config: &Config) -> String {
     }
 }
 
-/// Save the settings form.
-fn save_settings(ctx: &mut ActionCtx<'_>) {
-    let profile = ctx.profile.to_string();
-    let Some(view) = view_mut(ctx.state) else {
-        return;
-    };
-    let Some(WorkspaceForm::Settings { root, protocol, .. }) = view.workspace.form.clone() else {
-        return;
-    };
-    let root_path = git_workspace::expand_tilde(&root);
-    let refusal = if root.trim().is_empty() {
-        Some("Name a directory.".to_string())
-    } else if !root_path.is_absolute() {
-        Some("Use an absolute path, or one starting with ~/.".to_string())
-    } else if root_path.exists() && !root_path.is_dir() {
-        Some(format!("{} is a file, not a directory.", root.trim()))
-    } else {
-        None
-    };
-    if let Some(why) = refusal {
-        if let Some(WorkspaceForm::Settings { error, .. }) = view.workspace.form.as_mut() {
-            *error = Some(why);
-        }
-        return;
-    }
-    let mut settings = view.workspace.settings.clone();
-    settings.root = root_path;
-    settings.protocol = protocol;
-    let how = protocol.map_or_else(
-        || "the forge account's protocol, else gh's, else HTTPS".to_string(),
-        |p| p.label().to_string(),
-    );
-    match WorkspaceSettings::path(&profile).and_then(|p| settings.save_to(&p)) {
-        Ok(()) => {
-            view.workspace.settings = settings;
-            view.workspace.form = None;
-            view.workspace.want_probe(false);
-            view.note(
-                Severity::Success,
-                format!(
-                    "Checkouts go under {}, cloned over {how}.",
-                    git_workspace::display_path(&view.workspace.settings.root),
-                ),
-            );
-        }
-        Err(e) => {
-            if let Some(WorkspaceForm::Settings { error, .. }) = view.workspace.form.as_mut() {
-                *error = Some(e.to_string());
-            }
-        }
-    }
-}
-
 // ****************************************************************************
 // Loop-side actions: the reducer
 // ****************************************************************************
@@ -1182,10 +1191,6 @@ fn save_settings(ctx: &mut ActionCtx<'_>) {
 pub(crate) enum WorkspaceEffect {
     /// Nothing more: the action refused, or did nothing.
     None,
-    /// Save the settings form, then probe if due. Saving checks the chosen
-    /// directory on disk and writes the profile's settings file, so the
-    /// runner does it ([`save_settings`]).
-    SaveSettings,
     /// Run a job ([`JobRequest`]).
     Job(Box<JobRequest>),
 }
@@ -1210,9 +1215,6 @@ pub(crate) struct JobRequest {
 /// the action makes before anything runs (spending a confirmation, marking a
 /// form, saying why it cannot run), and returns what the loop still owes.
 pub(crate) fn plan(state: &mut State, config: &Config, action: W) -> WorkspaceEffect {
-    if action == W::SettingsSubmit {
-        return WorkspaceEffect::SaveSettings;
-    }
     let linked = state.main_page.content_panel.repos.linked.clone();
     let Some(view) = view_mut(state) else {
         return WorkspaceEffect::None;
@@ -1232,6 +1234,34 @@ pub(crate) fn plan(state: &mut State, config: &Config, action: W) -> WorkspaceEf
         .unwrap_or_default()
         .to_string();
     let (work, busy) = match action {
+        W::SettingsSubmit => {
+            let Some(WorkspaceForm::Settings { root, protocol, .. }) = view.workspace.form.clone()
+            else {
+                return WorkspaceEffect::None;
+            };
+            let root_path = git_workspace::expand_tilde(&root);
+            let refusal = if root.trim().is_empty() {
+                Some("Name a directory.".to_string())
+            } else if !root_path.is_absolute() {
+                Some("Use an absolute path, or one starting with ~/.".to_string())
+            } else {
+                None
+            };
+            if let Some(why) = refusal {
+                if let Some(WorkspaceForm::Settings { error, .. }) = view.workspace.form.as_mut() {
+                    *error = Some(why);
+                }
+                return WorkspaceEffect::None;
+            }
+            (
+                Work::Settings {
+                    root: root_path,
+                    shown_root: root.trim().to_string(),
+                    protocol,
+                },
+                "saving the workspace settings".to_string(),
+            )
+        }
         W::Clone => {
             let Some(resource) = target.clone() else {
                 view.note(Severity::Warning, "Highlight a repository first.");
@@ -1483,11 +1513,6 @@ pub(crate) fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
 pub(crate) fn run(ctx: &mut ActionCtx<'_>, effect: WorkspaceEffect) {
     let request = match effect {
         WorkspaceEffect::None => return,
-        WorkspaceEffect::SaveSettings => {
-            save_settings(ctx);
-            probe_if_due(ctx.state, ctx.dispatch_tx, ctx.in_flight);
-            return;
-        }
         WorkspaceEffect::Job(request) => *request,
     };
     let JobRequest {
@@ -1613,6 +1638,65 @@ mod tests {
         ] {
             assert!(reduce(&mut s, &a), "{a:?} is view-only");
         }
+    }
+
+    fn settings_job(settings_path: Option<PathBuf>, work: Work) -> WorkspaceJob {
+        WorkspaceJob {
+            vtc_did: "did:webvh:vtc".into(),
+            persona: PersonaId(uuid::Uuid::nil()),
+            work,
+            signer: Err("unused".into()),
+            endpoint: None,
+            client: None,
+            top_context_id: String::new(),
+            own_did: String::new(),
+            settings: WorkspaceSettings::default(),
+            settings_path,
+        }
+    }
+
+    /// The settings job writes the file and hands back the new settings; a
+    /// root that is a file is refused, and nothing is written.
+    #[tokio::test]
+    async fn the_settings_job_writes_the_file_or_says_why_not() {
+        let dir = std::env::temp_dir().join(format!("openvtc-ws-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("workspace.json");
+        let root = dir.join("code");
+        let work = Work::Settings {
+            root: root.clone(),
+            shown_root: "code".into(),
+            protocol: Some(CloneProtocol::Ssh),
+        };
+        let outcome = settings_job(Some(file.clone()), work).run().await;
+        assert!(
+            outcome
+                .result
+                .as_ref()
+                .is_ok_and(|m| m.starts_with("Checkouts go under "))
+        );
+        assert_eq!(
+            outcome.settings.as_ref().map(|s| s.root.clone()),
+            Some(root)
+        );
+        assert!(file.exists());
+
+        let a_file = dir.join("a-file");
+        std::fs::write(&a_file, b"x").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let work = Work::Settings {
+            root: a_file,
+            shown_root: "a-file".into(),
+            protocol: None,
+        };
+        let outcome = settings_job(Some(file.clone()), work).run().await;
+        assert_eq!(
+            outcome.result,
+            Err("a-file is a file, not a directory.".into())
+        );
+        assert!(outcome.settings.is_none());
+        assert!(!file.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2043,6 +2127,10 @@ mod tests {
         s.main_page.content_panel.repos.view.as_ref().unwrap()
     }
 
+    fn ws_view_mut(s: &mut State) -> &mut ReposView {
+        s.main_page.content_panel.repos.view.as_mut().unwrap()
+    }
+
     /// A job is planned with what it says while it runs; nothing is marked
     /// busy or said until the runner has claimed its lane.
     #[test]
@@ -2099,17 +2187,34 @@ mod tests {
         ));
     }
 
-    /// Saving the settings is the runner's (it reads and writes the disk);
-    /// the plan changes nothing for it. A clone with nothing highlighted is
-    /// refused in the plan.
+    /// Saving the settings is a job (it reads and writes the disk, off the
+    /// loop); the plan only refuses a root it can tell is wrong without the
+    /// disk. A clone with nothing highlighted is refused in the plan.
     #[test]
-    fn settings_are_saved_by_the_runner_and_a_clone_needs_a_target() {
+    fn settings_are_saved_by_a_job_and_a_clone_needs_a_target() {
         let config = crate::state_handler::dispatch_util::test_config();
         let mut s = state_with(view());
+        let form = |root: &str| {
+            Some(WorkspaceForm::Settings {
+                root: root.into(),
+                protocol: None,
+                error: None,
+            })
+        };
+        ws_view_mut(&mut s).workspace.form = form("relative/dir");
         assert!(matches!(
             plan(&mut s, &config, W::SettingsSubmit),
-            WorkspaceEffect::SaveSettings
+            WorkspaceEffect::None
         ));
+        assert!(matches!(
+            &ws_view(&s).workspace.form,
+            Some(WorkspaceForm::Settings { error: Some(e), .. }) if e.starts_with("Use an absolute path")
+        ));
+        ws_view_mut(&mut s).workspace.form = form("/srv/code");
+        let WorkspaceEffect::Job(job) = plan(&mut s, &config, W::SettingsSubmit) else {
+            panic!("a valid root is saved by a job");
+        };
+        assert!(matches!(&job.work, Work::Settings { root, .. } if root == Path::new("/srv/code")));
         assert!(ws_view(&s).status.is_none());
         assert!(matches!(
             plan(&mut s, &config, W::Clone),

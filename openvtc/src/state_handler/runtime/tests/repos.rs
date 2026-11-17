@@ -15,7 +15,7 @@ use crate::state_handler::actions::WorkspaceAction;
 use crate::state_handler::background_dispatch::{DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::main_page::repos::{
     ArmedChange, LinkFlow, LinkPhase, NewRepoForm, Pending, Purpose, ReposPhase, ReposScreen,
-    ReposView, Severity, WorkspaceChange,
+    ReposView, Severity, WorkspaceChange, WorkspaceForm,
 };
 use crate::state_handler::repos_actions;
 use openvtc_core::config::account::PersonaId;
@@ -571,8 +571,8 @@ async fn an_unanswered_change_ends_on_the_sweep() {
 //
 // Set-up is the job pinned end to end: with the test config's keys held
 // locally (no VTA), it fails at once inside the job without touching git,
-// did-git-sign or the filesystem. Saving the settings form writes the
-// profile's settings file and is not driven here.
+// did-git-sign or the filesystem. Saving the settings form is a job too; its
+// write is unit-tested in `repos_workspace`.
 
 fn workspace(w: WorkspaceAction) -> Action {
     Action::Repos(Act::Workspace(w))
@@ -596,6 +596,33 @@ async fn a_workspace_job_while_one_runs_says_what_is_running() {
             "Still cloning acme/gadgets — please wait.".into()
         ))
     );
+}
+
+/// Saving the settings while a job runs is refused like any job: the job
+/// may be writing the same settings file.
+#[tokio::test]
+async fn saving_the_settings_while_a_job_runs_is_refused() {
+    let (mut rt, _h) = runtime().await;
+    open_view(&mut rt, PersonaId::new(), true);
+    view_mut(&mut rt).workspace.busy = Some("cloning acme/gadgets".into());
+    view_mut(&mut rt).workspace.form = Some(WorkspaceForm::Settings {
+        root: "/srv/code".into(),
+        protocol: None,
+        error: None,
+    });
+
+    rt.on_action(workspace(WorkspaceAction::SettingsSubmit))
+        .await;
+
+    assert!(!rt.in_flight.is_busy(DispatchDomain::GitWorkspace));
+    assert_eq!(
+        status(&rt),
+        Some((
+            Severity::Warning,
+            "Still cloning acme/gadgets — please wait.".into()
+        ))
+    );
+    assert!(view(&rt).workspace.form.is_some(), "the form stays");
 }
 
 /// A job refused for want of a target says so and claims nothing.

@@ -306,6 +306,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   nothing. It now says the lane is busy and to press `r` once it finishes, including on
   the loading screen. The VTA's held election notifications are still read: they come
   from the VTA on a lane of their own.
+- **Repos: saving the workspace settings no longer blocks the app on the disk**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Saving the settings form checked
+  the directory and wrote the settings file on the event loop, and opening the panel read
+  the file there too. Saving is now a workspace job, shown as running while it writes,
+  and refused while another workspace job (which may write the same file) runs; opening
+  reads the file on the blocking pool.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard
