@@ -254,6 +254,8 @@ enum Refusal {
     AcceptBusy,
     /// The VTA was not asked which rooms it holds; the record still refreshes.
     CustodyBusy,
+    /// The record was not read again: its lane is busy.
+    RecordBusy,
 }
 
 impl Refusal {
@@ -263,6 +265,13 @@ impl Refusal {
         };
         match self {
             Refusal::AcceptBusy => view.note(Severity::Warning, InFlight::busy_message(SEND)),
+            Refusal::RecordBusy => view.note(
+                Severity::Warning,
+                format!(
+                    "{} The rooms were not read again — press r once it finishes.",
+                    InFlight::busy_message(SEND)
+                ),
+            ),
             Refusal::CustodyBusy => {
                 view.held_error
                     .get_or_insert_with(|| "your VTA is busy".into());
@@ -345,7 +354,7 @@ fn plan_refresh(state: &mut State, has_vta: bool) -> Vec<Step> {
         Request::Memberships { cursor: None },
         Purpose::Memberships,
         None,
-        None,
+        Some(Refusal::RecordBusy),
     ));
     steps
 }

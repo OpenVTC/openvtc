@@ -130,18 +130,25 @@ fn armed_on(rt: &mut Runtime, purpose: &Purpose) {
 
 // ---- Open / Refresh ----
 
-/// A refresh on a busy Rooms lane sends nothing and says nothing: the panel
-/// stays loading, and with no VTA the custody says why it is not shown.
+/// A refresh on a busy Rooms lane sends nothing and says why: the panel stays
+/// loading with the busy note, and with no VTA the custody says why it is not
+/// shown.
 #[tokio::test]
-async fn a_refresh_on_a_busy_lane_sends_nothing_and_says_nothing() {
+async fn a_refresh_on_a_busy_lane_sends_nothing_and_says_the_lane_is_busy() {
     let mut rt = with_keys().await;
     assert!(rt.in_flight.try_begin(DispatchDomain::Rooms));
     rt.on_action(Action::Rooms(Act::Open(0))).await;
     let v = view(&mut rt);
     assert_eq!(v.phase, RoomsPhase::Loading);
     assert!(v.pending.is_none());
-    assert!(v.status.is_none());
     assert!(v.held.is_none());
+    let (severity, text) = status(&mut rt).expect("the busy lane is said");
+    assert_eq!(severity, Severity::Warning);
+    assert!(
+        text.starts_with(&InFlight::busy_message(DispatchDomain::Rooms)),
+        "{text}"
+    );
+    let v = view(&mut rt);
     assert_eq!(
         v.held_error.as_deref(),
         Some("no VTA is connected, so which rooms it holds keys for can't be shown")

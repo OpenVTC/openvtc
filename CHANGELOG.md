@@ -287,6 +287,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   which hidden-vetting key it bound you to stayed filed as though sent when the signing
   failed. It is now un-filed, as a failed send already did; it is asked again after the
   usual re-ask interval.
+- **Rooms: a refresh on a busy lane says so**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Opening the panel or pressing `r`
+  while another Rooms request held the lane read nothing and said nothing, so an empty
+  panel sat at "asking the community…" indefinitely. It now says the lane is busy and to
+  press `r` once it finishes, including on the loading screen.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard
