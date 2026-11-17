@@ -247,15 +247,15 @@ impl Commit {
     }
 }
 
-/// What the view says when a step did not start.
+/// What the view says when a step did not start because its lane was busy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
-    /// The acceptance did not start: its lane is busy.
-    AcceptBusy,
+    /// The acceptance did not start.
+    Accept,
     /// The VTA was not asked which rooms it holds; the record still refreshes.
-    CustodyBusy,
-    /// The record was not read again: its lane is busy.
-    RecordBusy,
+    Custody,
+    /// The record was not read again.
+    Record,
 }
 
 impl Refusal {
@@ -264,15 +264,15 @@ impl Refusal {
             return;
         };
         match self {
-            Refusal::AcceptBusy => view.note(Severity::Warning, InFlight::busy_message(SEND)),
-            Refusal::RecordBusy => view.note(
+            Refusal::Accept => view.note(Severity::Warning, InFlight::busy_message(SEND)),
+            Refusal::Record => view.note(
                 Severity::Warning,
                 format!(
                     "{} The rooms were not read again — press r once it finishes.",
                     InFlight::busy_message(SEND)
                 ),
             ),
-            Refusal::CustodyBusy => {
+            Refusal::Custody => {
                 view.held_error
                     .get_or_insert_with(|| "your VTA is busy".into());
             }
@@ -342,7 +342,7 @@ fn plan_refresh(state: &mut State, has_vta: bool) -> Vec<Step> {
                 member: view.me.clone(),
             },
             commit: None,
-            refusal: Some(Refusal::CustodyBusy),
+            refusal: Some(Refusal::Custody),
         });
     } else {
         view.held = None;
@@ -354,7 +354,7 @@ fn plan_refresh(state: &mut State, has_vta: bool) -> Vec<Step> {
         Request::Memberships { cursor: None },
         Purpose::Memberships,
         None,
-        Some(Refusal::RecordBusy),
+        Some(Refusal::Record),
     ));
     steps
 }
@@ -476,7 +476,7 @@ fn plan_accept(state: &mut State, has_vta: bool) -> RoomsEffect {
         Request::Offers { cursor: None },
         Purpose::Offers { room: room.clone() },
         Some(Commit::Accepting { room, progress }),
-        Some(Refusal::AcceptBusy),
+        Some(Refusal::Accept),
     ))
 }
 
@@ -1414,7 +1414,7 @@ mod tests {
                 progress: "Accepting Board pack… collecting the offer".into(),
             })
         );
-        assert_eq!(send.refusal, Some(Refusal::AcceptBusy));
+        assert_eq!(send.refusal, Some(Refusal::Accept));
         let view = view_mut(&mut state).unwrap();
         assert!(view.accept.is_none());
         assert!(view.status.is_none());
@@ -1459,7 +1459,7 @@ mod tests {
             Some(Step::Ask {
                 ask: VtaAsk::Held { .. },
                 commit: None,
-                refusal: Some(Refusal::CustodyBusy),
+                refusal: Some(Refusal::Custody),
             })
         ));
         assert_eq!(the_send(&effect).purpose, Purpose::Memberships);

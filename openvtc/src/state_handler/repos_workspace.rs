@@ -275,17 +275,14 @@ pub(crate) async fn persona_signer(
 /// the settings could not be read: the caller says it once the read the
 /// open starts has cleared the status line, so it is not lost.
 pub(crate) async fn open(ctx: &mut ActionCtx<'_>) -> Option<String> {
-    let Some(persona) = ctx
+    let persona = ctx
         .state
         .main_page
         .content_panel
         .repos
         .view
         .as_ref()
-        .map(|v| v.persona)
-    else {
-        return None;
-    };
+        .map(|v| v.persona)?;
     // Read on the blocking pool, not on the loop's thread.
     let settings = match WorkspaceSettings::path(ctx.profile) {
         Ok(path) => blocking(move || WorkspaceSettings::load_from(&path))
@@ -1691,8 +1688,10 @@ mod tests {
         assert!(v.status.is_none(), "said by the caller, after the read");
         assert_eq!(v.workspace.profile, "default");
 
-        let mut settings = WorkspaceSettings::default();
-        settings.root = PathBuf::from("/srv/code");
+        let settings = WorkspaceSettings {
+            root: PathBuf::from("/srv/code"),
+            ..WorkspaceSettings::default()
+        };
         assert!(fill(&mut v, "default", Ok(settings), Err("no key".into())).is_none());
         assert_eq!(v.workspace.settings.root, PathBuf::from("/srv/code"));
     }
