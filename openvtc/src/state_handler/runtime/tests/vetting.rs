@@ -2389,7 +2389,7 @@ async fn refreshing_the_vetter_side_asks_which_key_a_rebound_community_holds() {
 }
 
 #[tokio::test]
-async fn a_binding_question_without_keys_says_so_and_stays_asked() {
+async fn a_binding_question_without_keys_says_so_and_is_unfiled() {
     let (mut rt, _h) = runtime().await;
     let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
     rebound_engine(&mut rt, persona);
@@ -2397,8 +2397,11 @@ async fn a_binding_question_without_keys_says_so_and_stays_asked() {
     act(&mut rt, VettingAction::RefreshVetterSide).await;
 
     assert!(key_check_started(&rt));
-    // Filed and marked asked before the signing failed, and left so.
-    assert!(asked(&rt, QueryKind::PcsBinding));
+    // Filed before the signing and un-filed when it fails; the check keeps
+    // the time it was asked, so it is not asked again before the re-ask
+    // interval.
+    assert!(!asked(&rt, QueryKind::PcsBinding));
+    assert!(!rt.config.private.vetting.hidden_vetter[0].binding_read_due(chrono::Utc::now()));
     assert!(rt.save.is_pending());
     let s = status(&rt);
     assert_eq!(s.severity, Severity::Error);

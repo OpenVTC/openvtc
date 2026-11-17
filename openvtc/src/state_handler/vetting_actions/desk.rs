@@ -339,8 +339,9 @@ fn plan_ask_bindings(config: &mut Config, now: DateTime<Utc>) -> VettingEffect {
 }
 
 /// Ask `community` which key it bound `persona` to: mark the engine's check asked and file
-/// the question, then send it as the client's own. A failed send is said, and the question
-/// stays filed.
+/// the question, then send it as the client's own. A signing that fails un-files the question,
+/// as a send that fails off the loop does, and is said; the check keeps the time it was asked,
+/// so it is asked again only after [`BINDING_REASK`](openvtc_core::vetting::binding::BINDING_REASK).
 pub(super) fn plan_ask_binding(
     config: &Config,
     community: &str,
@@ -371,13 +372,14 @@ pub(super) fn plan_ask_binding(
             persona,
             document: Box::new(document),
             sent: Box::new(Sent::Query {
-                document_id,
+                document_id: document_id.clone(),
                 community: community.to_string(),
                 kind: QueryKind::PcsBinding,
             }),
             claim: Claim::Unheld,
             then: Asked::Binding {
                 community: community.to_string(),
+                document_id,
             },
         },
     ])
@@ -539,8 +541,12 @@ pub(super) enum Asked {
         community: String,
         now: DateTime<Utc>,
     },
-    /// The client's own binding question to `community`: a failure is said.
-    Binding { community: String },
+    /// The client's own binding question `document_id` to `community`: a
+    /// failure un-files it and is said.
+    Binding {
+        community: String,
+        document_id: String,
+    },
     /// A ticket's question about how its community vets: it waits on the
     /// answer, or is refused as unconfirmed.
     Ticket(PendingTicket),
@@ -576,13 +582,19 @@ impl Asked {
                     book.vetter_refresh_due = true;
                 }
             }
-            Asked::Binding { community } => show(
-                state,
-                Status::error(format!(
-                    "Could not ask {} which hidden-vetting key it holds for you: {error}",
-                    community_display(config, &community)
-                )),
-            ),
+            Asked::Binding {
+                community,
+                document_id,
+            } => {
+                config.private.vetting.forget_query(&document_id);
+                show(
+                    state,
+                    Status::error(format!(
+                        "Could not ask {} which hidden-vetting key it holds for you: {error}",
+                        community_display(config, &community)
+                    )),
+                );
+            }
             Asked::Ticket(pending) => ticket_unsent(state, config, pending, error),
         }
     }

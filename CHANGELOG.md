@@ -282,6 +282,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   shown after the vetter pass even when the pass had just said a warning or an error
   (a question to a community that could not be sent), which hid it. The failure now
   stays on the status line; the summary is shown otherwise.
+- **Hidden vetting: a key-binding question that cannot be signed is un-filed**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The question asking a community
+  which hidden-vetting key it bound you to stayed filed as though sent when the signing
+  failed. It is now un-filed, as a failed send already did; it is asked again after the
+  usual re-ask interval.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard
