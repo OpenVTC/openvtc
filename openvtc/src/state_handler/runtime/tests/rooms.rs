@@ -460,17 +460,20 @@ async fn a_renew_step_on_a_busy_vta_lane_keeps_the_renewals_and_the_step() {
     assert_eq!(v.renewals.len(), 1);
 }
 
-/// Without a VTA a renew step is kept, its renewals with it.
+/// Without a VTA a renew step is dropped with its renewals rather than kept
+/// for ever: nothing can store them, and the first read once a VTA is
+/// connected collects them again.
 #[tokio::test]
-async fn a_renew_step_without_a_vta_is_kept() {
+async fn a_renew_step_without_a_vta_is_dropped() {
     let mut rt = with_keys().await;
     open_quietly(&mut rt).await;
     view(&mut rt).renewals = vec![renewal()];
     view(&mut rt).next = Some(Next::Renew);
     rt.on_capabilities_sweep().await;
     let v = view(&mut rt);
-    assert_eq!(v.next, Some(Next::Renew));
-    assert_eq!(v.renewals.len(), 1);
+    assert!(v.next.is_none());
+    assert!(v.renewals.is_empty());
+    assert!(!rt.in_flight.is_busy(DispatchDomain::RoomsVta));
 }
 
 /// A renew step the VTA's lane takes hands the renewals to the job.

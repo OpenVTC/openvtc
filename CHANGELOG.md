@@ -292,6 +292,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   while another Rooms request held the lane read nothing and said nothing, so an empty
   panel sat at "asking the community…" indefinitely. It now says the lane is busy and to
   press `r` once it finishes, including on the loading screen.
+- **Rooms: renewals collected before the VTA disconnected are no longer retried for ever**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The step handing them to the VTA
+  was kept and retried on every tick while no VTA was connected. It is now dropped; the
+  first read once a VTA is connected collects the renewals again.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

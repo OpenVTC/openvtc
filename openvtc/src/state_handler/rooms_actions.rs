@@ -573,6 +573,16 @@ fn plan_next(state: &mut State, has_vta: bool, send_busy: bool, next: Next) -> R
         )),
         // The renewals stay in the view until the VTA's lane takes them.
         Next::Renew if view.renewals.is_empty() => RoomsEffect::done(),
+        // The VTA went away since they were collected: nothing can store them
+        // now, and the first read once one is connected collects them again.
+        Next::Renew if !has_vta => {
+            tracing::debug!(
+                renewals = view.renewals.len(),
+                "rooms renewals dropped: no VTA is connected to store them"
+            );
+            view.renewals.clear();
+            RoomsEffect::done()
+        }
         Next::Renew => RoomsEffect::one(Step::Ask {
             ask: VtaAsk::Renew {
                 renewals: view.renewals.clone(),
