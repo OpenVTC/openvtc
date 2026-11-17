@@ -2812,7 +2812,7 @@ mod hidden {
     }
 
     #[tokio::test]
-    async fn a_challenge_is_asked_even_while_a_persons_send_holds_the_domain() {
+    async fn a_challenge_asked_while_busy_leaves_the_busy_refusal_said() {
         let (mut rt, _h) = runtime().await;
         let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
         hidden_application(&mut rt, persona);
@@ -2820,13 +2820,11 @@ mod hidden {
 
         act(&mut rt, VettingAction::RefreshRequirements).await;
 
-        // The requirements are refused; the challenge is not, and is said last.
+        // The requirements are refused; the challenge is not, and asks
+        // quietly so the refusal stays on the status line.
         assert!(!asked(&rt, QueryKind::Manifest));
         assert!(asked(&rt, QueryKind::PcsChallenge));
-        assert_eq!(
-            status(&rt),
-            &Status::progress("Asking the community for a submission challenge…")
-        );
+        assert_busy_refusal(&rt);
         assert!(!rt.save.is_pending());
         settle_unheld(&mut rt).await;
         assert!(busy(&rt), "the person's send still holds the domain");

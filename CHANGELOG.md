@@ -271,6 +271,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the busy warning replaced "Application started.", so it read as refused. The status
   now says it started and that its requirements wait until the other send finishes (m
   asks then).
+- **Vetting: refreshing a hidden application while busy keeps the busy refusal on screen**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). `m` on a hidden-vetting
+  application while another vetting send ran refused the requirements question, but the
+  submission-challenge request that follows replaced the refusal with "Asking the
+  community for a submission challenge…". The challenge is still asked, quietly, when
+  the requirements were refused or failed.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

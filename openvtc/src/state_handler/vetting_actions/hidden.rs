@@ -43,19 +43,25 @@ const CHALLENGE_FAILED: &str = "Could not ask for a submission challenge";
 /// on it: a launch asks for a fresh challenge of its own and waits for it
 /// (`join_flow::challenge_step`). The community issues one per applicant and spends it when the
 /// proof is read, so asking twice replaces rather than accumulates — which is why this is safe
-/// to call again on a retry.
-pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &str) {
-    let effect = plan_ask_for_challenge(ctx.state, ctx.config, application_id);
+/// to call again on a retry. `announce` is whether to say it is asking: not when the status
+/// already says why something asked for alongside it did not happen.
+pub(crate) async fn ask_for_challenge(
+    ctx: &mut ActionCtx<'_>,
+    application_id: &str,
+    announce: bool,
+) {
+    let effect = plan_ask_for_challenge(ctx.state, ctx.config, application_id, announce);
     run(ctx, effect).await;
 }
 
-/// Plan [`ask_for_challenge`]: file the question and say so; the effect signs and sends it as
-/// the client's own step, never refused for a busy domain. A signing or send that fails
-/// un-files the question, as a send that fails off the loop does.
+/// Plan [`ask_for_challenge`]: file the question and say so (when `announce`); the effect
+/// signs and sends it as the client's own step, never refused for a busy domain. A signing or
+/// send that fails un-files the question, as a send that fails off the loop does.
 pub(super) fn plan_ask_for_challenge(
     state: &mut State,
     config: &mut Config,
     application_id: &str,
+    announce: bool,
 ) -> VettingEffect {
     let Some(app) = config
         .private
@@ -82,10 +88,12 @@ pub(super) fn plan_ask_for_challenge(
         kind: QueryKind::PcsChallenge,
         sent_at: Utc::now(),
     });
-    show(
-        state,
-        Status::progress("Asking the community for a submission challenge…"),
-    );
+    if announce {
+        show(
+            state,
+            Status::progress("Asking the community for a submission challenge…"),
+        );
+    }
     let sent = Sent::Query {
         document_id: document_id.clone(),
         community: app.community.clone(),
@@ -609,7 +617,7 @@ mod tests {
             .clone();
 
         // Not a hidden application: nothing asked.
-        let effect = plan_ask_for_challenge(&mut state, &mut config, &id);
+        let effect = plan_ask_for_challenge(&mut state, &mut config, &id, true);
         assert!(effect.0.is_empty());
         assert!(config.private.vetting.queries.is_empty());
 
@@ -622,7 +630,7 @@ mod tests {
             .application_by_id_mut(&id)
             .unwrap()
             .hidden = Some(params);
-        let effect = plan_ask_for_challenge(&mut state, &mut config, &id);
+        let effect = plan_ask_for_challenge(&mut state, &mut config, &id, true);
 
         assert!(
             config
@@ -658,6 +666,13 @@ mod tests {
             &Abort::undoing(CHALLENGE_FAILED, vec![Undo::ForgetQuery(filed)])
         );
         assert_eq!(same, abort);
+
+        // Asked quietly, it leaves the status line to what said why before it.
+        let refused = Status::warning("refused");
+        panel(&mut state).status_message = Some(refused.clone());
+        let effect = plan_ask_for_challenge(&mut state, &mut config, &id, false);
+        assert_eq!(effect.0.len(), 2, "still signed and sent");
+        assert_eq!(said(&mut state), refused);
     }
 
     #[test]
