@@ -115,3 +115,54 @@ async fn the_fixture_personas_keys_resolve() {
             .is_some_and(|c| c.status.is_active())
     );
 }
+
+/// Give the runtime a persona whose DID is a freshly generated `did:key`,
+/// held by the TDK: like [`persona_with_keys`], but what it signs also
+/// verifies, because its DID resolves offline to the key that signed. Returns
+/// its id and its DID.
+pub(crate) async fn persona_with_did_key(rt: &mut Runtime) -> (PersonaId, String) {
+    let (did, secret) =
+        affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+            .expect("did:key generates");
+    let kid = secret.id.clone();
+    rt.tdk
+        .get_shared_state()
+        .secrets_resolver()
+        .insert(secret)
+        .await;
+    rt.config.key_info.insert(
+        kid.clone(),
+        KeyInfoConfig {
+            path: KeySourceMaterial::Derived {
+                path: "m/0'/0'/1'".into(),
+            },
+            create_time: chrono::Utc::now(),
+            purpose: KeyTypes::PersonaAuthentication,
+        },
+    );
+    let persona = PersonaId::new();
+    let document = serde_json::from_value(serde_json::json!({
+        "id": did,
+        "authentication": [kid],
+        "assertionMethod": [kid],
+        "keyAgreement": [kid],
+    }))
+    .expect("a DID document naming the key");
+    rt.config.identities.insert(
+        persona,
+        openvtc_core::identity::IdentityContext {
+            persona_id: persona,
+            did: did.clone(),
+            document,
+            profile: Arc::new(ATMProfile {
+                inner: Arc::new(ATMProfileInner {
+                    did: did.clone(),
+                    alias: did.clone(),
+                    mediator: Arc::new(None),
+                }),
+            }),
+            mediator_did: None,
+        },
+    );
+    (persona, did)
+}

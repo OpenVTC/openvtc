@@ -856,3 +856,1054 @@ async fn asking_for_a_resend_files_the_question_and_a_failed_send_forgets_it() {
         status(&rt).text
     );
 }
+
+// ============================================================================
+// Desk
+// ============================================================================
+
+use openvtc_core::vetting::tickets::{DEFAULT_VALIDITY, Ticket};
+use openvtc_core::vetting::vetter::{DeskEntry, DeskSession, DeskState, ReceivedCard};
+
+const APPLICANT: &str = "did:key:zApplicantAtTheDesk";
+
+/// A request from [`APPLICANT`] to `persona`, accepted onto the desk for
+/// [`VTC`]. Returns its id.
+fn desk_request(rt: &mut Runtime, persona: PersonaId) -> String {
+    let body = request::v0_1::Payload::try_from(
+        request::v0_1::Payload::builder()
+            .community(VTC)
+            .join_did(APPLICANT)
+            .ticket(Some(code_ticket())),
+    )
+    .expect("a request");
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now();
+    rt.config.private.vetting.desk.push(DeskEntry {
+        request_id: request_id.clone(),
+        request_document_id: uuid::Uuid::new_v4().to_string(),
+        applicant: APPLICANT.into(),
+        community: VTC.into(),
+        persona,
+        ticket_id: None,
+        request: body,
+        state: DeskState::Accepted,
+        received_at: now,
+        updated_at: now,
+    });
+    rt.state.main_page.sync_from_config(&rt.config);
+    request_id
+}
+
+fn desk_state<'a>(rt: &'a Runtime, request_id: &str) -> &'a DeskState {
+    &rt.config
+        .private
+        .vetting
+        .desk_entry(request_id)
+        .expect("the request is on the desk")
+        .state
+}
+
+/// The page has already asked [`VTC`] what it requires, so a session opens
+/// without asking first.
+fn requirements_asked(rt: &mut Runtime) {
+    rt.state
+        .main_page
+        .content_panel
+        .vetting
+        .requirements_requested
+        .push(VTC.into());
+}
+
+fn open_session_form(rt: &mut Runtime, request_id: &str) {
+    rt.state.main_page.content_panel.vetting.mode = VettingMode::OpenSession {
+        request_id: request_id.into(),
+        method_index: 0,
+    };
+}
+
+/// A send the client makes on its own (`Claim::Unheld`) reports back; apply
+/// its outcome as the loop would.
+async fn settle_unclaimed(rt: &mut Runtime) {
+    let outcome = tokio::time::timeout(Duration::from_secs(30), rt.dispatch_rx.recv())
+        .await
+        .expect("the send reports back")
+        .expect("the channel is open");
+    assert!(
+        !outcome.claimed(),
+        "a send of the client's own holds nothing"
+    );
+    rt.on_dispatch_outcome(outcome).await;
+}
+
+// ---- open a session: the community's requirements asked first ----
+
+#[tokio::test]
+async fn opening_a_session_before_the_requirements_while_busy_asks_nothing() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    open_session_form(&mut rt, &id);
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_busy_refusal(&rt);
+    assert!(page(&rt).requirements_requested.is_empty());
+    assert!(!asked(&rt, QueryKind::Manifest));
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
+    assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn opening_a_session_before_the_requirements_without_keys_gives_up_unsent() {
+    let (mut rt, _h) = runtime().await;
+    let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    open_session_form(&mut rt, &id);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_abandoned(&rt, "Could not ask the community");
+    assert!(!asked(&rt, QueryKind::Manifest));
+    // Marked as asked although nothing went: the next Enter opens the session
+    // without the requirements.
+    assert_eq!(page(&rt).requirements_requested, vec![VTC.to_string()]);
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
+    assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn opening_a_session_before_the_requirements_asks_the_community_first() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    open_session_form(&mut rt, &id);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(busy(&rt));
+    assert!(asked(&rt, QueryKind::Manifest));
+    assert_eq!(page(&rt).requirements_requested, vec![VTC.to_string()]);
+    assert_eq!(
+        status(&rt),
+        &Status::progress(
+            "Asking the community which claims it requires — open the session again in a moment."
+        )
+    );
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
+    assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
+    assert!(!rt.save.is_pending());
+
+    settle(&mut rt).await;
+    assert!(!busy(&rt));
+    assert!(
+        status(&rt)
+            .text
+            .starts_with(&format!("Could not yet ask {VTC} what it requires (")),
+        "{}",
+        status(&rt).text
+    );
+}
+
+#[tokio::test]
+async fn opening_a_session_as_a_persona_not_held_says_so() {
+    let (mut rt, _h) = runtime().await;
+    let id = desk_request(&mut rt, PersonaId::new());
+    open_session_form(&mut rt, &id);
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_eq!(
+        status(&rt),
+        &Status::error("The persona this request was made to is not available.")
+    );
+    assert!(page(&rt).requirements_requested.is_empty());
+}
+
+#[tokio::test]
+async fn opening_a_session_for_a_request_not_on_the_desk_does_nothing() {
+    let (mut rt, _h) = runtime().await;
+    open_session_form(&mut rt, "gone");
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(page(&rt).status_message.is_none());
+    assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
+    assert!(!busy(&rt));
+}
+
+// ---- open a session ----
+
+#[tokio::test]
+async fn opening_a_session_while_busy_opens_nothing() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    requirements_asked(&mut rt);
+    open_session_form(&mut rt, &id);
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_busy_refusal(&rt);
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
+    assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn opening_a_session_without_keys_leaves_it_open_and_unsaved() {
+    let (mut rt, _h) = runtime().await;
+    let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    requirements_asked(&mut rt);
+    open_session_form(&mut rt, &id);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_abandoned(&rt, "Could not send the session");
+    // The session the book opened before the signing stays open, its document
+    // never kept, and nothing is saved.
+    let DeskState::Session { session } = desk_state(&rt, &id) else {
+        panic!("the session stays open");
+    };
+    assert!(session.document.is_none());
+    assert!(matches!(page(&rt).mode, VettingMode::OpenSession { .. }));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn opening_a_session_keeps_its_document_saves_and_sends_it() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    requirements_asked(&mut rt);
+    open_session_form(&mut rt, &id);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(busy(&rt));
+    let DeskState::Session { session } = desk_state(&rt, &id) else {
+        panic!("the session is open");
+    };
+    let signed = session
+        .document
+        .as_ref()
+        .expect("the signed document is kept");
+    assert!(signed.get("proof").is_some(), "kept as signed");
+    let code = session.match_code.clone();
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(
+        status(&rt),
+        &Status::success(format!(
+            "Session open. Read the match code {code} to each other — the community's \
+             requirements are still unknown, so this asks for a legal name only."
+        ))
+    );
+    assert!(logged(&rt.state, "Session open."));
+    assert!(rt.save.is_pending());
+
+    settle(&mut rt).await;
+    assert!(!busy(&rt));
+    assert!(
+        status(&rt).text.starts_with("Could not send — try again: "),
+        "{}",
+        status(&rt).text
+    );
+}
+
+// ---- attest ----
+
+/// The request's card has arrived, on a session whose document `vetter`
+/// signed and kept.
+fn card_received(rt: &mut Runtime, request_id: &str, vetter: &str) {
+    let session_id = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+    let document = openvtc_core::vetting::wire::document(
+        vta_sdk::protocols::vetting::VETTING_SESSION_TYPE,
+        vetter,
+        APPLICANT,
+        session_id.clone(),
+        &serde_json::json!({}),
+    )
+    .expect("a session document");
+    let now = chrono::Utc::now();
+    let entry = rt
+        .config
+        .private
+        .vetting
+        .desk_entry_mut(request_id)
+        .expect("on the desk");
+    entry.state = DeskState::CardReceived {
+        session: DeskSession {
+            id: session_id.clone(),
+            challenge: "challenge".into(),
+            method: vta_sdk::protocols::vetting::VettingMethod::PriorAcquaintance,
+            required_claims: Vec::new(),
+            optional_claims: Vec::new(),
+            expires_at: now + chrono::Duration::hours(1),
+            match_code: "1234".into(),
+            document: Some(Box::new(serde_json::to_value(&document).unwrap())),
+        },
+        card: ReceivedCard {
+            digest_multibase: "zQmCardDigest".into(),
+            identity_commitment: "zCommitment".into(),
+            claims: Vec::new(),
+            card: None,
+            received_at: now,
+        },
+    };
+    rt.state.main_page.sync_from_config(&rt.config);
+}
+
+/// The attest form, ticked, attesting by prior acquaintance (which needs no
+/// document).
+fn attest_form(rt: &mut Runtime, request_id: &str, attested: bool) {
+    rt.state.main_page.content_panel.vetting.mode = VettingMode::Attest {
+        request_id: request_id.into(),
+        form: crate::state_handler::main_page::content::AttestForm {
+            method_index: 2,
+            attested,
+            ..Default::default()
+        },
+    };
+}
+
+fn issued(rt: &Runtime) -> usize {
+    rt.config.private.vetting.issued.len()
+}
+
+#[tokio::test]
+async fn attesting_unticked_says_to_tick_it() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    card_received(&mut rt, &id, "did:key:zVetter");
+    attest_form(&mut rt, &id, false);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_eq!(
+        status(&rt),
+        &Status::warning(
+            "Tick the attestation (the last line) — signing is attributable to you in this community."
+        )
+    );
+    assert_eq!(issued(&rt), 0);
+}
+
+#[tokio::test]
+async fn attesting_before_the_card_says_to_wait_for_it() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    attest_form(&mut rt, &id, true);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_eq!(
+        status(&rt),
+        &Status::warning("You can attest once their card has arrived.")
+    );
+}
+
+#[tokio::test]
+async fn attesting_while_busy_signs_nothing() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    card_received(&mut rt, &id, "did:key:zVetter");
+    attest_form(&mut rt, &id, true);
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_busy_refusal(&rt);
+    assert_eq!(issued(&rt), 0);
+    assert!(matches!(
+        desk_state(&rt, &id),
+        DeskState::CardReceived { .. }
+    ));
+    assert!(matches!(page(&rt).mode, VettingMode::Attest { .. }));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn attesting_without_keys_signs_nothing() {
+    let (mut rt, _h) = runtime().await;
+    let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    card_received(&mut rt, &id, "did:key:zVetter");
+    attest_form(&mut rt, &id, true);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_abandoned(&rt, "Could not sign the statement");
+    assert_eq!(issued(&rt), 0);
+    assert!(matches!(
+        desk_state(&rt, &id),
+        DeskState::CardReceived { .. }
+    ));
+    assert!(matches!(page(&rt).mode, VettingMode::Attest { .. }));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn a_statement_that_does_not_verify_is_not_recorded() {
+    let (mut rt, _h) = runtime().await;
+    // Signed with a key, but under a DID that resolves to no document.
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    card_received(&mut rt, &id, "did:key:zVetter");
+    attest_form(&mut rt, &id, true);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_abandoned(&rt, "The statement did not verify");
+    assert_eq!(issued(&rt), 0);
+    assert!(matches!(
+        desk_state(&rt, &id),
+        DeskState::CardReceived { .. }
+    ));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn attesting_records_saves_and_sends_the_statement_and_a_failed_send_unissues_it() {
+    let (mut rt, _h) = runtime().await;
+    let (persona, did) = fixtures::persona_with_did_key(&mut rt).await;
+    let id = desk_request(&mut rt, persona);
+    card_received(&mut rt, &id, &did);
+    attest_form(&mut rt, &id, true);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(busy(&rt));
+    assert_eq!(issued(&rt), 1);
+    assert!(matches!(desk_state(&rt, &id), DeskState::Attested { .. }));
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(status(&rt), &Status::success("Sending your statement…"));
+    assert!(rt.save.is_pending());
+
+    settle(&mut rt).await;
+    assert!(!busy(&rt));
+    assert_eq!(issued(&rt), 0);
+    assert!(matches!(
+        desk_state(&rt, &id),
+        DeskState::CardReceived { .. }
+    ));
+    assert!(
+        status(&rt)
+            .text
+            .starts_with("Could not send the statement, so it was not issued: "),
+        "{}",
+        status(&rt).text
+    );
+}
+
+// ---- decline ----
+
+fn decline_form(rt: &mut Runtime, request_id: &str, message: &str) {
+    rt.state.main_page.content_panel.vetting.mode = VettingMode::ConfirmDecline {
+        request_id: request_id.into(),
+        reason_index: 1,
+        message: message.into(),
+        field: 0,
+    };
+}
+
+#[tokio::test]
+async fn a_decline_note_too_long_is_refused() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    let max = crate::state_handler::main_page::content::DECLINE_MESSAGE_MAX;
+    decline_form(&mut rt, &id, &"x".repeat(max + 1));
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_eq!(
+        status(&rt),
+        &Status::warning(format!(
+            "The note is {} characters; a decline carries at most {max}.",
+            max + 1
+        ))
+    );
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
+}
+
+#[tokio::test]
+async fn declining_while_busy_declines_nothing() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    decline_form(&mut rt, &id, "  not today ");
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_busy_refusal(&rt);
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
+    assert!(matches!(page(&rt).mode, VettingMode::ConfirmDecline { .. }));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn declining_without_keys_is_saved_then_put_back() {
+    let (mut rt, _h) = runtime().await;
+    let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    decline_form(&mut rt, &id, "");
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_abandoned(&rt, "Could not send the decline");
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert!(rt.save.is_pending(), "saved declined before the signing");
+    assert!(
+        log_line(&rt, "Declining…") < log_line(&rt, "Could not send the decline"),
+        "saved and said, then given up"
+    );
+}
+
+#[tokio::test]
+async fn declining_saves_and_sends_and_a_failed_send_reopens_the_request() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = desk_request(&mut rt, persona);
+    decline_form(&mut rt, &id, "not today");
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(busy(&rt));
+    assert!(matches!(desk_state(&rt, &id), DeskState::Declined { .. }));
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(status(&rt), &Status::success("Declining…"));
+    assert!(rt.save.is_pending());
+
+    settle(&mut rt).await;
+    assert!(!busy(&rt));
+    assert!(matches!(desk_state(&rt, &id), DeskState::Accepted));
+    assert!(
+        status(&rt).text.starts_with("Could not send the decline: "),
+        "{}",
+        status(&rt).text
+    );
+}
+
+// ---- withdraw ----
+
+/// A statement `persona` signed about [`APPLICANT`], on record. Returns its id.
+fn issued_statement(rt: &mut Runtime, persona: PersonaId) -> String {
+    let id = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+    let now = chrono::Utc::now();
+    rt.config
+        .private
+        .vetting
+        .issued
+        .push(openvtc_core::vetting::vetter::IssuedStatement {
+            id: id.clone(),
+            digest_multibase: "zQmStatementDigest".into(),
+            applicant: APPLICANT.into(),
+            community: VTC.into(),
+            persona,
+            method: vta_sdk::protocols::vetting::VettingMethod::InPerson,
+            issued_at: now,
+            valid_until: now + chrono::Duration::days(365),
+            withdrawal: None,
+        });
+    rt.state.main_page.sync_from_config(&rt.config);
+    rt.state.main_page.content_panel.vetting.mode = VettingMode::Withdraw {
+        statement_id: id.clone(),
+        reason_index: 0,
+    };
+    id
+}
+
+fn withdrawn(rt: &Runtime, statement_id: &str) -> bool {
+    rt.config
+        .private
+        .vetting
+        .issued
+        .iter()
+        .find(|s| s.id == statement_id)
+        .expect("on record")
+        .withdrawal
+        .is_some()
+}
+
+#[tokio::test]
+async fn withdrawing_as_a_persona_not_held_says_so() {
+    let (mut rt, _h) = runtime().await;
+    let id = issued_statement(&mut rt, PersonaId::new());
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_eq!(
+        status(&rt),
+        &Status::error("The persona that signed this statement is not available.")
+    );
+    assert!(!withdrawn(&rt, &id));
+}
+
+#[tokio::test]
+async fn withdrawing_while_busy_withdraws_nothing() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = issued_statement(&mut rt, persona);
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_busy_refusal(&rt);
+    assert!(!withdrawn(&rt, &id));
+    assert!(matches!(page(&rt).mode, VettingMode::Withdraw { .. }));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn withdrawing_without_keys_is_saved_then_put_back() {
+    let (mut rt, _h) = runtime().await;
+    let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+    let id = issued_statement(&mut rt, persona);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_abandoned(&rt, "Could not send the withdrawal");
+    assert!(!withdrawn(&rt, &id));
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert!(rt.save.is_pending());
+    assert!(
+        log_line(&rt, "Telling the community…") < log_line(&rt, "Could not send the withdrawal"),
+        "saved and said, then given up"
+    );
+}
+
+#[tokio::test]
+async fn withdrawing_saves_and_sends_and_a_failed_send_puts_it_back() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let id = issued_statement(&mut rt, persona);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(busy(&rt));
+    assert!(withdrawn(&rt, &id));
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(status(&rt), &Status::success("Telling the community…"));
+    assert!(rt.save.is_pending());
+
+    settle(&mut rt).await;
+    assert!(!busy(&rt));
+    assert!(!withdrawn(&rt, &id));
+    assert!(
+        status(&rt)
+            .text
+            .starts_with("Could not send the withdrawal: "),
+        "{}",
+        status(&rt).text
+    );
+}
+
+// ---- the vetter side: how each community vets, and the key it bound ----
+
+/// A live vetter grant from [`VTC`] for `persona`.
+fn vetter_grant(rt: &mut Runtime, persona: PersonaId) {
+    let now = chrono::Utc::now();
+    rt.config
+        .private
+        .vetting
+        .vetter_grants
+        .push(openvtc_core::vetting::book::VetterGrant {
+            community: VTC.into(),
+            persona,
+            credential_id: None,
+            valid_until: Some(now + chrono::Duration::days(90)),
+            received_at: now,
+            credential: serde_json::json!({}),
+        });
+    rt.state.main_page.sync_from_config(&rt.config);
+}
+
+fn manifests_asked(rt: &Runtime) -> usize {
+    rt.config
+        .private
+        .vetting
+        .queries
+        .iter()
+        .filter(|q| q.kind == QueryKind::Manifest)
+        .count()
+}
+
+#[tokio::test]
+async fn opening_the_desk_asks_each_stale_community_how_it_vets() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    vetter_grant(&mut rt, persona);
+    rt.config.private.vetting.vetter_refresh_failures = 2;
+
+    act(&mut rt, VettingAction::SwitchTab).await;
+
+    assert_eq!(page(&rt).tab, VettingTab::Desk);
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(manifests_asked(&rt), 1);
+    let book = &rt.config.private.vetting;
+    assert!(book.manifest_recently_asked(VTC, chrono::Utc::now()));
+    assert_eq!(
+        book.vetter_refresh_failures, 0,
+        "a send that went resets the count"
+    );
+    assert!(!book.vetter_refresh_due);
+    assert!(!busy(&rt), "asked on the client's own: nothing held");
+    assert!(page(&rt).status_message.is_none());
+    assert!(!rt.save.is_pending());
+
+    settle_unclaimed(&mut rt).await;
+    assert_eq!(manifests_asked(&rt), 1);
+    assert!(
+        status(&rt)
+            .text
+            .starts_with(&format!("Could not yet ask {VTC} what it requires (")),
+        "{}",
+        status(&rt).text
+    );
+}
+
+#[tokio::test]
+async fn opening_the_desk_without_keys_counts_the_failed_ask_and_asks_again_soon() {
+    let (mut rt, _h) = runtime().await;
+    let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+    vetter_grant(&mut rt, persona);
+
+    act(&mut rt, VettingAction::SwitchTab).await;
+
+    assert_eq!(page(&rt).tab, VettingTab::Desk);
+    assert_eq!(manifests_asked(&rt), 0);
+    let book = &rt.config.private.vetting;
+    assert!(
+        !book.manifest_recently_asked(VTC, chrono::Utc::now()),
+        "an unsent question holds nothing back"
+    );
+    assert_eq!(book.vetter_refresh_failures, 1);
+    assert!(book.vetter_refresh_due);
+    assert!(page(&rt).status_message.is_none());
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn a_community_vetted_for_as_two_personas_is_asked_once() {
+    let (mut rt, _h) = runtime().await;
+    let first = fixtures::persona_with_keys(&mut rt, "did:key:zVetterOne").await;
+    let second = fixtures::persona_with_keys(&mut rt, "did:key:zVetterTwo").await;
+    vetter_grant(&mut rt, first);
+    vetter_grant(&mut rt, second);
+
+    act(&mut rt, VettingAction::SwitchTab).await;
+
+    assert_eq!(
+        manifests_asked(&rt),
+        1,
+        "the second sees the first's question"
+    );
+}
+
+#[tokio::test]
+async fn a_community_vetted_for_as_two_personas_without_keys_is_tried_as_each() {
+    let (mut rt, _h) = runtime().await;
+    let first = fixtures::persona_with_keys(&mut rt, "did:key:zVetterOne").await;
+    let second = fixtures::persona_with_keys(&mut rt, "did:key:zVetterTwo").await;
+    rt.config.key_info.clear();
+    vetter_grant(&mut rt, first);
+    vetter_grant(&mut rt, second);
+
+    act(&mut rt, VettingAction::SwitchTab).await;
+
+    // The first failing to send releases the second: each attempt counts.
+    assert_eq!(manifests_asked(&rt), 0);
+    assert_eq!(rt.config.private.vetting.vetter_refresh_failures, 2);
+}
+
+#[tokio::test]
+async fn leaving_the_desk_asks_nothing() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    vetter_grant(&mut rt, persona);
+    rt.state.main_page.content_panel.vetting.tab = VettingTab::Desk;
+    rt.state.main_page.content_panel.vetting.selected = 2;
+
+    act(&mut rt, VettingAction::SwitchTab).await;
+
+    assert_ne!(page(&rt).tab, VettingTab::Desk);
+    assert_eq!(page(&rt).selected, 0);
+    assert_eq!(manifests_asked(&rt), 0);
+}
+
+/// An engine for [`VTC`] whose last word from the community was
+/// `identifierRebound`, with no key check yet.
+fn rebound_engine(rt: &mut Runtime, persona: PersonaId) {
+    use openvtc_core::vetting::book::{HiddenRefusal, HiddenVetterState};
+    let params = openvtc_core::vetting::hidden::HiddenParams {
+        suite: openvtc_core::vetting::hidden::SUITE.into(),
+        helper_key: "zHelper".into(),
+        token_key: "zToken".into(),
+        vetter_labels: vec!["vetter/2026-10".into()],
+        token_labels: vec!["token/2026-10".into()],
+        drip_per_tick: 10,
+        events: Vec::new(),
+        tick_length: None,
+    };
+    let mut held = HiddenVetterState::new(VTC, persona, params);
+    held.last_refusal = Some(HiddenRefusal {
+        what: "your hidden-vetting credential".into(),
+        code: "vtc/vetting/vetters/pcs-root:identifierRebound".into(),
+        at: chrono::Utc::now(),
+    });
+    rt.config.private.vetting.hidden_vetter.push(held);
+}
+
+fn key_check_started(rt: &Runtime) -> bool {
+    rt.config.private.vetting.hidden_vetter[0].key.is_some()
+}
+
+#[tokio::test]
+async fn refreshing_the_vetter_side_asks_which_key_a_rebound_community_holds() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    rebound_engine(&mut rt, persona);
+
+    act(&mut rt, VettingAction::RefreshVetterSide).await;
+
+    assert!(key_check_started(&rt));
+    assert!(asked(&rt, QueryKind::PcsBinding));
+    assert!(
+        !rt.config.private.vetting.hidden_vetter[0].binding_read_due(chrono::Utc::now()),
+        "asked: not again until the re-ask interval"
+    );
+    assert!(rt.save.is_pending());
+    assert!(!busy(&rt));
+}
+
+#[tokio::test]
+async fn a_binding_question_without_keys_says_so_and_stays_asked() {
+    let (mut rt, _h) = runtime().await;
+    let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+    rebound_engine(&mut rt, persona);
+
+    act(&mut rt, VettingAction::RefreshVetterSide).await;
+
+    assert!(key_check_started(&rt));
+    // Filed and marked asked before the signing failed, and left so.
+    assert!(asked(&rt, QueryKind::PcsBinding));
+    assert!(rt.save.is_pending());
+    let s = status(&rt);
+    assert_eq!(s.severity, Severity::Error);
+    assert!(
+        s.text.starts_with("Could not ask ")
+            && s.text
+                .contains(" which hidden-vetting key it holds for you: "),
+        "{}",
+        s.text
+    );
+    assert!(!logged(
+        &rt.state,
+        "which hidden-vetting key it holds for you"
+    ));
+}
+
+// ============================================================================
+// Tickets
+// ============================================================================
+
+fn ticket(rt: &mut Runtime, persona: PersonaId) -> Ticket {
+    let ticket = Ticket::issue(
+        VTC,
+        persona,
+        vec![],
+        1,
+        DEFAULT_VALIDITY,
+        chrono::Utc::now(),
+    );
+    rt.config.private.vetting.tickets.push(ticket.clone());
+    rt.state.main_page.sync_from_config(&rt.config);
+    ticket
+}
+
+#[tokio::test]
+async fn deleting_a_ticket_already_gone_says_so() {
+    let (mut rt, _h) = runtime().await;
+    rt.state.main_page.content_panel.vetting.mode = VettingMode::ConfirmDeleteTicket {
+        ticket_id: "gone".into(),
+    };
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(
+        status(&rt),
+        &Status::warning("That ticket is already gone.")
+    );
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn deleting_a_ticket_removes_and_saves_it() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    let t = ticket(&mut rt, persona);
+    rt.state.main_page.content_panel.vetting.selected = 3;
+    rt.state.main_page.content_panel.vetting.mode = VettingMode::ConfirmDeleteTicket {
+        ticket_id: t.id.clone(),
+    };
+    // Deleting needs no free domain.
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(rt.config.private.vetting.tickets.is_empty());
+    assert!(page(&rt).tickets.is_empty(), "the page shows it gone");
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(page(&rt).selected, 0);
+    assert!(rt.save.is_pending());
+    assert_eq!(
+        status(&rt),
+        &Status::success(format!(
+            "Ticket {} deleted — anyone already holding it is now refused, and they are not \
+             told why.",
+            t.code
+        ))
+    );
+}
+
+/// The new-ticket form open on [`VTC`], as `persona`.
+fn new_ticket_form(rt: &mut Runtime, persona: PersonaId) {
+    let v = &mut rt.state.main_page.content_panel.vetting;
+    v.memberships = vec![membership(persona)].into();
+    v.mode = VettingMode::NewTicket {
+        membership_index: 0,
+        uses_index: 0,
+        field: 0,
+    };
+}
+
+fn mode_failed(rt: &Runtime) -> bool {
+    rt.config
+        .private
+        .vetting
+        .vetter_mode(VTC)
+        .failed_since(chrono::Utc::now() - chrono::Duration::minutes(1))
+        .is_some()
+}
+
+#[tokio::test]
+async fn a_ticket_while_another_waits_on_its_answer_says_so() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    new_ticket_form(&mut rt, persona);
+    rt.state.main_page.content_panel.vetting.pending_ticket =
+        Some(crate::state_handler::main_page::content::PendingTicket {
+            membership: membership(persona),
+            uses: 1,
+            asked_at: chrono::Utc::now(),
+        });
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(
+        status(&rt),
+        &Status::progress("Still asking VTC how it vets, for the last ticket — a moment.")
+    );
+    assert_eq!(manifests_asked(&rt), 0);
+}
+
+#[tokio::test]
+async fn a_ticket_as_a_persona_not_held_is_refused() {
+    let (mut rt, _h) = runtime().await;
+    new_ticket_form(&mut rt, PersonaId::new());
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(
+        status(&rt),
+        &Status::error(
+            "No ticket issued: the persona you vet for that community as is not available."
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_ticket_while_busy_asks_nothing() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    new_ticket_form(&mut rt, persona);
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert_busy_refusal(&rt);
+    // The form is closed before the busy check.
+    assert!(matches!(page(&rt).mode, VettingMode::List));
+    assert_eq!(manifests_asked(&rt), 0);
+    assert!(
+        !rt.config
+            .private
+            .vetting
+            .manifest_recently_asked(VTC, chrono::Utc::now())
+    );
+    assert!(page(&rt).pending_ticket.is_none());
+}
+
+#[tokio::test]
+async fn a_ticket_without_keys_says_its_community_could_not_be_read() {
+    let (mut rt, _h) = runtime().await;
+    let persona = persona_without_keys(&mut rt, "did:key:zVetter").await;
+    new_ticket_form(&mut rt, persona);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    let s = status(&rt);
+    assert_eq!(s.severity, Severity::Error);
+    assert!(
+        s.text
+            .starts_with("No ticket issued: could not confirm how VTC vets now — "),
+        "{}",
+        s.text
+    );
+    assert!(logged(&rt.state, "No ticket issued: could not confirm"));
+    assert!(mode_failed(&rt));
+    assert!(page(&rt).pending_ticket.is_none());
+    assert_eq!(manifests_asked(&rt), 0);
+    assert!(!busy(&rt));
+    assert!(!rt.save.is_pending());
+}
+
+#[tokio::test]
+async fn a_ticket_asks_its_community_how_it_vets_and_waits() {
+    let (mut rt, _h) = runtime().await;
+    let persona = fixtures::persona_with_keys(&mut rt, "did:key:zVetter").await;
+    new_ticket_form(&mut rt, persona);
+
+    act(&mut rt, VettingAction::Submit).await;
+
+    assert!(busy(&rt));
+    assert_eq!(manifests_asked(&rt), 1);
+    let pending = page(&rt).pending_ticket.as_ref().expect("the ticket waits");
+    assert_eq!(pending.membership.community, VTC);
+    assert_eq!(pending.uses, 1);
+    assert_eq!(
+        status(&rt),
+        &Status::progress(
+            "Asking VTC how it vets now — named vetting or PCS ZKP — before issuing the ticket…"
+        )
+    );
+    assert!(rt.config.private.vetting.tickets.is_empty());
+    assert!(!rt.save.is_pending());
+
+    settle(&mut rt).await;
+    assert!(!busy(&rt));
+    assert!(mode_failed(&rt));
+}
