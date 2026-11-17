@@ -6,7 +6,8 @@
 //! job holds the domain and whether a VTA session is connected — as the loop
 //! found them (`dispatch::plan`'s inputs), says why when there is no session, derives
 //! the application's context where the handler needs one, refuses with
-//! `claimable` when the domain is held, and makes the page changes a started
+//! `claimable` when the domain is held, and only then keeps a context derived
+//! just now (saved by a `Step::MarkDirty`) and makes the page changes a started
 //! job makes. What is left is a [`FaceWork`] for `effect::Step::Face`, which
 //! spawns it against the loop's VTA session ([`spawn_face`]); a card being
 //! sent is preceded by `effect::Step::CardKeys`, the persona's key lookup
@@ -24,7 +25,7 @@ use openvtc_core::vetting::book::FALLBACK_REQUIRED_CLAIMS;
 use vta_sdk::client::VtaClient;
 
 use super::dispatch::{card_mode, panel, show};
-use super::effect::{Abort, Step, VettingEffect};
+use super::effect::{Abort, Step, Undo, VettingEffect};
 use super::jobs::{CardJob, CardStep, FaceJob, Presenting};
 use super::send::{Claim, claimable, resolver, spawn};
 use crate::state_handler::main_page::content::{
@@ -134,7 +135,7 @@ pub(super) fn plan_create_face(
         return VettingEffect::none();
     }
     let application_id = form.application_id.clone();
-    let (context_id, persona_did) = match application_context(config, &application_id) {
+    let context = match application_context(config, &application_id) {
         Ok(found) => found,
         Err(e) => {
             show(state, Status::error(format!("Cannot make a face: {e}")));
@@ -144,16 +145,20 @@ pub(super) fn plan_create_face(
     if !claimable(state, busy) {
         return VettingEffect::none();
     }
+    let save = keep_context(config, &application_id, &context);
     panel(state).mode = VettingMode::List;
     show(state, Status::progress(format!("Making {name}…")));
-    VettingEffect::face(FaceWork::Create {
-        top_context_id: config.account.top_context_id.clone(),
-        context_id,
-        persona_did,
-        application_id,
-        name,
-        live_refs,
-    })
+    saving_context(
+        save,
+        VettingEffect::face(FaceWork::Create {
+            top_context_id: config.account.top_context_id.clone(),
+            context_id: context.id,
+            persona_did: context.join_did,
+            application_id,
+            name,
+            live_refs,
+        }),
+    )
 }
 
 /// Plan saving a value typed on the make-a-face form as an attribute of its
@@ -482,13 +487,14 @@ pub(super) fn spawn_face(
     spawn(ctx, job, claim);
 }
 
-/// The VTA context an application's face is worn in, and its join DID.
-/// Derived the first time it is needed and kept on the application, so the
-/// membership reuses it when the join goes through.
+/// The VTA context an application's face is worn in, its join DID, and
+/// whether it was derived just now ([`AppContext`]). Pure: a derived context
+/// is kept on the application by [`keep_context`], once the job that uses it
+/// is going ahead, so the membership reuses it when the join goes through.
 pub(super) fn application_context(
-    config: &mut Config,
+    config: &Config,
     application_id: &str,
-) -> Result<(String, String), String> {
+) -> Result<AppContext, String> {
     let app = config
         .private
         .vetting
@@ -498,7 +504,11 @@ pub(super) fn application_context(
         .ok_or("the application is gone")?;
     let join_did = app.join_did.clone();
     if let Some(id) = &app.context_id {
-        return Ok((id.clone(), join_did));
+        return Ok(AppContext {
+            id: id.clone(),
+            join_did,
+            derived: false,
+        });
     }
     // A persona whose keys live in a sub-context is presented from it;
     // otherwise the community gets a context of its own.
@@ -513,10 +523,44 @@ pub(super) fn application_context(
         Some(home) => home.to_string(),
         None => openvtc_core::join::sequence::suggested_context(config, &app.community.clone()),
     };
-    if let Some(app) = config.private.vetting.application_by_id_mut(application_id) {
-        app.context_id = Some(id.clone());
+    Ok(AppContext {
+        id,
+        join_did,
+        derived: true,
+    })
+}
+
+/// What [`application_context`] found.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AppContext {
+    pub(super) id: String,
+    pub(super) join_did: String,
+    /// Not yet kept on the application.
+    pub(super) derived: bool,
+}
+
+/// Keep a derived context on the application, and return the save it owes
+/// ([`Step::MarkDirty`]); one already kept owes nothing.
+pub(super) fn keep_context(
+    config: &mut Config,
+    application_id: &str,
+    context: &AppContext,
+) -> Option<Step> {
+    if !context.derived {
+        return None;
     }
-    Ok((id, join_did))
+    let app = config
+        .private
+        .vetting
+        .application_by_id_mut(application_id)?;
+    app.context_id = Some(context.id.clone());
+    Some(Step::MarkDirty)
+}
+
+/// `effect` with the save a context kept just now owes, first.
+fn saving_context(save: Option<Step>, effect: VettingEffect) -> VettingEffect {
+    let VettingEffect(steps) = effect;
+    VettingEffect(save.into_iter().chain(steps).collect())
 }
 
 /// Plan `f`: read the holder's faces for the application the page is on.
@@ -567,7 +611,7 @@ fn plan_list_faces(
     if !connected(state, has_vta) {
         return VettingEffect::none();
     }
-    let (context_id, persona_did) = match application_context(config, application_id) {
+    let context = match application_context(config, application_id) {
         Ok(found) => found,
         Err(e) => {
             show(state, Status::error(format!("Cannot choose a face: {e}")));
@@ -577,12 +621,16 @@ fn plan_list_faces(
     if !claimable(state, busy) {
         return VettingEffect::none();
     }
+    let save = keep_context(config, application_id, &context);
     show(state, Status::progress("Reading your faces…"));
-    VettingEffect::face(FaceWork::List {
-        context_id,
-        persona_did,
-        application_id: application_id.to_string(),
-    })
+    saving_context(
+        save,
+        VettingEffect::face(FaceWork::List {
+            context_id: context.id,
+            persona_did: context.join_did,
+            application_id: application_id.to_string(),
+        }),
+    )
 }
 
 /// Plan wearing `face` in the application's context.
@@ -619,7 +667,7 @@ pub(super) fn plan_wear_face(
     if !connected(state, has_vta) {
         return VettingEffect::none();
     }
-    let (context_id, persona_did) = match application_context(config, application_id) {
+    let context = match application_context(config, application_id) {
         Ok(found) => found,
         Err(e) => {
             show(state, Status::error(format!("Cannot wear that face: {e}")));
@@ -629,15 +677,19 @@ pub(super) fn plan_wear_face(
     if !claimable(state, busy) {
         return VettingEffect::none();
     }
+    let save = keep_context(config, application_id, &context);
     panel(state).mode = VettingMode::List;
     show(state, Status::progress(format!("Wearing {}…", face.name)));
-    VettingEffect::face(FaceWork::Wear {
-        top_context_id: config.account.top_context_id.clone(),
-        context_id,
-        persona_did,
-        application_id: application_id.to_string(),
-        face,
-    })
+    saving_context(
+        save,
+        VettingEffect::face(FaceWork::Wear {
+            top_context_id: config.account.top_context_id.clone(),
+            context_id: context.id,
+            persona_did: context.join_did,
+            application_id: application_id.to_string(),
+            face,
+        }),
+    )
 }
 
 /// Plan the card for `session_id`, in two steps: preview what the face would
@@ -683,8 +735,8 @@ pub(super) fn plan_send_card(
     if !connected(state, has_vta) {
         return VettingEffect::none();
     }
-    let context_id = match application_context(config, application_id) {
-        Ok((id, _)) => id,
+    let context = match application_context(config, application_id) {
+        Ok(found) => found,
         Err(e) => {
             show(state, Status::error(format!("Cannot send a card: {e}")));
             return VettingEffect::none();
@@ -693,6 +745,8 @@ pub(super) fn plan_send_card(
     if !claimable(state, busy) {
         return VettingEffect::none();
     }
+    let save = keep_context(config, application_id, &context);
+    let context_id = context.id;
     let persona = application.persona;
     let card = |preview_id| Step::Face {
         work: Box::new(FaceWork::Card {
@@ -710,16 +764,27 @@ pub(super) fn plan_send_card(
                 state,
                 Status::progress("Asking your VTA what your face shows this vetter…"),
             );
-            VettingEffect(vec![card(None)])
+            saving_context(save, VettingEffect(vec![card(None)]))
         }
-        Some(preview) => VettingEffect(vec![
-            Step::CardKeys {
+        Some(preview) => {
+            // A key lookup that fails takes back a context kept for this card,
+            // and the save it owes follows the lookup.
+            let undo = if save.is_some() {
+                vec![Undo::NoContext(application_id.to_string())]
+            } else {
+                Vec::new()
+            };
+            let mut steps = vec![Step::CardKeys {
                 persona,
-                abort: Abort::say("Could not sign the card"),
-            },
-            Step::Status(Status::progress("Releasing and signing your card…")),
-            card(Some(preview.preview_id)),
-        ]),
+                abort: Abort::undoing("Could not sign the card", undo),
+            }];
+            steps.extend(save);
+            steps.push(Step::Status(Status::progress(
+                "Releasing and signing your card…",
+            )));
+            steps.push(card(Some(preview.preview_id)));
+            VettingEffect(steps)
+        }
     }
 }
 
@@ -1123,10 +1188,10 @@ mod tests {
         assert_eq!(context_of(&config, &id), None);
     }
 
-    /// Busy: refused, after the context was derived — in memory, as the
-    /// handler has always derived it.
+    /// Busy: refused, and the context is not kept — nothing started that
+    /// uses it.
     #[test]
-    fn a_face_plan_on_a_busy_domain_is_refused_after_deriving_the_context() {
+    fn a_face_plan_on_a_busy_domain_is_refused_and_keeps_no_context() {
         let mut config = test_config();
         let mut state = State::default();
         let id = planned_application(&mut config, &mut state);
@@ -1135,10 +1200,11 @@ mod tests {
 
         assert!(steps.is_empty());
         assert_eq!(said(&mut state).severity, Severity::Warning);
-        assert!(context_of(&config, &id).is_some());
+        assert!(context_of(&config, &id).is_none());
     }
 
-    /// Free: one held face job, the progress said, nothing saved.
+    /// Free: the context derived is kept and saved, then one held face job,
+    /// the progress said.
     #[test]
     fn choosing_a_face_plans_the_list_read() {
         let mut config = test_config();
@@ -1147,7 +1213,9 @@ mod tests {
 
         let VettingEffect(steps) = plan_choose_face(&mut state, &mut config, false, true);
 
+        assert!(context_of(&config, &id).is_some());
         let [
+            Step::MarkDirty,
             Step::Face {
                 work,
                 claim: Claim::Held,
@@ -1244,6 +1312,7 @@ mod tests {
         let VettingEffect(steps) =
             plan_send_card(&mut state, &mut config, false, true, &id, "s1", None);
         let [
+            Step::MarkDirty,
             Step::Face {
                 work,
                 claim: Claim::Held,

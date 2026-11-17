@@ -302,6 +302,9 @@ pub(super) enum Undo {
     NotWithdrawn(String),
     /// The draw `0` was never sent, so it is not in flight.
     NotDrawing(String),
+    /// Application `0` keeps no VTA context: the one derived for a job that
+    /// never started is not kept.
+    NoContext(String),
     /// The page has not asked community `0` what it requires: the question
     /// never went, so the next session asks again.
     NotRequested(String),
@@ -349,6 +352,11 @@ impl Undo {
             }
             Undo::NotDrawing(document_id) => {
                 book.draws_in_flight.remove(&document_id);
+            }
+            Undo::NoContext(application_id) => {
+                if let Some(app) = book.application_by_id_mut(&application_id) {
+                    app.context_id = None;
+                }
             }
             Undo::NotRequested(community) => {
                 panel(state)

@@ -321,6 +321,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   token draw that could not be signed, and a key-binding question that could not be sent,
   were shown only on the status line, so the next status replaced them. They now go to
   the activity log too.
+- **Vetting: the VTA context chosen for an application's face is saved**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Choosing, making or wearing a
+  face, or sending a card, picked the application's VTA context and kept it in memory
+  without saving it, even when the press was then refused as busy. The context is now
+  kept only once the job goes ahead, and saved with it; a card whose key lookup fails
+  takes it back.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

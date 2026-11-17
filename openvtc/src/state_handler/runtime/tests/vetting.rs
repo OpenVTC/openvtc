@@ -1040,7 +1040,7 @@ mod faces {
     }
 
     #[tokio::test]
-    async fn choosing_a_face_while_busy_derives_the_context_and_reads_nothing() {
+    async fn choosing_a_face_while_busy_keeps_no_context_and_reads_nothing() {
         let (mut rt, _h) = runtime().await;
         connect(&mut rt);
         let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
@@ -1050,8 +1050,8 @@ mod faces {
         act(&mut rt, VettingAction::ChooseFace).await;
 
         assert_busy_refusal(&rt);
-        // The context is derived before the busy check, in memory only.
-        assert!(context_of(&rt, &id).is_some());
+        // Nothing is kept for a read that never started.
+        assert!(context_of(&rt, &id).is_none());
         assert!(!rt.save.is_pending());
     }
 
@@ -1068,7 +1068,7 @@ mod faces {
         assert_eq!(status(&rt), &Status::progress("Reading your faces…"));
         assert!(context_of(&rt, &id).is_some());
         assert!(matches!(page(&rt).mode, VettingMode::List));
-        assert!(!rt.save.is_pending());
+        assert!(rt.save.is_pending(), "the context kept is saved");
 
         settle(&mut rt).await;
         assert!(!busy(&rt));
@@ -1228,7 +1228,8 @@ mod faces {
 
         assert_busy_refusal(&rt);
         assert!(matches!(page(&rt).mode, VettingMode::ChooseFace { .. }));
-        assert!(context_of(&rt, &id).is_some());
+        // Nothing is kept for a job that never started.
+        assert!(context_of(&rt, &id).is_none());
         assert!(!rt.save.is_pending());
     }
 
@@ -1246,7 +1247,7 @@ mod faces {
         assert_eq!(status(&rt), &Status::progress("Wearing Work…"));
         assert!(matches!(page(&rt).mode, VettingMode::List));
         assert!(context_of(&rt, &id).is_some());
-        assert!(!rt.save.is_pending());
+        assert!(rt.save.is_pending(), "the context kept is saved");
 
         settle(&mut rt).await;
         assert!(!busy(&rt));
@@ -1365,7 +1366,8 @@ mod faces {
 
         assert_busy_refusal(&rt);
         assert!(matches!(page(&rt).mode, VettingMode::NewFace(_)));
-        assert!(context_of(&rt, &id).is_some());
+        // Nothing is kept for a job that never started.
+        assert!(context_of(&rt, &id).is_none());
         assert!(!rt.save.is_pending());
     }
 
@@ -1465,7 +1467,7 @@ mod faces {
     }
 
     #[tokio::test]
-    async fn a_card_while_busy_derives_the_context_and_sends_nothing() {
+    async fn a_card_while_busy_keeps_no_context_and_sends_nothing() {
         let (mut rt, _h) = runtime().await;
         connect(&mut rt);
         let persona = fixtures::persona_with_keys(&mut rt, "did:key:zApplicant").await;
@@ -1476,7 +1478,8 @@ mod faces {
         act(&mut rt, VettingAction::Submit).await;
 
         assert_busy_refusal(&rt);
-        assert!(context_of(&rt, &id).is_some());
+        // Nothing is kept for a job that never started.
+        assert!(context_of(&rt, &id).is_none());
         assert!(matches!(
             page(&rt).mode,
             VettingMode::SendCard {
@@ -1503,7 +1506,7 @@ mod faces {
             &Status::progress("Asking your VTA what your face shows this vetter…")
         );
         assert!(context_of(&rt, &id).is_some());
-        assert!(!rt.save.is_pending());
+        assert!(rt.save.is_pending(), "the context kept is saved");
 
         settle(&mut rt).await;
         assert!(!busy(&rt));
@@ -1525,8 +1528,8 @@ mod faces {
         act(&mut rt, VettingAction::Submit).await;
 
         assert_abandoned(&rt, "Could not sign the card");
-        // Derived before the key lookup, and kept.
-        assert!(context_of(&rt, &id).is_some());
+        // The context derived for the card is taken back with it.
+        assert!(context_of(&rt, &id).is_none());
         assert!(!rt.save.is_pending());
     }
 
@@ -1546,7 +1549,7 @@ mod faces {
             &Status::progress("Releasing and signing your card…")
         );
         assert!(context_of(&rt, &id).is_some());
-        assert!(!rt.save.is_pending());
+        assert!(rt.save.is_pending(), "the context kept is saved");
 
         settle(&mut rt).await;
         assert!(!busy(&rt));

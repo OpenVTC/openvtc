@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use super::dispatch::show;
 use super::effect::{Step, Undo, VettingEffect, run};
-use super::faces::application_context;
+use super::faces::{application_context, keep_context};
 use super::hidden::{cannot_attest_hidden, vetter_context};
 use super::jobs::Sent;
 use super::send::Claim;
@@ -89,9 +89,12 @@ pub(super) fn plan_pcs_work(config: &mut Config, connected: bool, extra: Vec<Pcs
         .map(|a| a.id.clone())
         .collect();
     for application in owed {
-        let Ok((context_id, join_did)) = application_context(config, &application) else {
+        let Ok(context) = application_context(config, &application) else {
             continue;
         };
+        // Kept now: the job's answers are saved when they are settled.
+        keep_context(config, &application, &context);
+        let (context_id, join_did) = (context.id, context.join_did);
         let Some(app) = config.private.vetting.application_by_id(&application) else {
             continue;
         };
