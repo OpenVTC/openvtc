@@ -16,18 +16,26 @@
 //! to step up (VTI #1694, `[git_ns] elevated_requires_admin`) — and the
 //! refusal says so ([`openvtc_core::git_ns::Refusal::explain`]).
 //!
-//! View-only changes go through [`reduce`], which both loops share.
+//! View-only changes go through [`reduce`], which both loops share. An action
+//! that reads the config or sends a task is planned by [`plan`], which is
+//! pure and returns a [`ReposEffect`]: the ordered [`Step`]s still owed. The
+//! runner ([`run`], [`run_steps`]) takes each in turn; a send ([`Outbound`])
+//! looks up the persona's signing key, builds the request, claims
+//! [`DispatchDomain::GitNs`], and only once claimed arms the view and applies
+//! its [`Commit`]. The sweep ([`plan_tick`]) and a refresh after a landed
+//! change plan their sends the same way.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use openvtc_core::capabilities::{RequestDocument, correlation_thread};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
 
 use crate::state_handler::actions::ReposAction as Act;
+use crate::state_handler::actions::WorkspaceAction;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome};
 use crate::state_handler::main_page::repos::{
     AddPersonForm, ArmedChange, CreatedRepo, EXPIRY_CHOICES, LinkFlow, LinkPhase, LinkedAccount,
@@ -510,7 +518,7 @@ fn arm_drift(view: &mut ReposView, action: git_ns::DriftAction) {
 }
 
 // ****************************************************************************
-// Loop-side actions
+// Loop-side actions: the send job
 // ****************************************************************************
 
 /// One `git-ns/*` send, off the loop.
@@ -654,154 +662,156 @@ impl ReposOutcome {
     }
 }
 
-/// Send `request` for the open view. `quiet` suppresses the busy message,
-/// for sends nobody pressed a key for (polls, refresh after a change).
-/// Returns whether the send was dispatched; every early return says why
-/// in the view, unless `quiet`.
-async fn send(lp: &mut Loop<'_>, request: Request, purpose: Purpose, quiet: bool) -> bool {
-    let Some((vtc_did, persona, waiting)) = lp
-        .state
-        .main_page
-        .content_panel
-        .repos
-        .view
-        .as_ref()
-        .map(|v| (v.vtc_did.clone(), v.persona, v.pending.clone()))
-    else {
-        return false;
-    };
-    // One request awaits its answer at a time. A second would take the
-    // pending slot, and the first answer — a grant, say — would then match
-    // nothing and be dropped unannounced. Polls have their own slot.
+// ****************************************************************************
+// Loop-side actions: the reducer
+// ****************************************************************************
+
+/// What a loop-side action needs beyond the state change [`plan`] already made.
+pub(crate) enum ReposEffect {
+    /// A local workspace action ([`super::repos_workspace::dispatch`]).
+    Workspace(WorkspaceAction),
+    /// Fill the workspace of the view just opened
+    /// ([`super::repos_workspace::open`]), then run the steps.
+    Opened(Vec<Step>),
+    /// Run the steps, in order.
+    Steps(Vec<Step>),
+}
+
+/// One thing the runner does, in the order [`plan`] lists them.
+pub(crate) enum Step {
+    /// Start a workspace probe, if one is due.
+    Probe,
+    /// A read is starting: an empty view shows it loading, and the status
+    /// line is cleared.
+    Reading,
+    /// Say something on the status line: a request refused before it was
+    /// built, because another still awaits its answer.
+    Note(Severity, String),
+    /// Look up the persona's signing key, build the request, claim the lane,
+    /// and arm the view once claimed ([`Outbound`]).
+    Send(Box<Outbound>),
+    /// Start reading the did-git-sign install, if that is due
+    /// ([`super::settings_actions::maybe_refresh_did_git_sign`]).
+    CheckDidGitSign,
+}
+
+/// A `git-ns/*` request for the open view, decided on the loop and not yet
+/// built: its document names the persona's DID, which the key lookup resolves.
+pub(crate) struct Outbound {
+    /// The community it goes to.
+    pub(crate) vtc_did: String,
+    /// The persona it is sent as.
+    pub(crate) persona: PersonaId,
+    pub(crate) request: Request,
+    pub(crate) purpose: Purpose,
+    /// Suppress the busy message, for sends nobody pressed a key for (polls,
+    /// a refresh after a change). A failed key lookup or build is said anyway.
+    pub(crate) quiet: bool,
+    /// The view change owed once the send is claimed and armed.
+    pub(crate) commit: Option<Commit>,
+}
+
+/// A view change made only once a send has claimed the lane.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Commit {
+    /// Show a link attempt to this forge as starting.
+    LinkStarting(String),
+}
+
+/// Plan a loop-side action. Pure: it reads `config`, makes only the changes
+/// the action makes before anything is sent (opening the view, wanting a
+/// probe, spending a confirmation, marking a form, arming a confirmation,
+/// saying there is no forge to link), and returns what the loop still owes.
+pub(crate) fn plan(state: &mut State, config: &Config, action: Act) -> ReposEffect {
+    match action {
+        Act::Workspace(w) => ReposEffect::Workspace(w),
+        Act::Open(index) => {
+            open_view(state, config, index);
+            let mut steps = vec![Step::Reading];
+            steps.extend(plan_read(state, false));
+            ReposEffect::Opened(steps)
+        }
+        Act::Refresh => {
+            if let Some(view) = view_mut(state) {
+                view.workspace.want_probe(true);
+            }
+            let mut steps = vec![Step::Probe, Step::Reading];
+            steps.extend(plan_read(state, false));
+            ReposEffect::Steps(steps)
+        }
+        Act::NewSubmit => ReposEffect::Steps(plan_new(state).into_iter().collect()),
+        Act::AddSubmit => ReposEffect::Steps(plan_add(state).into_iter().collect()),
+        Act::Confirm => {
+            let armed = view_mut(state).and_then(|v| v.confirm.take());
+            let step = armed.and_then(|armed| {
+                let what = describe(&armed.request);
+                plan_send(state, armed.request, Purpose::Change(what), false, None)
+            });
+            ReposEffect::Steps(step.into_iter().collect())
+        }
+        Act::LinkStart => ReposEffect::Steps(plan_link_start(state).into_iter().collect()),
+        // View-only: the shared reducer handled these before the loop saw them.
+        _ => ReposEffect::Steps(Vec::new()),
+    }
+}
+
+/// Plan sending `request` for the open view: nothing with no view open; a
+/// "still waiting" note (none when `quiet`) while another request awaits its
+/// answer; else the send.
+///
+/// One request awaits its answer at a time. A second would take the pending
+/// slot, and the first answer — a grant, say — would then match nothing and
+/// be dropped unannounced. Polls have their own slot.
+fn plan_send(
+    state: &mut State,
+    request: Request,
+    purpose: Purpose,
+    quiet: bool,
+    commit: Option<Commit>,
+) -> Option<Step> {
+    let view = view_mut(state)?;
     if purpose != Purpose::LinkPoll
-        && let Some(waiting) = waiting
+        && let Some(waiting) = &view.pending
     {
-        if !quiet && let Some(view) = view_mut(lp.state) {
-            view.note(
+        return (!quiet).then(|| {
+            Step::Note(
                 Severity::Warning,
-                match waiting.purpose {
+                match &waiting.purpose {
                     Purpose::Change(what) => {
                         format!("Still waiting for the community's answer ({what}).")
                     }
                     _ => "Still waiting for the community's answer.".into(),
                 },
-            );
-        }
-        return false;
+            )
+        });
     }
-    let sender = match sender(lp.config, lp.tdk, persona, &vtc_did).await {
-        Ok(s) => s,
-        Err(e) => {
-            if let Some(view) = view_mut(lp.state) {
-                if view.data.is_none() && purpose == Purpose::View {
-                    view.phase = ReposPhase::Failed(e);
-                } else {
-                    view.note(Severity::Error, e);
-                }
-            }
-            return false;
-        }
-    };
-    // Built here rather than in the job so its id — the thread the answer
-    // carries — is known before the send is spawned, and the view can wait
-    // on it at once (see `arm`).
-    let doc = match git_ns::build(&request, &sender.persona_did, &vtc_did) {
-        Ok(doc) => doc,
-        Err(e) => {
-            if let Some(view) = view_mut(lp.state) {
-                let e = match &purpose {
-                    Purpose::Change(what) => format!("couldn't send ({what}): {e}"),
-                    _ => format!("couldn't send: {e}"),
-                };
-                if view.data.is_none() && purpose == Purpose::View {
-                    view.phase = ReposPhase::Failed(e);
-                } else {
-                    view.note(Severity::Error, e);
-                }
-            }
-            return false;
-        }
-    };
-    let thid = correlation_thread(&doc).to_string();
-    let job = ReposJob {
-        sender,
-        vtc_did,
-        persona,
-        doc,
-        purpose: purpose.clone(),
-    };
-    let started = background_dispatch::dispatch(job, lp.in_flight, lp.dispatch_tx, |msg| {
-        if !quiet && let Some(view) = view_mut(lp.state) {
-            view.note(Severity::Warning, msg);
-        }
-    });
-    if !started {
-        return false;
-    }
-    // Armed in the same loop turn as the spawn, so the answer — applied by
-    // this loop — always finds the view waiting on it.
-    if let Some(view) = view_mut(lp.state) {
-        arm(view, thid, purpose, Instant::now());
-    }
-    true
+    Some(Step::Send(Box::new(Outbound {
+        vtc_did: view.vtc_did.clone(),
+        persona: view.persona,
+        request,
+        purpose,
+        quiet,
+        commit,
+    })))
 }
 
-/// Read the view again.
-pub(crate) async fn refresh(lp: &mut Loop<'_>, quiet: bool) {
-    send(lp, Request::View { resource: None }, Purpose::View, quiet).await;
-}
-
-/// Service an action that reads the config or sends a task.
-pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
-    match action {
-        Act::Workspace(w) => {
-            super::repos_workspace::dispatch(ctx, w).await;
-            return;
-        }
-        Act::Open(index) => {
-            open(ctx, index);
-            super::repos_workspace::open(ctx).await;
-        }
-        Act::Refresh => {
-            if let Some(view) = view_mut(ctx.state) {
-                view.workspace.want_probe(true);
-            }
-            super::repos_workspace::probe_if_due(ctx.state, ctx.dispatch_tx, ctx.in_flight);
-        }
-        _ => {}
-    }
-    let mut lp = Loop::from_ctx(ctx);
-    match action {
-        Act::Open(_) | Act::Refresh => {
-            if let Some(view) = view_mut(lp.state) {
-                if view.data.is_none() {
-                    view.phase = ReposPhase::Loading;
-                }
-                view.status = None;
-            }
-            refresh(&mut lp, false).await;
-        }
-        Act::NewSubmit => submit_new(&mut lp).await,
-        Act::AddSubmit => submit_add(&mut lp).await,
-        Act::Confirm => {
-            let armed = view_mut(lp.state).and_then(|v| v.confirm.take());
-            if let Some(armed) = armed {
-                let what = describe(&armed.request);
-                send(&mut lp, armed.request, Purpose::Change(what), false).await;
-            }
-        }
-        Act::LinkStart => start_link(&mut lp).await,
-        // View-only: the shared reducer handled these before the loop saw them.
-        _ => {}
-    }
+/// Plan reading the view again.
+fn plan_read(state: &mut State, quiet: bool) -> Option<Step> {
+    plan_send(
+        state,
+        Request::View { resource: None },
+        Purpose::View,
+        quiet,
+        None,
+    )
 }
 
 /// Open the panel for the Active community at a Communities display index.
-fn open(ctx: &mut ActionCtx<'_>, index: usize) {
-    let target = ctx
-        .config
+/// An index that names no Active community leaves the panel as it is.
+fn open_view(state: &mut State, config: &Config, index: usize) {
+    let target = config
         .account
-        .communities_for_display(ctx.state.main_page.content_panel.communities.show_archived)
+        .communities_for_display(state.main_page.content_panel.communities.show_archived)
         .get(index)
         .filter(|c| c.status.is_active())
         .map(|c| {
@@ -809,7 +819,7 @@ fn open(ctx: &mut ActionCtx<'_>, index: usize) {
                 c.vtc_did.clone(),
                 c.persona_ref,
                 crate::state_handler::community_label(
-                    ctx.config,
+                    config,
                     &c.vtc_did,
                     c.display_name.as_deref(),
                     256,
@@ -819,13 +829,12 @@ fn open(ctx: &mut ActionCtx<'_>, index: usize) {
     let Some((vtc, persona, name)) = target else {
         return;
     };
-    let me = ctx
-        .config
+    let me = config
         .identities
         .get(&persona)
         .map(|id| id.persona_did().to_string())
         .unwrap_or_default();
-    ctx.state.main_page.content_panel.repos.view = Some(ReposView::new(vtc, persona, me, name));
+    state.main_page.content_panel.repos.view = Some(ReposView::new(vtc, persona, me, name));
 }
 
 /// What a change is, for the status line while it is in flight.
@@ -868,17 +877,13 @@ fn describe(request: &Request) -> String {
     }
 }
 
-async fn submit_new(lp: &mut Loop<'_>) {
-    let Some(view) = view_mut(lp.state) else {
-        return;
-    };
+fn plan_new(state: &mut State) -> Option<Step> {
+    let view = view_mut(state)?;
     let ReposScreen::NewRepo(form) = &view.screen else {
-        return;
+        return None;
     };
     let creatable = view.creatable();
-    let Some(ns) = creatable.get(form.namespace) else {
-        return;
-    };
+    let ns = creatable.get(form.namespace)?;
     let owners = if form.owners.is_empty() {
         None
     } else {
@@ -897,7 +902,7 @@ async fn submit_new(lp: &mut Loop<'_>) {
         if let ReposScreen::NewRepo(form) = &mut view.screen {
             form.error = Some(Status::error(e.to_string()));
         }
-        return;
+        return None;
     }
     let class = request.consent_class();
     if class.needs_confirmation() {
@@ -915,10 +920,10 @@ async fn submit_new(lp: &mut Loop<'_>) {
             ),
             request,
         });
-        return;
+        return None;
     }
     let what = describe(&request);
-    send(lp, request, Purpose::Change(what), false).await;
+    plan_send(state, request, Purpose::Change(what), false, None)
 }
 
 /// Add the owner picker's highlighted candidate, or its pasted DID, to the
@@ -954,13 +959,9 @@ fn new_owner_add(view: &mut ReposView) {
     form.error = None;
 }
 
-async fn submit_add(lp: &mut Loop<'_>) {
-    let Some(view) = view_mut(lp.state) else {
-        return;
-    };
-    let Some(form) = view.add.clone() else {
-        return;
-    };
+fn plan_add(state: &mut State) -> Option<Step> {
+    let view = view_mut(state)?;
+    let form = view.add.clone()?;
     let subject = if form.external {
         form.query.trim().to_string()
     } else {
@@ -974,7 +975,7 @@ async fn submit_add(lp: &mut Loop<'_>) {
                         "Pick someone, or press Ctrl+D to paste a DID for someone not listed.",
                     ));
                 }
-                return;
+                return None;
             }
         }
     };
@@ -990,7 +991,7 @@ async fn submit_add(lp: &mut Loop<'_>) {
         if let Some(f) = view.add.as_mut() {
             f.error = Some(Status::error(e.to_string()));
         }
-        return;
+        return None;
     }
     let class = request.consent_class();
     if class.needs_confirmation() {
@@ -1005,16 +1006,14 @@ async fn submit_add(lp: &mut Loop<'_>) {
             ),
             request,
         });
-        return;
+        return None;
     }
     let what = describe(&request);
-    send(lp, request, Purpose::Change(what), false).await;
+    plan_send(state, request, Purpose::Change(what), false, None)
 }
 
-async fn start_link(lp: &mut Loop<'_>) {
-    let Some(view) = view_mut(lp.state) else {
-        return;
-    };
+fn plan_link_start(state: &mut State) -> Option<Step> {
+    let view = view_mut(state)?;
     let forges = view
         .data
         .as_deref()
@@ -1031,24 +1030,155 @@ async fn start_link(lp: &mut Loop<'_>) {
             Severity::Warning,
             "No bridge serves a forge for this community yet, so there is no account to link.",
         );
-        return;
+        return None;
     };
-    // The attempt is shown only once its request is actually on its way: a
-    // send refused here (still waiting, busy, no signing key) says why and
-    // leaves no "starting…" line that nothing will ever answer.
-    if send(
-        lp,
+    // The attempt is shown only once its request is actually on its way
+    // ([`Commit::LinkStarting`]): a send refused here (still waiting, busy, no
+    // signing key) says why and leaves no "starting…" line that nothing will
+    // ever answer.
+    plan_send(
+        state,
         Request::Link {
             forge: forge.clone(),
         },
         Purpose::LinkStart,
         false,
+        Some(Commit::LinkStarting(forge)),
     )
-    .await
-        && let Some(view) = view_mut(lp.state)
-    {
-        view.link = Some(LinkFlow::starting(forge));
+}
+
+// ****************************************************************************
+// Loop-side actions: the effect runner
+// ****************************************************************************
+
+/// Service an action that reads the config or sends a task: [`plan`] it,
+/// then [`run`] what it asks for.
+pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
+    let effect = plan(ctx.state, ctx.config, action);
+    run(ctx, effect).await;
+}
+
+/// Run an action's effect.
+pub(crate) async fn run(ctx: &mut ActionCtx<'_>, effect: ReposEffect) {
+    let steps = match effect {
+        ReposEffect::Workspace(w) => {
+            super::repos_workspace::dispatch(ctx, w);
+            return;
+        }
+        ReposEffect::Opened(steps) => {
+            super::repos_workspace::open(ctx).await;
+            steps
+        }
+        ReposEffect::Steps(steps) => steps,
+    };
+    run_steps(&mut Loop::from_ctx(ctx), steps).await;
+}
+
+/// Run steps in order. The loop's own arms (an answer that landed a change,
+/// the sweep) run theirs here too.
+pub(crate) async fn run_steps(lp: &mut Loop<'_>, steps: Vec<Step>) {
+    for step in steps {
+        match step {
+            Step::Probe => {
+                super::repos_workspace::probe_if_due(lp.state, lp.dispatch_tx, lp.in_flight);
+            }
+            Step::Reading => {
+                if let Some(view) = view_mut(lp.state) {
+                    if view.data.is_none() {
+                        view.phase = ReposPhase::Loading;
+                    }
+                    view.status = None;
+                }
+            }
+            Step::Note(severity, text) => {
+                if let Some(view) = view_mut(lp.state) {
+                    view.note(severity, text);
+                }
+            }
+            Step::Send(outbound) => send(lp, *outbound).await,
+            Step::CheckDidGitSign => super::settings_actions::maybe_refresh_did_git_sign(
+                lp.state,
+                lp.in_flight,
+                lp.dispatch_tx,
+            ),
+        }
     }
+}
+
+/// Say why a send never left: a first read fails the view, anything else is
+/// said on the status line.
+fn refuse(state: &mut State, purpose: &Purpose, e: String) {
+    if let Some(view) = view_mut(state) {
+        if view.data.is_none() && *purpose == Purpose::View {
+            view.phase = ReposPhase::Failed(e);
+        } else {
+            view.note(Severity::Error, e);
+        }
+    }
+}
+
+/// Send one planned request: the key lookup, the build, the claim (its busy
+/// message only when not `quiet`), then — once claimed — the view armed on
+/// the request's thread and the commit applied. A lookup or build that fails
+/// says why; a busy lane arms nothing.
+async fn send(lp: &mut Loop<'_>, outbound: Outbound) {
+    let Outbound {
+        vtc_did,
+        persona,
+        request,
+        purpose,
+        quiet,
+        commit,
+    } = outbound;
+    let sender = match sender(lp.config, lp.tdk, persona, &vtc_did).await {
+        Ok(s) => s,
+        Err(e) => return refuse(lp.state, &purpose, e),
+    };
+    // Built here rather than in the job so its id — the thread the answer
+    // carries — is known before the send is spawned, and the view can wait
+    // on it at once (see `arm`).
+    let doc = match git_ns::build(&request, &sender.persona_did, &vtc_did) {
+        Ok(doc) => doc,
+        Err(e) => {
+            let e = match &purpose {
+                Purpose::Change(what) => format!("couldn't send ({what}): {e}"),
+                _ => format!("couldn't send: {e}"),
+            };
+            return refuse(lp.state, &purpose, e);
+        }
+    };
+    let thid = correlation_thread(&doc).to_string();
+    let job = ReposJob {
+        sender,
+        vtc_did,
+        persona,
+        doc,
+        purpose: purpose.clone(),
+    };
+    let state = &mut *lp.state;
+    let started = background_dispatch::dispatch(job, lp.in_flight, lp.dispatch_tx, |msg| {
+        if !quiet && let Some(view) = view_mut(state) {
+            view.note(Severity::Warning, msg);
+        }
+    });
+    if !started {
+        return;
+    }
+    // Armed in the same loop turn as the spawn, so the answer — applied by
+    // this loop — always finds the view waiting on it.
+    if let Some(view) = view_mut(lp.state) {
+        arm(view, thid, purpose, Instant::now());
+        if let Some(Commit::LinkStarting(forge)) = commit {
+            view.link = Some(LinkFlow::starting(forge));
+        }
+    }
+}
+
+/// Read the view again, from the loop's own arms (an answer that landed a
+/// change).
+pub(crate) async fn refresh(lp: &mut Loop<'_>, quiet: bool) {
+    let steps = plan_read(lp.state, quiet).into_iter().collect();
+    run_steps(lp, steps).await;
 }
 
 // ****************************************************************************
@@ -1388,12 +1518,18 @@ fn unexpected(reply: &Reply) -> String {
 }
 
 /// Expire what waited too long, and poll a link attempt that is due. Called
-/// from the loop's five-second sweep.
+/// from the loop's five-second sweep: [`plan_tick`], then [`run_steps`].
 pub(crate) async fn tick(lp: &mut Loop<'_>) {
-    let now = Instant::now();
-    let wall = Utc::now();
+    let steps = plan_tick(lp.state, Instant::now(), Utc::now());
+    run_steps(lp, steps).await;
+}
+
+/// Plan the sweep at `now` (`wall` for the link's expiry). Pure: it ends the
+/// waits past their windows and expires the link attempt, then returns the
+/// due poll, the workspace probe and the did-git-sign read, in that order.
+pub(crate) fn plan_tick(state: &mut State, now: Instant, wall: DateTime<Utc>) -> Vec<Step> {
     let mut poll = None;
-    if let Some(view) = view_mut(lp.state) {
+    if let Some(view) = view_mut(state) {
         if view
             .pending
             .as_ref()
@@ -1464,14 +1600,24 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
             }
         }
     }
-    if let Some(link_id) = poll {
-        send(lp, Request::LinkStatus { link_id }, Purpose::LinkPoll, true).await;
-    }
-    super::repos_workspace::probe_if_due(lp.state, lp.dispatch_tx, lp.in_flight);
+    let mut steps: Vec<Step> = poll
+        .and_then(|link_id| {
+            plan_send(
+                state,
+                Request::LinkStatus { link_id },
+                Purpose::LinkPoll,
+                true,
+                None,
+            )
+        })
+        .into_iter()
+        .collect();
+    steps.push(Step::Probe);
     // The did-git-sign install as Help / Status and Settings show it: read off
     // the loop when it is due (a persona switch, a signing change made here,
     // either view opened), never in `sync_from_config`.
-    super::settings_actions::maybe_refresh_did_git_sign(lp.state, lp.in_flight, lp.dispatch_tx);
+    steps.push(Step::CheckDidGitSign);
+    steps
 }
 
 #[cfg(test)]
@@ -2419,6 +2565,14 @@ mod tests {
 
     // --- review follow-ups -------------------------------------------------
 
+    /// `l` on the panel, planned and run on the loop.
+    async fn link_start(lp: &mut Loop<'_>) {
+        let ReposEffect::Steps(steps) = plan(lp.state, lp.config, Act::LinkStart) else {
+            panic!("a link start runs steps");
+        };
+        run_steps(lp, steps).await;
+    }
+
     async fn with_loop<F>(state: &mut State, f: F)
     where
         F: for<'a> FnOnce(
@@ -2481,7 +2635,7 @@ mod tests {
     async fn a_link_that_never_left_is_not_left_starting() {
         // No messaging identity for the persona: the send is refused.
         let mut state = open_state();
-        with_loop(&mut state, |lp| Box::pin(start_link(lp))).await;
+        with_loop(&mut state, |lp| Box::pin(link_start(lp))).await;
         let v = view(&state);
         assert!(v.link.is_none(), "no attempt was started");
         assert_eq!(v.status.as_ref().unwrap().severity, Severity::Error);
@@ -2489,7 +2643,7 @@ mod tests {
         // Still waiting on another answer: likewise.
         let mut state = open_state();
         pend(&mut state, "grant-1", Purpose::Change("granting".into()));
-        with_loop(&mut state, |lp| Box::pin(start_link(lp))).await;
+        with_loop(&mut state, |lp| Box::pin(link_start(lp))).await;
         assert!(view(&state).link.is_none());
         assert!(
             view(&state)
@@ -2631,5 +2785,202 @@ mod tests {
             view(&state).status.as_ref().unwrap().severity,
             Severity::Error
         );
+    }
+
+    // --- the pure plan ------------------------------------------------------
+
+    fn steps(effect: ReposEffect) -> Vec<Step> {
+        match effect {
+            ReposEffect::Steps(steps) => steps,
+            _ => panic!("expected steps"),
+        }
+    }
+
+    fn outbound(step: &Step) -> &Outbound {
+        match step {
+            Step::Send(outbound) => outbound,
+            _ => panic!("expected a send"),
+        }
+    }
+
+    /// A confirmation is spent by the plan; the change it armed is a send
+    /// owed, and nothing says it is waiting until the send is claimed.
+    #[test]
+    fn a_confirmation_plans_its_change_and_is_spent() {
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().confirm = Some(ArmedChange {
+            summary: "Archive?".into(),
+            request: Request::Archive {
+                resource: "github.com/acme/gadgets".into(),
+            },
+        });
+        let planned = steps(plan(&mut state, &config(), Act::Confirm));
+        assert_eq!(planned.len(), 1);
+        let out = outbound(&planned[0]);
+        assert_eq!(
+            out.purpose,
+            Purpose::Change("archiving acme/gadgets".into())
+        );
+        assert_eq!((out.vtc_did.as_str(), out.persona), (VTC, persona()));
+        assert!(!out.quiet);
+        assert_eq!(out.commit, None);
+        let v = view(&state);
+        assert!(v.confirm.is_none());
+        assert!(
+            v.pending.is_none() && v.status.is_none(),
+            "armed only once claimed"
+        );
+    }
+
+    /// While a request awaits its answer, a second is planned as the "still
+    /// waiting" note — the confirmation still spent — and a quiet one as
+    /// nothing at all.
+    #[test]
+    fn a_request_while_another_waits_plans_a_note_or_nothing_when_quiet() {
+        let mut state = open_state();
+        pend(
+            &mut state,
+            "g1",
+            Purpose::Change("granting maintainer".into()),
+        );
+        view_mut(&mut state).unwrap().confirm = Some(ArmedChange {
+            summary: "Archive?".into(),
+            request: Request::Archive {
+                resource: "github.com/acme/gadgets".into(),
+            },
+        });
+        let planned = steps(plan(&mut state, &config(), Act::Confirm));
+        assert!(matches!(
+            planned.as_slice(),
+            [Step::Note(Severity::Warning, text)]
+                if text == "Still waiting for the community's answer (granting maintainer)."
+        ));
+        assert!(view(&state).confirm.is_none());
+        assert!(view(&state).status.is_none(), "the runner says it");
+
+        assert!(plan_read(&mut state, true).is_none());
+        assert!(matches!(
+            plan_read(&mut state, false),
+            Some(Step::Note(_, text)) if text == "Still waiting for the community's answer (granting maintainer)."
+        ));
+    }
+
+    /// A refresh wants a probe, then probes, shows the read starting and reads
+    /// — in that order, so the read's cleared status line is what a refusal
+    /// is written over.
+    #[test]
+    fn a_refresh_plans_probe_reading_then_the_read() {
+        let mut state = open_state();
+        let planned = steps(plan(&mut state, &config(), Act::Refresh));
+        assert!(matches!(
+            planned.as_slice(),
+            [Step::Probe, Step::Reading, Step::Send(out)] if out.purpose == Purpose::View && !out.quiet
+        ));
+        assert_eq!(view(&state).workspace.probe_wanted, Some(true));
+
+        pend(&mut state, "v1", Purpose::View);
+        let planned = steps(plan(&mut state, &config(), Act::Refresh));
+        assert!(matches!(
+            planned.as_slice(),
+            [Step::Probe, Step::Reading, Step::Note(Severity::Warning, _)]
+        ));
+    }
+
+    /// Opening an index that names no Active community leaves the open view
+    /// and still reads it, after the workspace is filled.
+    #[test]
+    fn opening_no_community_reads_the_open_view_after_the_workspace() {
+        let mut state = open_state();
+        let ReposEffect::Opened(planned) = plan(&mut state, &config(), Act::Open(7)) else {
+            panic!("an open fills the workspace first");
+        };
+        assert!(matches!(
+            planned.as_slice(),
+            [Step::Reading, Step::Send(out)] if out.vtc_did == VTC
+        ));
+        assert_eq!(view(&state).vtc_did, VTC);
+    }
+
+    /// A new repository for the requester alone is a send owed; the form stays.
+    #[test]
+    fn a_new_repository_for_me_alone_plans_the_create() {
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().screen = ReposScreen::NewRepo(NewRepoForm {
+            name: "gizmos".into(),
+            ..NewRepoForm::default()
+        });
+        let planned = steps(plan(&mut state, &config(), Act::NewSubmit));
+        assert_eq!(planned.len(), 1);
+        assert_eq!(
+            outbound(&planned[0]).purpose,
+            Purpose::Change("creating gizmos".into())
+        );
+        assert!(view(&state).confirm.is_none());
+    }
+
+    /// A link start owes its "starting…" line to the claim; with no bridged
+    /// forge it says so and plans nothing.
+    #[test]
+    fn a_link_start_owes_its_starting_line_to_the_claim() {
+        let mut state = open_state();
+        let planned = steps(plan(&mut state, &config(), Act::LinkStart));
+        assert_eq!(planned.len(), 1);
+        let out = outbound(&planned[0]);
+        assert_eq!(out.purpose, Purpose::LinkStart);
+        assert_eq!(out.commit, Some(Commit::LinkStarting("github.com".into())));
+        assert!(view(&state).link.is_none());
+
+        view_mut(&mut state).unwrap().data = None;
+        assert!(steps(plan(&mut state, &config(), Act::LinkStart)).is_empty());
+        assert_eq!(
+            view(&state).status.as_ref().unwrap().severity,
+            Severity::Warning
+        );
+    }
+
+    /// The sweep plans a due poll — beside a pending change, quietly — then
+    /// the probe and the did-git-sign read. The poll is armed only once sent.
+    #[test]
+    fn the_sweep_plans_a_due_poll_then_the_probe_and_did_git_sign() {
+        let mut state = open_state();
+        pend(&mut state, "g1", Purpose::Change("granting".into()));
+        let mut link = LinkFlow::starting("github.com".into());
+        link.phase = LinkPhase::Waiting;
+        link.link_id = Some("lnk_1".into());
+        view_mut(&mut state).unwrap().link = Some(link);
+        let planned = plan_tick(&mut state, Instant::now(), Utc::now());
+        assert!(matches!(
+            planned.as_slice(),
+            [Step::Send(out), Step::Probe, Step::CheckDidGitSign]
+                if out.purpose == Purpose::LinkPoll && out.quiet
+                    && out.request == Request::LinkStatus { link_id: "lnk_1".into() }
+        ));
+        let link = view(&state).link.as_ref().unwrap();
+        assert!(link.poll.is_none() && link.last_poll.is_none());
+    }
+
+    /// The sweep ends a wait past its window at the time it is given.
+    #[test]
+    fn the_sweep_ends_a_wait_past_its_window() {
+        let mut state = open_state();
+        pend(&mut state, "t", Purpose::View);
+        let sent = view(&state).pending.as_ref().unwrap().sent_at;
+        let planned = plan_tick(&mut state, sent + REPLY_WINDOW, Utc::now());
+        assert!(
+            view(&state).pending.is_some(),
+            "the window's edge is inside it"
+        );
+        assert!(matches!(
+            planned.as_slice(),
+            [Step::Probe, Step::CheckDidGitSign]
+        ));
+
+        plan_tick(
+            &mut state,
+            sent + REPLY_WINDOW + Duration::from_secs(1),
+            Utc::now(),
+        );
+        assert!(view(&state).pending.is_none());
+        assert!(view(&state).status_text().unwrap().contains("within 30s"));
     }
 }

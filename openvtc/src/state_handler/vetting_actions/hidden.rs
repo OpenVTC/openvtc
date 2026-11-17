@@ -1,5 +1,15 @@
-//! Hidden vetting from the vetter's side: the token schedule tick, minting the
-//! engine, and attesting without a statement; plus the applicant's challenge request.
+//! Hidden (PCS ZKP) vetting on the Vetting page: the vetter schedule's pass
+//! for one community, minting the vetter's engine, attesting without a
+//! statement, the key check and the draw asked for by hand, and the
+//! applicant's request for a submission challenge.
+//!
+//! Each is a pure plan over the state, the book, and the time it was asked
+//! (`plan_*`, [`hidden_vetting_tick`]'s plan, [`ensure_hidden_vetter`]) that
+//! returns a [`VettingEffect`]; the sends are the client's own
+//! ([`Claim::Unheld`]), and the work for the VTA goes through
+//! [`super::pcs`]. [`ask_for_challenge`], [`hidden_vetting_tick`] and
+//! [`attest_hidden`] keep the signatures their loop-side callers use, and plan
+//! then run.
 
 use crate::state_handler::main_page::status::Status;
 use chrono::{DateTime, Utc};
@@ -12,23 +22,21 @@ use openvtc_core::vetting::vetter::Attestation;
 use openvtc_core::vetting::wire;
 
 use super::desk::session_id_of;
-use super::dispatch::{page, persist, status};
+use super::dispatch::{panel, show};
+use super::effect::{Abort, PcsCommit, Step, VettingEffect, run, run_local};
 use super::jobs::Sent;
-use super::pcs::start_pcs_work;
-use super::send::{Claim, abandon, persona_did, sign_and_send};
-use super::words::{community_display, outlook_words};
+use super::pcs::plan_pcs_work;
+use super::send::{Claim, give_up, persona_did};
+use super::words::{clause, community_display, get_tokens_words, hides_vetters, outlook_words};
 use crate::state_handler::background_dispatch::{DispatchDomain, InFlight};
 use crate::state_handler::hidden_vetting_vta::PcsWork;
-use crate::state_handler::main_page::content::VettingMode;
 use crate::state_handler::runtime_actions::ActionCtx;
+use crate::state_handler::state::State;
 use openvtc_core::vetting::book::PcsInbound;
 
-/// Attest the hidden way: no statement, no signature, nothing that names this vetter.
-///
-/// Split from [`attest`](crate::state_handler::vetting_actions::desk::attest) rather than branched inside it because the two paths diverge at every
-/// step after the draft — what is produced, what is recorded, what is sent, and what the operator
-/// is told. The refusals an operator can act on are surfaced in their own words: a vetter with no
-/// tokens left has not failed, it is at capacity until the next drip.
+/// What a challenge request that cannot be sent gives up saying.
+const CHALLENGE_FAILED: &str = "Could not ask for a submission challenge";
+
 /// Ask the community for the challenge this submission must bind.
 ///
 /// Called when an applicant refreshes a hidden-vetting application. The join does not depend
@@ -37,8 +45,19 @@ use openvtc_core::vetting::book::PcsInbound;
 /// proof is read, so asking twice replaces rather than accumulates — which is why this is safe
 /// to call again on a retry.
 pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &str) {
-    let Some(app) = ctx
-        .config
+    let effect = plan_ask_for_challenge(ctx.state, ctx.config, application_id);
+    run(ctx, effect).await;
+}
+
+/// Plan [`ask_for_challenge`]: file the question and say so; the effect signs and sends it as
+/// the client's own step, never refused for a busy domain. The question stays filed when the
+/// signing fails, and expires on its reply window.
+pub(super) fn plan_ask_for_challenge(
+    state: &mut State,
+    config: &mut Config,
+    application_id: &str,
+) -> VettingEffect {
+    let Some(app) = config
         .private
         .vetting
         .applications
@@ -46,22 +65,25 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
         .find(|a| a.id == application_id && a.hidden.is_some())
         .cloned()
     else {
-        return;
+        return VettingEffect::none();
     };
     let document = match wire::pcs_challenge_request(&app.join_did, &app.community, None) {
         Ok(d) => d,
-        Err(e) => return abandon(ctx, "Could not ask for a submission challenge", e),
+        Err(e) => {
+            give_up(state, config, CHALLENGE_FAILED, e);
+            return VettingEffect::none();
+        }
     };
     let document_id = document.id.clone();
-    ctx.config.private.vetting.ask(CommunityQuery {
+    config.private.vetting.ask(CommunityQuery {
         document_id: document_id.clone(),
         community: app.community.clone(),
         persona: app.persona,
         kind: QueryKind::PcsChallenge,
         sent_at: Utc::now(),
     });
-    status(
-        ctx,
+    show(
+        state,
         Status::progress("Asking the community for a submission challenge…"),
     );
     let sent = Sent::Query {
@@ -69,9 +91,14 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
         community: app.community.clone(),
         kind: QueryKind::PcsChallenge,
     };
-    if let Err(e) = sign_and_send(ctx, app.persona, document, sent, Claim::Unheld).await {
-        abandon(ctx, "Could not ask for a submission challenge", e);
-    }
+    VettingEffect::sign_and_send(
+        [],
+        app.persona,
+        document,
+        sent,
+        Claim::Unheld,
+        Abort::say(CHALLENGE_FAILED),
+    )
 }
 
 /// Do whatever this community's hidden-vetting schedule owes it now: enrol under the current
@@ -95,20 +122,36 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
 /// What is owed goes into `work`, for the VTA to build: the pass runs one job for every
 /// community ([`refresh_vetter_side`](crate::state_handler::vetting_actions::desk::refresh_vetter_side)), and what the VTA builds is sent when the job is back
 /// ([`apply_pcs_outcome`](crate::state_handler::vetting_actions::pcs::apply_pcs_outcome)).
+///
+/// Planned by [`plan_hidden_vetting_tick`]; its steps are local (a save, a status), so they are
+/// run here without awaiting, before the pass moves on to the next community.
 pub(crate) fn hidden_vetting_tick(
     ctx: &mut ActionCtx<'_>,
     community: &str,
     work: &mut Vec<PcsWork>,
 ) {
-    let now = Utc::now();
-    ensure_hidden_vetter(ctx, community);
-    let book = &mut ctx.config.private.vetting;
+    let effect = plan_hidden_vetting_tick(ctx.state, ctx.config, community, Utc::now(), work);
+    run_local(ctx, effect);
+}
+
+/// Plan [`hidden_vetting_tick`] at `now`: make the book changes the schedule owes, push the
+/// VTA's work onto `work`, and return the saves and statuses left — a minted engine's mark and
+/// word, then a re-key's save, or the schedule's mark.
+pub(super) fn plan_hidden_vetting_tick(
+    state: &mut State,
+    config: &mut Config,
+    community: &str,
+    now: DateTime<Utc>,
+    work: &mut Vec<PcsWork>,
+) -> VettingEffect {
+    let mut steps = ensure_hidden_vetter(config, community, now);
+    let book = &mut config.private.vetting;
     let Some(index) = book
         .hidden_vetter
         .iter()
         .position(|h| h.community == community)
     else {
-        return;
+        return VettingEffect(steps);
     };
     let live = book.hidden_published.get(community).cloned();
     // The draws whose answers are still on their way: the question is still open. One whose
@@ -153,45 +196,42 @@ pub(crate) fn hidden_vetting_tick(
             }
         }
     }
-    let state = book.hidden_vetter[index].clone();
+    let held = book.hidden_vetter[index].clone();
     let changed = plan.settled || plan.adopted != Adopted::Unchanged;
     if let Adopted::Rekeyed { first } = plan.adopted {
         if first {
-            let name = community_display(ctx.config, community);
-            persist(
-                ctx,
-                format!(
-                    "{name} now publishes different hidden-vetting keys from the ones you \
-                     enrolled under. The tokens and credential you hold there count for nothing \
-                     under the new keys, so drawing has stopped. Ask the community whether it \
-                     re-keyed; see the Hidden vetting view (h on the desk)."
-                ),
-            );
+            let name = community_display(config, community);
+            steps.push(Step::Persist(format!(
+                "{name} now publishes different hidden-vetting keys from the ones you \
+                 enrolled under. The tokens and credential you hold there count for nothing \
+                 under the new keys, so drawing has stopped. Ask the community whether it \
+                 re-keyed; see the Hidden vetting view (h on the desk)."
+            )));
             tracing::warn!(community = %community, "hidden-vetting keys changed since enrolment; the drip has stopped");
         }
-        return;
+        return VettingEffect(steps);
     }
     if changed {
-        ctx.save.mark_dirty();
-        ctx.state.main_page.sync_from_config(ctx.config);
+        steps.push(Step::MarkDirty);
+        state.main_page.sync_from_config(config);
     }
-    let Some(did) = persona_did(ctx.config, state.persona) else {
-        return;
+    let Some(did) = persona_did(config, held.persona) else {
+        return VettingEffect(steps);
     };
-    let Some(context_id) = vetter_context(ctx.config, state.persona) else {
-        return;
+    let Some(context_id) = vetter_context(config, held.persona) else {
+        return VettingEffect(steps);
     };
     // Never a second enrolment while one is unanswered: the community answers the first and
     // refuses the second (`alreadyEnrolled`), and that refusal would read as a lost answer.
     // The first's answer is taken whenever it lands — the VTA holds its blinding.
     let enrolling = |owed: &openvtc_core::vetting::hidden::Due| match owed {
         openvtc_core::vetting::hidden::Due::Enrol { period } => {
-            ctx.config
+            config
                 .private
                 .vetting
                 .waiting_on(community, QueryKind::PcsRoot)
                 .is_some()
-                || state.enrolment_pending(period, now)
+                || held.enrolment_pending(period, now)
         }
         _ => false,
     };
@@ -199,15 +239,15 @@ pub(crate) fn hidden_vetting_tick(
     // schedule owes — each built by the VTA and sent from the loop when the job is back.
     work.push(PcsWork::VetterShow {
         community: community.to_string(),
-        persona: state.persona,
+        persona: held.persona,
         context_id: context_id.clone(),
     });
     // The community bound us to a key the engine does not hold: the VTA is asked to restore
     // it, once ([`openvtc_core::vetting::binding`]). Enrolment is held in the plan until then.
-    if let Some(bound_id) = state.recovery_due() {
+    if let Some(bound_id) = held.recovery_due() {
         work.push(PcsWork::Recover {
             community: community.to_string(),
-            persona: state.persona,
+            persona: held.persona,
             context_id: context_id.clone(),
             did: did.clone(),
             bound_id: bound_id.to_string(),
@@ -221,7 +261,7 @@ pub(crate) fn hidden_vetting_tick(
         // restart forgot it): the VTA refuses a second draw for it (`alreadyInFlight`), so its
         // stale draw is dropped first and the tick asked for afresh.
         if let openvtc_core::vetting::hidden::Due::Draw { label, tick, .. } = &owed
-            && state
+            && held
                 .engine
                 .draws_in_flight
                 .iter()
@@ -230,28 +270,30 @@ pub(crate) fn hidden_vetting_tick(
             work.push(PcsWork::Inbound {
                 item: PcsInbound::DrawRefused {
                     community: community.to_string(),
-                    persona: state.persona,
+                    persona: held.persona,
                     label: label.clone(),
                     tick: *tick,
                 },
                 context_id: Some(context_id.clone()),
-                params: Some(state.params.clone()),
+                params: Some(held.params.clone()),
                 vta_application: None,
             });
         }
         work.push(PcsWork::Owed {
             community: community.to_string(),
-            persona: state.persona,
+            persona: held.persona,
             context_id: context_id.clone(),
             did: did.clone(),
-            params: state.params.clone(),
+            params: held.params.clone(),
             owed,
         });
     }
+    VettingEffect(steps)
 }
 
 /// Mint this vetter's engine for a community, the first time we learn it runs hidden vetting
-/// and has named us a vetter.
+/// and has named us a vetter. Returns the steps that follow minting one — the save, and the
+/// word that enrolment is starting — or none.
 ///
 /// Both halves of that condition matter. A community's published parameters say the mode exists,
 /// never that we are in it; the grant says we vet here, and nothing about how. Only together do
@@ -262,45 +304,137 @@ pub(crate) fn hidden_vetting_tick(
 /// same person count twice in one proof. An engine already held is left alone even if the
 /// community republishes different parameters: the credential we hold was issued under the old
 /// ones, and a rotation is an enrolment, which the schedule handles.
-pub(super) fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
-    let book = &ctx.config.private.vetting;
+pub(super) fn ensure_hidden_vetter(
+    config: &mut Config,
+    community: &str,
+    now: DateTime<Utc>,
+) -> Vec<Step> {
+    let book = &config.private.vetting;
     if book.hidden_vetter.iter().any(|h| h.community == community) {
-        return;
+        return Vec::new();
     }
     let Some(params) = book.hidden_published.get(community).cloned() else {
-        return;
+        return Vec::new();
     };
     let Some(standing) = book
-        .vetter_standing(Utc::now())
+        .vetter_standing(now)
         .into_iter()
         .find(|s| s.community == community && s.live)
     else {
-        return;
+        return Vec::new();
     };
-    if persona_did(ctx.config, standing.persona).is_none() {
-        return;
+    if persona_did(config, standing.persona).is_none() {
+        return Vec::new();
     }
     // The engine itself is the VTA's, created by the first enrolment request: one key per
     // (context, community) for life, bound to this persona's DID (`vta/pcs/root-request`).
     let mut held =
         openvtc_core::vetting::book::HiddenVetterState::new(community, standing.persona, params);
     // The parameters are the last manifest's; dated by it, so the first draw follows a read.
-    let reading = ctx.config.private.vetting.vetter_mode(community);
+    let reading = config.private.vetting.vetter_mode(community);
     held.params_read_at = reading
         .read
         .filter(|_| !reading.inferred)
         .map(|r| r.read_at);
-    ctx.config.private.vetting.hidden_vetter.push(held);
-    ctx.save.mark_dirty();
-    status(
-        ctx,
-        Status::progress(format!(
+    config.private.vetting.hidden_vetter.push(held);
+    vec![
+        Step::MarkDirty,
+        Step::Status(Status::progress(format!(
             "{} hides its vetters. Enrolling you — your attestations there will name nobody.",
-            community_display(ctx.config, community)
-        )),
-    );
+            community_display(config, community)
+        ))),
+    ]
 }
 
+/// Plan the key check (`k` on the hidden view): restart the check of the key the community
+/// bound us to, where it is in question, then run the vetter pass that asks the community.
+pub(super) fn plan_check_hidden_key(
+    state: &mut State,
+    config: &mut Config,
+    now: DateTime<Utc>,
+) -> VettingEffect {
+    let index = match panel(state).mode {
+        crate::state_handler::main_page::content::VettingMode::HiddenVetting { index } => index,
+        _ => 0,
+    };
+    let Some(held) = config.private.vetting.hidden_vetter.get_mut(index) else {
+        return VettingEffect::none();
+    };
+    let community = held.community.clone();
+    let started = held.recheck_key(now);
+    let name = community_display(config, &community);
+    if started {
+        VettingEffect(vec![
+            Step::MarkDirty,
+            Step::Status(Status::progress(format!(
+                "Asking {name} which hidden-vetting key it holds for you, to restore it at \
+                 your VTA…"
+            ))),
+            Step::RefreshVetterSide,
+        ])
+    } else {
+        show(
+            state,
+            Status::warning(format!(
+                "Nothing to check at {name}: your hidden-vetting key is not in question, or a \
+                 check is already running."
+            )),
+        );
+        VettingEffect::none()
+    }
+}
+
+/// Plan "get tokens" (`d`): whatever the schedule owes, in order — enrol where not enrolled,
+/// then draw every window that has begun — and, per community, exactly what is happening or
+/// what blocks it and until when. Said from the book as it was before the pass, which is what
+/// the pass acts on, once the pass has run.
+pub(super) fn plan_draw_now(config: &mut Config, now: DateTime<Utc>) -> VettingEffect {
+    // Asked by hand: a lost enrolment is worth one more ask — the community may now re-issue it
+    // to the same identifier, and it bounds how many times it will.
+    for held in &mut config.private.vetting.hidden_vetter {
+        held.lost_reasked = false;
+    }
+    let words: Vec<String> = {
+        let book = &config.private.vetting;
+        book.vetter_standing(now)
+            .into_iter()
+            .filter(|s| s.live && hides_vetters(book, &s.community))
+            .map(|s| {
+                let name = community_display(config, &s.community);
+                let why = get_tokens_words(book, &s.community, s.persona, &name, now);
+                format!("{name}: {}.", clause(&why))
+            })
+            .collect()
+    };
+    VettingEffect(vec![
+        Step::RefreshVetterSide,
+        Step::Status(Status::info(if words.is_empty() {
+            "None of the communities you vet for proves vetting with PCS ZKP, so there are no \
+             tokens to get — hand out tickets with t."
+                .to_string()
+        } else {
+            format!("Getting tokens — {}", words.join(" "))
+        })),
+    ])
+}
+
+/// Plan Enter on the hidden view: "draw now", as `d` is — the view's one verb.
+pub(super) fn plan_hidden_view_submit(state: &mut State) -> VettingEffect {
+    show(
+        state,
+        Status::progress(
+            "Reading each community's requirements again and drawing what the schedule owes…",
+        ),
+    );
+    VettingEffect(vec![Step::RefreshVetterSide])
+}
+
+/// Attest the hidden way: no statement, no signature, nothing that names this vetter.
+///
+/// Split from [`attest`](crate::state_handler::vetting_actions::desk::attest) rather than branched inside it because the two paths diverge at every
+/// step after the draft — what is produced, what is recorded, what is sent, and what the operator
+/// is told. The refusals an operator can act on are surfaced in their own words: a vetter with no
+/// tokens left has not failed, it is at capacity until the next drip.
 pub(super) async fn attest_hidden(
     ctx: &mut ActionCtx<'_>,
     request_id: &str,
@@ -309,26 +443,59 @@ pub(super) async fn attest_hidden(
     attestation: Attestation,
     now: DateTime<Utc>,
 ) {
-    let job = match ctx.config.private.vetting.hidden_attestation_job(
+    let connected = ctx.admin_vta.is_some();
+    let effect = plan_attest_hidden(
+        ctx.state,
+        ctx.config,
+        connected,
+        request_id,
+        entry,
+        vetter_did,
+        attestation,
+        now,
+    );
+    run(ctx, effect).await;
+}
+
+/// Plan [`attest_hidden`]: build the job, and hand it to the VTA with whatever else is owed
+/// there. `connected` is whether an admin VTA session is held. The list view and the progress
+/// word follow only a job that started; one that did not says so and leaves the request open.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn plan_attest_hidden(
+    state: &mut State,
+    config: &mut Config,
+    connected: bool,
+    request_id: &str,
+    entry: &openvtc_core::vetting::vetter::DeskEntry,
+    vetter_did: &str,
+    attestation: Attestation,
+    now: DateTime<Utc>,
+) -> VettingEffect {
+    let job = match config.private.vetting.hidden_attestation_job(
         request_id,
         vetter_did,
         attestation,
         now,
     ) {
         Ok(job) => job,
-        Err(e) => return cannot_attest_hidden(ctx, entry, &e.to_string(), is_wait(&e), now),
+        Err(e) => {
+            cannot_attest_hidden(state, config, entry, &e.to_string(), is_wait(&e), now);
+            return VettingEffect::none();
+        }
     };
     let Some(session_id) = session_id_of(entry) else {
-        return status(
-            ctx,
+        show(
+            state,
             Status::warning("This request has no open session to attest on."),
         );
+        return VettingEffect::none();
     };
-    let Some(context_id) = vetter_context(ctx.config, entry.persona) else {
-        return status(
-            ctx,
+    let Some(context_id) = vetter_context(config, entry.persona) else {
+        show(
+            state,
             Status::error("The persona this request was made to is not available."),
         );
+        return VettingEffect::none();
     };
     let work = PcsWork::Attest {
         job,
@@ -336,21 +503,14 @@ pub(super) async fn attest_hidden(
         vetter_did: vetter_did.to_string(),
         session_id,
     };
-    if start_pcs_work(ctx, vec![work]) {
-        page(ctx).mode = VettingMode::List;
-        status(
-            ctx,
-            Status::progress("Your VTA is making the attestation — it names nobody…"),
-        );
-    } else {
-        status(
-            ctx,
-            Status::warning(format!(
-                "{} — attest again in a moment. Nothing was sent; the request stays open.",
-                InFlight::busy_message(DispatchDomain::HiddenVetting)
-            )),
-        );
-    }
+    VettingEffect(vec![Step::StartPcs {
+        start: plan_pcs_work(config, connected, vec![work]),
+        commit: Some(PcsCommit::Attesting),
+        refused: Some(Status::warning(format!(
+            "{} — attest again in a moment. Nothing was sent; the request stays open.",
+            InFlight::busy_message(DispatchDomain::HiddenVetting)
+        ))),
+    }])
 }
 
 /// Whether a refusal to attest is a state the vetter waits out: no credential yet, or no token.
@@ -365,24 +525,24 @@ fn is_wait(e: &openvtc_core::vetting::vetter::VetterError) -> bool {
 /// Say why nothing was attested. No credential or no token is a state the vetter waits out: say
 /// how long, from the schedule, rather than a bare refusal.
 pub(super) fn cannot_attest_hidden(
-    ctx: &mut ActionCtx<'_>,
+    state: &mut State,
+    config: &Config,
     entry: &openvtc_core::vetting::vetter::DeskEntry,
     why: &str,
     waiting: bool,
     now: DateTime<Utc>,
 ) {
-    let outlook = ctx
-        .config
+    let outlook = config
         .private
         .vetting
         .hidden_outlook(&entry.community, entry.persona, now)
         .filter(|_| waiting);
-    status(
-        ctx,
+    show(
+        state,
         Status::error(match outlook {
             Some(o) => format!(
                 "Cannot attest yet: {why}. Nothing was sent; the request stays open. {}: {}.{}",
-                community_display(ctx.config, &entry.community),
+                community_display(config, &entry.community),
                 outlook_words(&o, now),
                 if o.events_offered {
                     " Vetting at one of its events (e) draws more."
@@ -403,4 +563,262 @@ pub(super) fn vetter_context(config: &Config, persona: PersonaId) -> Option<Stri
         .personas
         .get(&persona)
         .map(|p| community_context::persona_context(p, top).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::effect::Abort;
+    use super::super::test_support::hidden_vetter_book;
+    use super::*;
+    use crate::state_handler::dispatch_util::test_config;
+    use crate::state_handler::main_page::content::VettingMode;
+    use crate::state_handler::main_page::status::Severity;
+    use openvtc_core::vetting::book::HiddenRefusal;
+    use openvtc_core::vetting::hidden::HiddenParams;
+
+    const FIRST: &str = "did:web:first-vtc.example";
+
+    fn said(state: &mut State) -> Status {
+        panel(state)
+            .status_message
+            .clone()
+            .expect("the page says something")
+    }
+
+    #[test]
+    fn a_challenge_is_filed_said_then_signed_and_sent_unheld() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let persona = PersonaId::new();
+        let id = config
+            .private
+            .vetting
+            .start_application(FIRST, persona, "did:key:zJoin", Utc::now())
+            .unwrap()
+            .id
+            .clone();
+
+        // Not a hidden application: nothing asked.
+        let effect = plan_ask_for_challenge(&mut state, &mut config, &id);
+        assert!(effect.0.is_empty());
+        assert!(config.private.vetting.queries.is_empty());
+
+        let params = hidden_vetter_book(0, false).0.hidden_vetter[0]
+            .params
+            .clone();
+        config
+            .private
+            .vetting
+            .application_by_id_mut(&id)
+            .unwrap()
+            .hidden = Some(params);
+        let effect = plan_ask_for_challenge(&mut state, &mut config, &id);
+
+        assert!(
+            config
+                .private
+                .vetting
+                .waiting_on(FIRST, QueryKind::PcsChallenge)
+                .is_some()
+        );
+        assert_eq!(
+            said(&mut state),
+            Status::progress("Asking the community for a submission challenge…")
+        );
+        let [
+            Step::Sign {
+                persona: signer,
+                abort,
+                ..
+            },
+            Step::Send {
+                claim: Claim::Unheld,
+                abort: same,
+                ..
+            },
+        ] = effect.0.as_slice()
+        else {
+            panic!("signed, then sent unheld");
+        };
+        assert_eq!(*signer, persona);
+        // Nothing is undone: the question stays filed until its window.
+        assert_eq!(abort, &Abort::say(CHALLENGE_FAILED));
+        assert_eq!(same, abort);
+    }
+
+    #[test]
+    fn a_tick_with_no_engine_and_no_grant_owes_nothing() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let params = hidden_vetter_book(0, false).0.hidden_vetter[0]
+            .params
+            .clone();
+        config
+            .private
+            .vetting
+            .hidden_published
+            .insert(FIRST.into(), params);
+        let mut work = Vec::new();
+
+        let effect =
+            plan_hidden_vetting_tick(&mut state, &mut config, FIRST, Utc::now(), &mut work);
+
+        assert!(effect.0.is_empty());
+        assert!(work.is_empty());
+        assert!(config.private.vetting.hidden_vetter.is_empty());
+    }
+
+    #[test]
+    fn a_rekeyed_community_is_saved_and_said_once_and_owes_the_vta_nothing() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let (book, _) = hidden_vetter_book(0, true);
+        let rekeyed = HiddenParams {
+            token_key: "zSomeOtherTokenKey".into(),
+            ..book.hidden_vetter[0].params.clone()
+        };
+        config.private.vetting = book;
+        config
+            .private
+            .vetting
+            .hidden_published
+            .insert(FIRST.into(), rekeyed);
+        let mut work = Vec::new();
+
+        let effect =
+            plan_hidden_vetting_tick(&mut state, &mut config, FIRST, Utc::now(), &mut work);
+        let [Step::Persist(message)] = effect.0.as_slice() else {
+            panic!("saved and said");
+        };
+        assert!(
+            message.contains("now publishes different hidden-vetting keys"),
+            "{message}"
+        );
+        assert!(work.is_empty());
+
+        let effect =
+            plan_hidden_vetting_tick(&mut state, &mut config, FIRST, Utc::now(), &mut work);
+        assert!(effect.0.is_empty(), "said once");
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn checking_a_key_restarts_the_check_then_runs_the_pass() {
+        let mut config = test_config();
+        let mut state = State::default();
+        config.private.vetting = hidden_vetter_book(0, true).0;
+        panel(&mut state).mode = VettingMode::HiddenVetting { index: 0 };
+
+        let effect = plan_check_hidden_key(&mut state, &mut config, Utc::now());
+        assert!(effect.0.is_empty());
+        assert_eq!(said(&mut state).severity, Severity::Warning);
+
+        config.private.vetting.hidden_vetter[0].last_refusal = Some(HiddenRefusal {
+            what: "enrol".into(),
+            code: "vtc/pcs:identifierRebound".into(),
+            at: Utc::now(),
+        });
+        let effect = plan_check_hidden_key(&mut state, &mut config, Utc::now());
+        assert!(config.private.vetting.hidden_vetter[0].key.is_some());
+        let [Step::MarkDirty, Step::Status(word), Step::RefreshVetterSide] = effect.0.as_slice()
+        else {
+            panic!("saved, said, then the pass");
+        };
+        assert!(word.text.starts_with("Asking "), "{}", word.text);
+
+        // An index past the engines: nothing.
+        panel(&mut state).mode = VettingMode::HiddenVetting { index: 5 };
+        assert!(
+            plan_check_hidden_key(&mut state, &mut config, Utc::now())
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn drawing_by_hand_reasks_then_runs_the_pass_then_says_what_it_did() {
+        let mut config = test_config();
+        config.private.vetting = hidden_vetter_book(0, true).0;
+        config.private.vetting.hidden_vetter[0].lost_reasked = true;
+
+        let effect = plan_draw_now(&mut config, Utc::now());
+
+        assert!(!config.private.vetting.hidden_vetter[0].lost_reasked);
+        let [Step::RefreshVetterSide, Step::Status(word)] = effect.0.as_slice() else {
+            panic!("the pass, then what it did");
+        };
+        assert_eq!(word.severity, Severity::Info);
+        assert!(
+            word.text.starts_with("None of the communities"),
+            "no live grant: {}",
+            word.text
+        );
+    }
+
+    #[test]
+    fn enter_on_the_hidden_view_says_so_then_runs_the_pass() {
+        let mut state = State::default();
+        let effect = plan_hidden_view_submit(&mut state);
+        assert!(matches!(effect.0.as_slice(), [Step::RefreshVetterSide]));
+        assert_eq!(said(&mut state).severity, Severity::Progress);
+    }
+
+    #[test]
+    fn attesting_on_a_request_not_yet_attestable_says_why_and_starts_nothing() {
+        use openvtc_core::vetting::vetter::{DeskEntry, DeskState};
+        use vta_sdk::protocols::vetting::request;
+        let mut config = test_config();
+        let mut state = State::default();
+        let now = Utc::now();
+        let ticket = request::v0_1::Ticket::ShortCodeTicket(
+            request::v0_1::ShortCodeTicket::try_from(
+                request::v0_1::ShortCodeTicket::builder().code("0000-0000"),
+            )
+            .unwrap(),
+        );
+        let entry = DeskEntry {
+            request_id: "req-1".into(),
+            request_document_id: "doc-1".into(),
+            applicant: "did:key:zJoiner".into(),
+            community: FIRST.into(),
+            persona: PersonaId::new(),
+            ticket_id: None,
+            request: request::v0_1::Payload::try_from(
+                request::v0_1::Payload::builder()
+                    .community(FIRST)
+                    .join_did("did:key:zJoiner")
+                    .ticket(Some(ticket)),
+            )
+            .unwrap(),
+            state: DeskState::Accepted,
+            received_at: now,
+            updated_at: now,
+        };
+        config.private.vetting.desk.push(entry.clone());
+        let attestation = Attestation {
+            method: crate::state_handler::main_page::content::VETTING_METHODS[0],
+            document_classes: Vec::new(),
+            claims_verified: Vec::new(),
+            liveness_confirmed: false,
+            declared_relationship: crate::state_handler::main_page::content::VETTING_RELATIONSHIPS
+                [0],
+            attestation_text_digest: None,
+        };
+
+        let effect = plan_attest_hidden(
+            &mut state,
+            &mut config,
+            true,
+            "req-1",
+            &entry,
+            "did:key:zVetter",
+            attestation,
+            now,
+        );
+
+        assert!(effect.0.is_empty());
+        let word = said(&mut state);
+        assert_eq!(word.severity, Severity::Error);
+        assert!(word.text.starts_with("Cannot attest: "), "{}", word.text);
+    }
 }

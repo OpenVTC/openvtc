@@ -1,45 +1,70 @@
 //! The vetter desk: opening sessions, attesting, declining and withdrawing,
 //! and keeping the vetter side current with its communities.
+//!
+//! Each desk action is planned here (`plan_*`), purely, on the state and the
+//! book; what it still owes the loop is the [`VettingEffect`] it returns. The
+//! vetter side's refresh asks each community how it vets and which key it
+//! bound us to as planned effects too, then runs the hidden-vetting schedule
+//! (`hidden_vetting_tick`, `start_pcs_work`), which works on the loop.
 
 use crate::state_handler::main_page::status::Status;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::vetting::book::RequestVetting;
 use openvtc_core::vetting::mode::{ModeFailure, VetterMode};
 use openvtc_core::vetting::queries::{CommunityQuery, QueryKind};
-use openvtc_core::vetting::vetter::{Attestation, DeskState};
+use openvtc_core::vetting::vetter::{Attestation, DeskEntry, DeskState};
 use openvtc_core::vetting::wire;
+use vta_sdk::protocols::vetting::decline::v0_1::PayloadCode;
 use vta_sdk::protocols::vetting::{
     VETTING_DECLINE_TYPE, VETTING_REVOKE_STATEMENT_TYPE, VETTING_SESSION_TYPE, VettingMethod,
     documentation,
 };
-use vta_sdk::vetting::statement::sign_statement;
+use vta_sdk::vetting::statement::{StatementDraft, sign_statement};
 
-use super::dispatch::{page, persist, status};
+use super::dispatch::{panel, persist, show};
+use super::effect::{Abort, Followup, Step, Undo, VettingEffect, run};
 use super::hidden::{attest_hidden, hidden_vetting_tick};
 use super::jobs::Sent;
 use super::pcs::start_pcs_work;
-use super::send::{Claim, abandon, begin, persona_did, resolver, sign_and_send, spawn_send};
+use super::send::{Claim, abandon, claimable, give_up, persona_did, resolver, spawn_send};
+use super::tickets::{ticket_sent, ticket_unsent};
 use super::words::{community_display, hidden_without_id_words, hides_vetters};
+use crate::state_handler::background_dispatch::DispatchDomain;
 use crate::state_handler::main_page::content::{
-    AttestForm, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_WITHDRAWAL_REASONS, VettingMode,
-    VettingTab,
+    AttestForm, DECLINE_MESSAGE_MAX, PendingTicket, VETTING_METHODS, VETTING_RELATIONSHIPS,
+    VETTING_WITHDRAWAL_REASONS, VettingMode, VettingTab,
 };
 use crate::state_handler::main_page::menu::MainMenu;
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::state::State;
 
-pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, method_index: usize) {
-    let Some(entry) = ctx.config.private.vetting.desk_entry(request_id).cloned() else {
-        return;
+// ============================================================================
+// Opening a session
+// ============================================================================
+
+/// Enter on the open-session form: ask the community what it requires first
+/// when that is unknown and not yet asked; otherwise open the session, sign
+/// it, keep the signed document in the desk, save, and send it.
+pub(super) fn plan_open_session(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
+    request_id: &str,
+    method_index: usize,
+) -> VettingEffect {
+    let Some(entry) = config.private.vetting.desk_entry(request_id).cloned() else {
+        return VettingEffect::none();
     };
-    let Some(vetter_did) = persona_did(ctx.config, entry.persona) else {
-        return status(
-            ctx,
+    let Some(vetter_did) = persona_did(config, entry.persona) else {
+        show(
+            state,
             Status::error("The persona this request was made to is not available."),
         );
+        return VettingEffect::none();
     };
-    let (required, known) = ctx.config.private.vetting.required_claims_for(
+    let (required, known) = config.private.vetting.required_claims_for(
         &entry.community,
         entry
             .request
@@ -47,23 +72,29 @@ pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, meth
             .as_ref()
             .map(|d| d.as_str()),
     );
-    let asked = page(ctx).requirements_requested.contains(&entry.community);
+    let asked = panel(state)
+        .requirements_requested
+        .contains(&entry.community);
     if !known && !asked {
         // Every vetter of one application must ask for the same claims, or the
         // cards commit to different identities. Ask the community first.
-        if !begin(ctx) {
-            return;
+        if !claimable(state, busy) {
+            return VettingEffect::none();
         }
-        page(ctx)
+        panel(state)
             .requirements_requested
             .push(entry.community.clone());
-        let protocol = ctx.config.private.vetting.protocol_for(&entry.community);
+        const WHAT: &str = "Could not ask the community";
+        let protocol = config.private.vetting.protocol_for(&entry.community);
         let document = match wire::manifest_request(&vetter_did, &entry.community, protocol) {
             Ok(d) => d,
-            Err(e) => return abandon(ctx, "Could not ask the community", e),
+            Err(e) => {
+                give_up(state, config, WHAT, e);
+                return VettingEffect::none();
+            }
         };
-        status(
-            ctx,
+        show(
+            state,
             Status::progress(
                 "Asking the community which claims it requires — open the session again in a moment.",
             ),
@@ -71,17 +102,22 @@ pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, meth
         let sent = Sent::Manifest {
             community: entry.community.clone(),
         };
-        if let Err(e) = sign_and_send(ctx, entry.persona, document, sent, Claim::Held).await {
-            abandon(ctx, "Could not ask the community", e);
-        }
-        return;
+        return VettingEffect::sign_and_send(
+            [],
+            entry.persona,
+            document,
+            sent,
+            Claim::Held,
+            Abort::say(WHAT),
+        );
     }
-    if !begin(ctx) {
-        return;
+    if !claimable(state, busy) {
+        return VettingEffect::none();
     }
+    const OPEN: &str = "Could not open the session";
     let session_id = wire::new_id();
     let method: VettingMethod = VETTING_METHODS[method_index.min(VETTING_METHODS.len() - 1)];
-    let body = match ctx.config.private.vetting.open_session(
+    let body = match config.private.vetting.open_session(
         request_id,
         method,
         required,
@@ -90,7 +126,10 @@ pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, meth
         Utc::now(),
     ) {
         Ok(body) => body,
-        Err(e) => return abandon(ctx, "Could not open the session", e),
+        Err(e) => {
+            give_up(state, config, OPEN, e);
+            return VettingEffect::none();
+        }
     };
     let document = match wire::document(
         VETTING_SESSION_TYPE,
@@ -100,66 +139,90 @@ pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, meth
         &body,
     ) {
         Ok(d) => d,
-        Err(e) => return abandon(ctx, "Could not open the session", e),
+        Err(e) => {
+            give_up(state, config, OPEN, e);
+            return VettingEffect::none();
+        }
     };
-    // Signed here rather than in `sign_and_send`, because the desk keeps the
-    // document exactly as it goes out: the Vetting Statement that closes this
-    // session cites it by `taskDigestMultibase`, which `vetted/1` requires.
-    // Signed and kept before `persist`, so the saved desk holds it.
-    let mut document = document;
-    let keys = match ctx
-        .config
-        .get_persona_keys_for(entry.persona, ctx.tdk)
-        .await
-    {
-        Ok(keys) => keys,
-        Err(e) => return abandon(ctx, "Could not send the session", e),
-    };
-    if let Err(e) = wire::sign(&mut document, &keys.authentication.secret).await {
-        return abandon(ctx, "Could not send the session", e);
-    }
-    let recorded = serde_json::to_value(&document)
+    // Signed, then kept in the desk exactly as it goes out, before the save:
+    // the Vetting Statement that closes this session cites it by
+    // `taskDigestMultibase`, which `vetted/1` requires. Nothing here undoes
+    // the session the book opened.
+    VettingEffect(vec![
+        Step::Sign {
+            persona: entry.persona,
+            document: Box::new(document),
+            abort: Abort::say(SEND_SESSION),
+        },
+        Step::KeepSession {
+            request_id: request_id.to_string(),
+            abort: Abort::say(SEND_SESSION),
+        },
+        Step::Then(Followup::SessionKept {
+            request_id: request_id.to_string(),
+            known,
+        }),
+    ])
+}
+
+/// How a session that could not be signed, kept or sent is given up.
+pub(super) const SEND_SESSION: &str = "Could not send the session";
+
+/// Keep `document`, signed, as `request_id`'s session document
+/// ([`Step::KeepSession`]).
+pub(super) fn keep_session(
+    config: &mut Config,
+    request_id: &str,
+    document: &wire::Document,
+) -> Result<(), String> {
+    serde_json::to_value(document)
         .map_err(|e| e.to_string())
         .and_then(|value| {
-            ctx.config
+            config
                 .private
                 .vetting
                 .record_session_document(request_id, value)
                 .map_err(|e| e.to_string())
-        });
-    if let Err(e) = recorded {
-        return abandon(ctx, "Could not send the session", e);
-    }
-    let code = ctx
-        .config
+        })
+}
+
+/// The session's signed document is kept: close the form, then save saying
+/// the match code, and send the document [`Step::Sign`] signed.
+pub(super) fn plan_session_kept(
+    state: &mut State,
+    config: &Config,
+    request_id: &str,
+    known: bool,
+) -> VettingEffect {
+    let code = config
         .private
         .vetting
         .desk_entry(request_id)
         .and_then(|e| e.match_code().map(str::to_string))
         .unwrap_or_default();
-    page(ctx).mode = VettingMode::List;
-    persist(
-        ctx,
-        format!(
+    panel(state).mode = VettingMode::List;
+    VettingEffect(vec![
+        Step::Persist(format!(
             "Session open. Read the match code {code} to each other{}.",
             if known {
                 ""
             } else {
                 " — the community's requirements are still unknown, so this asks for a legal name only"
             }
-        ),
-    );
-    let sent = Sent::Session {
-        request_id: request_id.to_string(),
-    };
-    let message = match wire::to_message(&document) {
-        Ok(message) => message,
-        Err(e) => return abandon(ctx, "Could not send the session", e),
-    };
-    let from = document.issuer.clone().unwrap_or_default();
-    let to = document.recipient.clone().unwrap_or_default();
-    spawn_send(ctx, message, &from, &to, sent, Claim::Held);
+        )),
+        Step::Send {
+            sent: Box::new(Sent::Session {
+                request_id: request_id.to_string(),
+            }),
+            claim: Claim::Held,
+            abort: Abort::say(SEND_SESSION),
+        },
+    ])
 }
+
+// ============================================================================
+// The vetter side
+// ============================================================================
 
 /// Keep this account's vetter side current with the communities it vets for: read each one's
 /// requirements again, and run whatever its hidden-vetting schedule owes — enrolment the first
@@ -168,37 +231,22 @@ pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, meth
 /// A community that turns on PCS ZKP vetting says so only in its manifest, and a month's new
 /// labels are published there too, so this re-reads it every time. Run by the schedule
 /// (`hidden_vetting_poll`) at each tick window and at least hourly, and by `m` / `d` by hand.
+///
+/// The questions are planned effects; the schedule's ticks and the PCS job they gather work on
+/// the loop, so this stays a loop-side helper.
 pub(crate) async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
     // A vetter has no application, so nothing else would ever fetch the manifest of a
     // community it vets for — and the manifest is where a community says it hides its
     // vetters, and which labels are live this month.
-    refresh_vetter_communities(ctx, false).await;
+    let effect = plan_vetter_communities(ctx.config, false);
+    run(ctx, effect).await;
     // And whatever each community's vetter schedule owes us — enrolment or the ticks of the
     // drip. On a schedule, never in response to a balance (design §5.1).
-    //
-    // Over the communities that publish the mode as well as those we already hold an engine
-    // for: the first pass through has no engine yet, and `hidden_vetting_tick` is what makes one.
-    let mut communities: Vec<String> = ctx
-        .config
-        .private
-        .vetting
-        .hidden_vetter
-        .iter()
-        .map(|h| h.community.clone())
-        .collect();
-    for community in ctx.config.private.vetting.hidden_published.keys() {
-        if !communities.contains(community) {
-            communities.push(community.clone());
-        }
-    }
-    // Not a community that has switched to named vetting: the engine is kept — a credential
-    // does not become worthless because the advertisement moved — but drawing tokens it no
-    // longer counts would only collect refusals.
-    communities
-        .retain(|c| ctx.config.private.vetting.vetter_mode(c).mode() != Some(VetterMode::Named));
+    let communities = vetter_schedule_communities(ctx.config);
     // Where the community refused us as another key, ask it which key it bound us to — or, while
     // an admin's reset is awaited, how that reset stands.
-    ask_bindings(ctx).await;
+    let effect = plan_ask_bindings(ctx.config, Utc::now());
+    run(ctx, effect).await;
     let mut work = Vec::new();
     for community in communities {
         hidden_vetting_tick(ctx, &community, &mut work);
@@ -210,23 +258,52 @@ pub(crate) async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
     }
 }
 
+/// The communities whose hidden-vetting schedule a refresh runs.
+///
+/// Over the communities that publish the mode as well as those we already hold an engine
+/// for: the first pass through has no engine yet, and `hidden_vetting_tick` is what makes one.
+/// Not a community that has switched to named vetting: the engine is kept — a credential
+/// does not become worthless because the advertisement moved — but drawing tokens it no
+/// longer counts would only collect refusals.
+fn vetter_schedule_communities(config: &Config) -> Vec<String> {
+    let book = &config.private.vetting;
+    let mut communities: Vec<String> = book
+        .hidden_vetter
+        .iter()
+        .map(|h| h.community.clone())
+        .collect();
+    for community in book.hidden_published.keys() {
+        if !communities.contains(community) {
+            communities.push(community.clone());
+        }
+    }
+    communities.retain(|c| book.vetter_mode(c).mode() != Some(VetterMode::Named));
+    communities
+}
+
 /// Ask each community that refused our enrolment as another key which key it bound us to
 /// (`vtc/vetting/vetters/pcs-binding/show`), where the engine's key check wants it read
 /// ([`HiddenVetterState::binding_read_due`](openvtc_core::vetting::book::HiddenVetterState::binding_read_due)): once to start the check, then at most every
 /// [`BINDING_REASK`](openvtc_core::vetting::binding::BINDING_REASK) while a reset is awaited, and
 /// never while a question is open or the community's silence is being backed off (R1.4).
-async fn ask_bindings(ctx: &mut ActionCtx<'_>) {
-    let now = Utc::now();
+///
+/// Each question is a [`Followup::AskBinding`], planned in turn after the one before it went.
+fn plan_ask_bindings(config: &mut Config, now: DateTime<Utc>) -> VettingEffect {
+    let mut steps = Vec::new();
     // A record kept before this client could recover a key: its last word from the community
     // is `identifierRebound` and no check is running. Start one rather than wait for the next
     // enrolment to collect the same refusal.
-    for held in &mut ctx.config.private.vetting.hidden_vetter {
+    let mut rechecked = false;
+    for held in &mut config.private.vetting.hidden_vetter {
         if held.key.is_none() && held.recheck_key(now) {
-            ctx.save.mark_dirty();
+            rechecked = true;
         }
     }
-    let due: Vec<(String, PersonaId)> = {
-        let book = &ctx.config.private.vetting;
+    if rechecked {
+        steps.push(Step::MarkDirty);
+    }
+    let book = &config.private.vetting;
+    steps.extend(
         book.hidden_vetter
             .iter()
             .filter(|h| h.binding_read_due(now))
@@ -235,59 +312,84 @@ async fn ask_bindings(ctx: &mut ActionCtx<'_>) {
                 book.waiting_on(&h.community, QueryKind::PcsBinding)
                     .is_none()
             })
-            .map(|h| (h.community.clone(), h.persona))
-            .collect()
+            .map(|h| {
+                Step::Then(Followup::AskBinding {
+                    community: h.community.clone(),
+                    persona: h.persona,
+                    now,
+                })
+            }),
+    );
+    VettingEffect(steps)
+}
+
+/// Ask `community` which key it bound `persona` to: mark the engine's check asked and file
+/// the question, then send it as the client's own. A failed send is said, and the question
+/// stays filed.
+pub(super) fn plan_ask_binding(
+    config: &Config,
+    community: &str,
+    persona: PersonaId,
+    now: DateTime<Utc>,
+) -> VettingEffect {
+    let Some(did) = persona_did(config, persona) else {
+        return VettingEffect::none();
     };
-    for (community, persona) in due {
-        let Some(did) = persona_did(ctx.config, persona) else {
-            continue;
-        };
-        let document = match wire::pcs_binding_show_request(&did, &community) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(community = %community, error = %e, "could not build the binding question");
-                continue;
-            }
-        };
-        let document_id = document.id.clone();
-        if let Some(held) = ctx
-            .config
-            .private
-            .vetting
-            .hidden_vetter_mut(&community, persona)
-        {
-            held.binding_asked(now);
+    let document = match wire::pcs_binding_show_request(&did, community) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(community = %community, error = %e, "could not build the binding question");
+            return VettingEffect::none();
         }
-        ctx.config.private.vetting.ask(CommunityQuery {
+    };
+    let document_id = document.id.clone();
+    VettingEffect(vec![
+        Step::Book(BookChange::BindingAsked(CommunityQuery {
             document_id: document_id.clone(),
-            community: community.clone(),
+            community: community.to_string(),
             persona,
             kind: QueryKind::PcsBinding,
             sent_at: now,
-        });
-        ctx.save.mark_dirty();
-        let sent = Sent::Query {
-            document_id,
-            community: community.clone(),
-            kind: QueryKind::PcsBinding,
-        };
-        if let Err(e) = sign_and_send(ctx, persona, document, sent, Claim::Unheld).await {
-            status(
-                ctx,
-                Status::error(format!(
-                    "Could not ask {} which hidden-vetting key it holds for you: {e}",
-                    community_display(ctx.config, &community)
-                )),
-            );
-        }
-    }
+        })),
+        Step::MarkDirty,
+        Step::Ask {
+            persona,
+            document: Box::new(document),
+            sent: Box::new(Sent::Query {
+                document_id,
+                community: community.to_string(),
+                kind: QueryKind::PcsBinding,
+            }),
+            claim: Claim::Unheld,
+            then: Asked::Binding {
+                community: community.to_string(),
+            },
+        },
+    ])
 }
 
 /// Read again how each community we vet for vets, where the last reading is stale — on opening
 /// the desk, and while it stays open. Bounded: a community is asked at most once per
 /// [`MODE_REASK_AFTER`](openvtc_core::vetting::mode::MODE_REASK_AFTER), answered or not (R1.4).
 pub(crate) async fn refresh_stale_modes(ctx: &mut ActionCtx<'_>) {
-    refresh_vetter_communities(ctx, true).await;
+    let effect = plan_vetter_communities(ctx.config, true);
+    run(ctx, effect).await;
+}
+
+/// The vetting page's tab key: the next tab, on its list. Opening the desk
+/// reads again how each community vets where the last reading is stale, so
+/// the badges and the ticket gate are not shown from an old answer.
+pub(super) fn plan_switch_tab(state: &mut State, config: &Config) -> VettingEffect {
+    let v = panel(state);
+    v.tab = v.tab.next();
+    v.selected = 0;
+    v.mode = VettingMode::List;
+    v.status_message = None;
+    if v.tab == VettingTab::Desk {
+        plan_vetter_communities(config, true)
+    } else {
+        VettingEffect::none()
+    }
 }
 
 /// Whether the vetter desk is what the operator is looking at — the one place a stale mode is
@@ -312,10 +414,13 @@ pub(crate) fn desk_open(state: &State) -> bool {
 /// `only_stale` asks only where how the community vets is older than
 /// [`MODE_TTL`](openvtc_core::vetting::mode::MODE_TTL) and was not asked lately
 /// ([`VettingBook::mode_refresh_due`](openvtc_core::vetting::VettingBook::mode_refresh_due)) — what opening the desk, and keeping it open, need.
-async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>, only_stale: bool) {
-    let standing: Vec<(String, PersonaId)> = {
-        let book = &ctx.config.private.vetting;
-        let now = Utc::now();
+///
+/// Each community is a [`Followup::AskManifest`], planned only once the one before it was
+/// asked: whether that ask went is what decides whether a second persona asks again.
+fn plan_vetter_communities(config: &Config, only_stale: bool) -> VettingEffect {
+    let book = &config.private.vetting;
+    let now = Utc::now();
+    VettingEffect(
         book.vetter_standing(now)
             .into_iter()
             .filter(|s| s.live)
@@ -327,41 +432,128 @@ async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>, only_stale: bool) {
                 !book.manifest_recently_asked(&s.community, now)
                     || book.params_reread_owed(&s.community)
             })
-            .map(|s| (s.community, s.persona))
-            .collect()
+            .map(|s| {
+                Step::Then(Followup::AskManifest {
+                    community: s.community,
+                    persona: s.persona,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Ask `community` for its manifest as `persona`, as the client's own send, unless it was
+/// asked moments ago.
+pub(super) fn plan_ask_manifest(
+    config: &Config,
+    community: &str,
+    persona: PersonaId,
+) -> VettingEffect {
+    // A community we vet for as two personas is one manifest, asked once.
+    let book = &config.private.vetting;
+    if book.manifest_recently_asked(community, Utc::now()) && !book.params_reread_owed(community) {
+        return VettingEffect::none();
+    }
+    let Some(did) = persona_did(config, persona) else {
+        return VettingEffect::none();
     };
-    for (community, persona) in standing {
-        // A community we vet for as two personas is one manifest, asked once.
-        let book = &ctx.config.private.vetting;
-        if book.manifest_recently_asked(&community, Utc::now())
-            && !book.params_reread_owed(&community)
-        {
-            continue;
+    let protocol = book.protocol_for(community);
+    let Ok(document) = wire::manifest_request(&did, community, protocol) else {
+        return VettingEffect::none();
+    };
+    let now = Utc::now();
+    VettingEffect(vec![
+        Step::Book(BookChange::ModeAsked {
+            community: community.to_string(),
+            now,
+        }),
+        Step::Ask {
+            persona,
+            document: Box::new(document),
+            sent: Box::new(Sent::Manifest {
+                community: community.to_string(),
+            }),
+            claim: Claim::Unheld,
+            then: Asked::Manifest {
+                community: community.to_string(),
+                now,
+            },
+        },
+    ])
+}
+
+/// A book change made at its place among the sends of a run ([`Step::Book`]),
+/// because a send before it decides what it finds.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum BookChange {
+    /// We are asking `community` for its manifest at `now`.
+    ModeAsked {
+        community: String,
+        now: DateTime<Utc>,
+    },
+    /// We are asking the question's community which key it bound the
+    /// question's persona to: its engine's check is marked asked, and the
+    /// question filed.
+    BindingAsked(CommunityQuery),
+}
+
+impl BookChange {
+    pub(super) fn apply(self, config: &mut Config) {
+        let book = &mut config.private.vetting;
+        match self {
+            BookChange::ModeAsked { community, now } => book.mode_asked(&community, now),
+            BookChange::BindingAsked(query) => {
+                if let Some(held) = book.hidden_vetter_mut(&query.community, query.persona) {
+                    held.binding_asked(query.sent_at);
+                }
+                book.ask(query);
+            }
         }
-        let Some(did) = persona_did(ctx.config, persona) else {
-            continue;
-        };
-        let protocol = ctx.config.private.vetting.protocol_for(&community);
-        let Ok(document) = wire::manifest_request(&did, &community, protocol) else {
-            continue;
-        };
-        let sent = Sent::Manifest {
-            community: community.clone(),
-        };
-        let now = Utc::now();
-        ctx.config.private.vetting.mode_asked(&community, now);
-        match sign_and_send(ctx, persona, document, sent, Claim::Unheld).await {
-            Ok(()) => ctx.config.private.vetting.vetter_refresh_failures = 0,
-            Err(e) => {
-                tracing::warn!(community = %community, error = %e, "could not ask a community what it requires");
-                ctx.config.private.vetting.mode_failed(
+    }
+}
+
+/// What a [`Step::Ask`] does once its send went, or once it could not be
+/// signed or handed off.
+#[derive(Clone, Debug)]
+pub(super) enum Asked {
+    /// The client's own manifest question to `community`, asked at `now`:
+    /// a send that went resets the count of failed ones; one that did not is
+    /// recorded against the community, and asked again on the sweep a bounded
+    /// number of times.
+    Manifest {
+        community: String,
+        now: DateTime<Utc>,
+    },
+    /// The client's own binding question to `community`: a failure is said.
+    Binding { community: String },
+    /// A ticket's question about how its community vets: it waits on the
+    /// answer, or is refused as unconfirmed.
+    Ticket(PendingTicket),
+}
+
+impl Asked {
+    /// The send went.
+    pub(super) fn went(self, state: &mut State, config: &mut Config) {
+        match self {
+            Asked::Manifest { .. } => config.private.vetting.vetter_refresh_failures = 0,
+            Asked::Binding { .. } => {}
+            Asked::Ticket(pending) => ticket_sent(state, pending),
+        }
+    }
+
+    /// The send could not be signed or handed off, with `error`.
+    pub(super) fn failed(self, state: &mut State, config: &mut Config, error: String) {
+        match self {
+            Asked::Manifest { community, now } => {
+                tracing::warn!(community = %community, error = %error, "could not ask a community what it requires");
+                config.private.vetting.mode_failed(
                     &community,
-                    ModeFailure::Unsent(e.clone()),
+                    ModeFailure::Unsent(error.clone()),
                     now,
                 );
                 // Usually the listener is not up yet (start-up). Ask again on
                 // the five-second sweep, a bounded number of times.
-                let book = &mut ctx.config.private.vetting;
+                let book = &mut config.private.vetting;
                 if book.vetter_refresh_failures
                     < openvtc_core::vetting::book::VETTER_REFRESH_RETRIES
                 {
@@ -369,12 +561,20 @@ async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>, only_stale: bool) {
                     book.vetter_refresh_due = true;
                 }
             }
+            Asked::Binding { community } => show(
+                state,
+                Status::error(format!(
+                    "Could not ask {} which hidden-vetting key it holds for you: {error}",
+                    community_display(config, &community)
+                )),
+            ),
+            Asked::Ticket(pending) => ticket_unsent(state, config, pending, error),
         }
     }
 }
 
 /// The session id a desk entry is at, if it has one.
-pub(super) fn session_id_of(entry: &openvtc_core::vetting::vetter::DeskEntry) -> Option<String> {
+pub(super) fn session_id_of(entry: &DeskEntry) -> Option<String> {
     match &entry.state {
         DeskState::Session { session, .. } | DeskState::CardReceived { session, .. } => {
             Some(session.id.clone())
@@ -383,33 +583,84 @@ pub(super) fn session_id_of(entry: &openvtc_core::vetting::vetter::DeskEntry) ->
     }
 }
 
-pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
+// ============================================================================
+// Attesting
+// ============================================================================
+
+/// What attesting comes to.
+pub(super) enum Attesting {
+    /// A named statement to sign and send, or nothing more (refused, or said
+    /// why not).
+    Effect(VettingEffect),
+    /// A proof: the hidden-vetting attestation (`attest_hidden`).
+    Hidden(Box<HiddenAttest>),
+    /// The request asks for a proof and this vetter is not enrolled: the
+    /// vetter side is refreshed, which enrols it.
+    Enrol,
+}
+
+/// What `attest_hidden` takes.
+pub(super) struct HiddenAttest {
+    pub(super) request_id: String,
+    pub(super) entry: DeskEntry,
+    pub(super) vetter_did: String,
+    pub(super) attestation: Attestation,
+    pub(super) now: DateTime<Utc>,
+}
+
+/// A named Vetting Statement drafted for a request, to sign, record and send
+/// ([`Step::Statement`]).
+pub(super) struct NamedStatement {
+    pub(super) request_id: String,
+    pub(super) entry: DeskEntry,
+    pub(super) vetter_did: String,
+    pub(super) session_id: String,
+    pub(super) draft: StatementDraft,
+    pub(super) now: DateTime<Utc>,
+}
+
+/// Enter on the attest form: attest as a proof where the request asks for one
+/// and this vetter is enrolled, enrol first where it is not, and otherwise
+/// draft the named statement to sign.
+pub(super) fn plan_attest(
+    state: &mut State,
+    config: &Config,
+    busy: bool,
+    request_id: &str,
+    form: &AttestForm,
+) -> Attesting {
+    let said = |state: &mut State, message: Status| {
+        show(state, message);
+        Attesting::Effect(VettingEffect::none())
+    };
     if !form.attested {
-        return status(
-            ctx,
+        return said(
+            state,
             Status::warning(
                 "Tick the attestation (the last line) — signing is attributable to you in this community.",
             ),
         );
     }
     let now = Utc::now();
-    let Some(entry) = ctx.config.private.vetting.desk_entry(request_id).cloned() else {
-        return;
+    let Some(entry) = config.private.vetting.desk_entry(request_id).cloned() else {
+        return Attesting::Effect(VettingEffect::none());
     };
     let DeskState::CardReceived { session, .. } = &entry.state else {
-        return status(
-            ctx,
+        return said(
+            state,
             Status::warning("You can attest once their card has arrived."),
         );
     };
-    let Some(vetter_did) = persona_did(ctx.config, entry.persona) else {
-        return status(
-            ctx,
+    let session_id = session.id.clone();
+    let claims_verified = session.required_claims.clone();
+    let Some(vetter_did) = persona_did(config, entry.persona) else {
+        return said(
+            state,
             Status::error("The persona this request was made to is not available."),
         );
     };
     let method = VETTING_METHODS[form.method_index.min(VETTING_METHODS.len() - 1)];
-    let documentation_choice = page(ctx)
+    let documentation_choice = panel(state)
         .documentation
         .get(form.documentation_index)
         .cloned()
@@ -425,7 +676,7 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
     let attestation = Attestation {
         method,
         document_classes,
-        claims_verified: session.required_claims.clone(),
+        claims_verified,
         liveness_confirmed: form.liveness_confirmed,
         declared_relationship: VETTING_RELATIONSHIPS
             [form.relationship_index.min(VETTING_RELATIONSHIPS.len() - 1)],
@@ -442,15 +693,15 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
     // alongside named vetters, so the request decides, not the community: one carrying the
     // applicant's PCS identifier gets a proof, one without gets a named statement — unless the
     // criterion it names takes the proof alone, when there is nothing to attest to.
-    let book = &ctx.config.private.vetting;
+    let book = &config.private.vetting;
     let hidden_request = match book.request_vetting(request_id) {
         RequestVetting::Hidden => hides_vetters(book, &entry.community),
         RequestVetting::Named { .. } => false,
         RequestVetting::HiddenWithoutId { criterion } => {
-            return status(ctx, Status::warning(hidden_without_id_words(&criterion)));
+            return said(state, Status::warning(hidden_without_id_words(&criterion)));
         }
         RequestVetting::Unreadable(e) => {
-            return status(ctx, Status::error(format!("Cannot attest: {e}")));
+            return said(state, Status::error(format!("Cannot attest: {e}")));
         }
     };
     if hidden_request
@@ -458,39 +709,84 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
             .hidden_vetter(&entry.community, entry.persona)
             .is_some()
     {
-        return attest_hidden(ctx, request_id, &entry, &vetter_did, attestation, now).await;
+        return Attesting::Hidden(Box::new(HiddenAttest {
+            request_id: request_id.to_string(),
+            entry,
+            vetter_did,
+            attestation,
+            now,
+        }));
     }
     // The request asks for a proof but this vetter is not enrolled yet:
     // signing now would make a named statement — one the applicant's
     // hidden-vetting application cannot use, carrying this vetter's DID to a
     // community that promised not to need it. Enrol first.
     if hidden_request {
-        page(ctx).mode = VettingMode::List;
-        status(
-            ctx,
+        panel(state).mode = VettingMode::List;
+        show(
+            state,
             Status::warning(
                 "This community proves vetting with a PCS zero-knowledge proof, and you are not \
              enrolled for it yet, so nothing was signed. Enrolling now — attest again in a \
              moment.",
             ),
         );
-        refresh_vetter_side(ctx).await;
-        return;
+        return Attesting::Enrol;
     }
 
-    let draft =
-        match ctx
-            .config
-            .private
-            .vetting
-            .statement_draft(request_id, &vetter_did, attestation, now)
-        {
-            Ok(draft) => draft,
-            Err(e) => return status(ctx, Status::error(format!("Cannot attest yet: {e}"))),
-        };
-    if !begin(ctx) {
-        return;
+    let draft = match book.statement_draft(request_id, &vetter_did, attestation, now) {
+        Ok(draft) => draft,
+        Err(e) => return said(state, Status::error(format!("Cannot attest yet: {e}"))),
+    };
+    if !claimable(state, busy) {
+        return Attesting::Effect(VettingEffect::none());
     }
+    Attesting::Effect(VettingEffect(vec![Step::Statement(Box::new(
+        NamedStatement {
+            request_id: request_id.to_string(),
+            entry,
+            vetter_did,
+            session_id,
+            draft,
+            now,
+        },
+    ))]))
+}
+
+/// Attest on the desk: [`plan_attest`], then the named statement's effect, the
+/// hidden attestation, or the refresh that enrols.
+pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
+    let busy = ctx.in_flight.is_busy(DispatchDomain::Vetting);
+    match plan_attest(ctx.state, ctx.config, busy, request_id, form) {
+        Attesting::Effect(effect) => run(ctx, effect).await,
+        Attesting::Hidden(h) => {
+            let HiddenAttest {
+                request_id,
+                entry,
+                vetter_did,
+                attestation,
+                now,
+            } = *h;
+            attest_hidden(ctx, &request_id, &entry, &vetter_did, attestation, now).await;
+        }
+        Attesting::Enrol => refresh_vetter_side(ctx).await,
+    }
+}
+
+/// Sign the drafted statement with the persona's assertion key, record it
+/// (verified first, so what is kept is what the applicant receives), wrap it
+/// in a delivery signed with the authentication key, save, and send it,
+/// claiming the vetting domain. A failure before the send gives up, putting
+/// the request back where a recorded statement had moved it.
+pub(super) async fn deliver_statement(ctx: &mut ActionCtx<'_>, statement: NamedStatement) {
+    let NamedStatement {
+        request_id,
+        entry,
+        vetter_did,
+        session_id,
+        draft,
+        now,
+    } = statement;
     let keys = match ctx
         .config
         .get_persona_keys_for(entry.persona, ctx.tdk)
@@ -508,7 +804,7 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
         .config
         .private
         .vetting
-        .record_statement(request_id, &statement, &resolver, now)
+        .record_statement(&request_id, &statement, &resolver, now)
         .await
     {
         Ok(issued) => issued,
@@ -521,7 +817,7 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
         &vetter_did,
         &entry.applicant,
         &statement,
-        &session.id,
+        &session_id,
         &keys.authentication.secret,
     )
     .await
@@ -533,16 +829,16 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
                 .vetting
                 .issued
                 .retain(|s| s.id != issued.id);
-            if let Some(e2) = ctx.config.private.vetting.desk_entry_mut(request_id) {
+            if let Some(e2) = ctx.config.private.vetting.desk_entry_mut(&request_id) {
                 e2.state = entry.state.clone();
             }
             return abandon(ctx, "Could not send the statement", e);
         }
     };
-    page(ctx).mode = VettingMode::List;
+    panel(ctx.state).mode = VettingMode::List;
     persist(ctx, "Sending your statement…");
     let sent = Sent::Statement {
-        request_id: request_id.to_string(),
+        request_id,
         statement_id: issued.id,
         previous: entry.state.clone(),
     };
@@ -556,35 +852,73 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
     );
 }
 
+// ============================================================================
+// Declining and withdrawing
+// ============================================================================
+
+/// Enter on the decline form: refuse a note longer than a decline carries,
+/// else decline with the reason and note the vetter chose.
+pub(super) fn plan_decline_submit(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
+    request_id: &str,
+    code: Option<PayloadCode>,
+    message: &str,
+) -> VettingEffect {
+    let message = message.trim();
+    if message.chars().count() > DECLINE_MESSAGE_MAX {
+        show(
+            state,
+            Status::warning(format!(
+                "The note is {} characters; a decline carries at most \
+                 {DECLINE_MESSAGE_MAX}.",
+                message.chars().count()
+            )),
+        );
+        return VettingEffect::none();
+    }
+    let message = (!message.is_empty()).then(|| message.to_string());
+    plan_decline(state, config, busy, request_id, code, message)
+}
+
 /// Decline a desk request, with the reason and note the vetter chose — both
 /// optional, and sent to the applicant only, never the community.
-pub(super) async fn decline(
-    ctx: &mut ActionCtx<'_>,
+pub(super) fn plan_decline(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
     request_id: &str,
-    code: Option<vta_sdk::protocols::vetting::decline::v0_1::PayloadCode>,
+    code: Option<PayloadCode>,
     message: Option<String>,
-) {
-    let Some(entry) = ctx.config.private.vetting.desk_entry(request_id).cloned() else {
-        return;
+) -> VettingEffect {
+    let Some(entry) = config.private.vetting.desk_entry(request_id).cloned() else {
+        return VettingEffect::none();
     };
-    let Some(vetter_did) = persona_did(ctx.config, entry.persona) else {
-        return status(
-            ctx,
+    let Some(vetter_did) = persona_did(config, entry.persona) else {
+        show(
+            state,
             Status::error("The persona this request was made to is not available."),
         );
+        return VettingEffect::none();
     };
-    if !begin(ctx) {
-        return;
+    if !claimable(state, busy) {
+        return VettingEffect::none();
     }
-    let body = match ctx
-        .config
+    const WHAT: &str = "Could not decline";
+    let body = match config
         .private
         .vetting
         .decline(request_id, code, message, Utc::now())
     {
         Ok(body) => body,
-        Err(e) => return abandon(ctx, "Could not decline", e),
+        Err(e) => {
+            give_up(state, config, WHAT, e);
+            return VettingEffect::none();
+        }
     };
+    // A document that cannot be built leaves the request declined in the
+    // book, unsaved: nothing here puts it back.
     let document = match wire::document(
         VETTING_DECLINE_TYPE,
         &vetter_did,
@@ -593,25 +927,41 @@ pub(super) async fn decline(
         &body,
     ) {
         Ok(d) => d,
-        Err(e) => return abandon(ctx, "Could not decline", e),
+        Err(e) => {
+            give_up(state, config, WHAT, e);
+            return VettingEffect::none();
+        }
     };
-    page(ctx).mode = VettingMode::List;
-    persist(ctx, "Declining…");
+    panel(state).mode = VettingMode::List;
     let sent = Sent::Decline {
         request_id: request_id.to_string(),
         previous: entry.state.clone(),
     };
-    if let Err(e) = sign_and_send(ctx, entry.persona, document, sent, Claim::Held).await {
-        if let Some(desk) = ctx.config.private.vetting.desk_entry_mut(request_id) {
-            desk.state = entry.state;
-        }
-        abandon(ctx, "Could not send the decline", e);
-    }
+    VettingEffect::sign_and_send(
+        [Step::Persist("Declining…".to_string())],
+        entry.persona,
+        document,
+        sent,
+        Claim::Held,
+        Abort::undoing(
+            "Could not send the decline",
+            vec![Undo::RestoreDesk {
+                request_id: request_id.to_string(),
+                previous: DeskSnapshot(Box::new(entry.state)),
+            }],
+        ),
+    )
 }
 
-pub(super) async fn withdraw(ctx: &mut ActionCtx<'_>, statement_id: &str, reason_index: usize) {
-    let Some(issued) = ctx
-        .config
+/// Tell the community a statement is withdrawn, for the reason chosen.
+pub(super) fn plan_withdraw(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
+    statement_id: &str,
+    reason_index: usize,
+) -> VettingEffect {
+    let Some(issued) = config
         .private
         .vetting
         .issued
@@ -619,28 +969,35 @@ pub(super) async fn withdraw(ctx: &mut ActionCtx<'_>, statement_id: &str, reason
         .find(|s| s.id == statement_id)
         .cloned()
     else {
-        return;
+        return VettingEffect::none();
     };
-    let Some(vetter_did) = persona_did(ctx.config, issued.persona) else {
-        return status(
-            ctx,
+    let Some(vetter_did) = persona_did(config, issued.persona) else {
+        show(
+            state,
             Status::error("The persona that signed this statement is not available."),
         );
+        return VettingEffect::none();
     };
-    if !begin(ctx) {
-        return;
+    if !claimable(state, busy) {
+        return VettingEffect::none();
     }
+    const WHAT: &str = "Could not withdraw";
     let document_id = wire::new_id();
     let reason = VETTING_WITHDRAWAL_REASONS[reason_index.min(VETTING_WITHDRAWAL_REASONS.len() - 1)];
-    let body = match ctx.config.private.vetting.withdrawal(
+    let body = match config.private.vetting.withdrawal(
         statement_id,
         Some(reason),
         &document_id,
         Utc::now(),
     ) {
         Ok((body, _)) => body,
-        Err(e) => return abandon(ctx, "Could not withdraw", e),
+        Err(e) => {
+            give_up(state, config, WHAT, e);
+            return VettingEffect::none();
+        }
     };
+    // A document that cannot be built leaves the withdrawal recorded as sent,
+    // unsaved: nothing here clears it.
     let document = match wire::document(
         VETTING_REVOKE_STATEMENT_TYPE,
         &vetter_did,
@@ -649,24 +1006,328 @@ pub(super) async fn withdraw(ctx: &mut ActionCtx<'_>, statement_id: &str, reason
         &body,
     ) {
         Ok(d) => d,
-        Err(e) => return abandon(ctx, "Could not withdraw", e),
+        Err(e) => {
+            give_up(state, config, WHAT, e);
+            return VettingEffect::none();
+        }
     };
-    page(ctx).mode = VettingMode::List;
-    persist(ctx, "Telling the community…");
+    panel(state).mode = VettingMode::List;
     let sent = Sent::Withdrawal {
         statement_id: statement_id.to_string(),
     };
-    if let Err(e) = sign_and_send(ctx, issued.persona, document, sent, Claim::Held).await {
-        if let Some(s) = ctx
-            .config
-            .private
-            .vetting
-            .issued
-            .iter_mut()
-            .find(|s| s.id == statement_id)
-        {
-            s.withdrawal = None;
-        }
-        abandon(ctx, "Could not send the withdrawal", e);
+    VettingEffect::sign_and_send(
+        [Step::Persist("Telling the community…".to_string())],
+        issued.persona,
+        document,
+        sent,
+        Claim::Held,
+        Abort::undoing(
+            "Could not send the withdrawal",
+            vec![Undo::NotWithdrawn(statement_id.to_string())],
+        ),
+    )
+}
+
+/// Where a desk request stood, for [`Undo::RestoreDesk`]. Compared by its
+/// serialised form: the desk state carries generated wire types that derive
+/// no `PartialEq`.
+#[derive(Clone, Debug)]
+pub(super) struct DeskSnapshot(pub(super) Box<DeskState>);
+
+impl PartialEq for DeskSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(&self.0).ok() == serde_json::to_value(&other.0).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_handler::dispatch_util::test_config;
+    use crate::state_handler::main_page::status::Severity;
+    use openvtc_core::vetting::book::VetterGrant;
+
+    const VTC: &str = "did:web:vtc.example";
+
+    /// A persona the config holds an identity for — enough for a plan, which
+    /// never looks up keys.
+    fn persona(config: &mut Config) -> PersonaId {
+        let persona = PersonaId::new();
+        let did = format!("did:key:z{}", persona);
+        let document =
+            serde_json::from_value(serde_json::json!({ "id": did })).expect("a DID document");
+        config.identities.insert(
+            persona,
+            openvtc_core::identity::IdentityContext {
+                persona_id: persona,
+                did: did.clone(),
+                document,
+                profile: std::sync::Arc::new(affinidi_tdk::messaging::profiles::ATMProfile {
+                    inner: std::sync::Arc::new(
+                        affinidi_tdk::messaging::profiles::ATMProfileInner {
+                            did: did.clone(),
+                            alias: did,
+                            mediator: std::sync::Arc::new(None),
+                        },
+                    ),
+                }),
+                mediator_did: None,
+            },
+        );
+        persona
+    }
+
+    fn grant(config: &mut Config, persona: PersonaId) {
+        let now = Utc::now();
+        config.private.vetting.vetter_grants.push(VetterGrant {
+            community: VTC.into(),
+            persona,
+            credential_id: None,
+            valid_until: Some(now + chrono::Duration::days(30)),
+            received_at: now,
+            credential: serde_json::json!({}),
+        });
+    }
+
+    fn desk_entry(config: &mut Config, persona: PersonaId) -> String {
+        use vta_sdk::protocols::vetting::request;
+        let body = request::v0_1::Payload::try_from(
+            request::v0_1::Payload::builder()
+                .community(VTC)
+                .join_did("did:key:zApplicant"),
+        )
+        .expect("a request");
+        let now = Utc::now();
+        let request_id = "r1".to_string();
+        config.private.vetting.desk.push(DeskEntry {
+            request_id: request_id.clone(),
+            request_document_id: "d1".into(),
+            applicant: "did:key:zApplicant".into(),
+            community: VTC.into(),
+            persona,
+            ticket_id: None,
+            request: body,
+            state: DeskState::Accepted,
+            received_at: now,
+            updated_at: now,
+        });
+        request_id
+    }
+
+    /// Each stale community is a follow-up planned in turn, so a second
+    /// persona sees whether the first one's question went.
+    #[test]
+    fn opening_the_desk_plans_a_question_per_community_in_turn() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let first = persona(&mut config);
+        let second = persona(&mut config);
+        grant(&mut config, first);
+        grant(&mut config, second);
+
+        let effect = plan_switch_tab(&mut state, &config);
+
+        assert_eq!(panel(&mut state).tab, VettingTab::Desk);
+        assert_eq!(effect.0.len(), 2);
+        assert!(effect.0.iter().all(|s| matches!(
+            s,
+            Step::Then(Followup::AskManifest { community, .. }) if community == VTC
+        )));
+        // Nothing is marked asked until the follow-up runs.
+        assert!(
+            !config
+                .private
+                .vetting
+                .manifest_recently_asked(VTC, Utc::now())
+        );
+    }
+
+    /// A community asked moments ago is not asked again; otherwise the ask is
+    /// recorded before the send, in order.
+    #[test]
+    fn a_manifest_question_is_recorded_then_asked_unless_just_asked() {
+        let mut config = test_config();
+        let persona = persona(&mut config);
+
+        let effect = plan_ask_manifest(&config, VTC, persona);
+        let [Step::Book(change), Step::Ask { claim, then, .. }] = effect.0.as_slice() else {
+            panic!("record, then ask");
+        };
+        assert!(matches!(claim, Claim::Unheld));
+        assert!(matches!(then, Asked::Manifest { community, .. } if community == VTC));
+        change.clone().apply(&mut config);
+
+        assert!(plan_ask_manifest(&config, VTC, persona).0.is_empty());
+    }
+
+    /// A binding question starts the key check, marks dirty once, and plans
+    /// the question as a follow-up.
+    #[test]
+    fn a_rebound_engine_plans_its_binding_question() {
+        use openvtc_core::vetting::book::{HiddenRefusal, HiddenVetterState};
+        let mut config = test_config();
+        let persona = persona(&mut config);
+        let (book, _) =
+            crate::state_handler::vetting_actions::test_support::hidden_vetter_book(0, false);
+        let mut held: HiddenVetterState = book.hidden_vetter[0].clone();
+        held.persona = persona;
+        held.last_refusal = Some(HiddenRefusal {
+            what: "credential".into(),
+            code: "x:identifierRebound".into(),
+            at: Utc::now(),
+        });
+        config.private.vetting.hidden_vetter.push(held);
+        let now = Utc::now();
+
+        let effect = plan_ask_bindings(&mut config, now);
+
+        assert!(config.private.vetting.hidden_vetter[0].key.is_some());
+        let [
+            Step::MarkDirty,
+            Step::Then(Followup::AskBinding { persona: p, .. }),
+        ] = effect.0.as_slice()
+        else {
+            panic!("marked dirty, then the question");
+        };
+        assert_eq!(*p, persona);
+        let community = config.private.vetting.hidden_vetter[0].community.clone();
+        let asked = plan_ask_binding(&config, &community, persona, now);
+        assert!(matches!(
+            asked.0.as_slice(),
+            [
+                Step::Book(BookChange::BindingAsked(_)),
+                Step::MarkDirty,
+                Step::Ask { .. }
+            ]
+        ));
+    }
+
+    /// A session needing the requirements first asks for them and marks them
+    /// asked; with them asked, the book opens the session and the plan signs,
+    /// keeps, then follows up.
+    #[test]
+    fn a_session_asks_first_then_opens() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let persona = persona(&mut config);
+        let id = desk_entry(&mut config, persona);
+
+        let effect = plan_open_session(&mut state, &mut config, false, &id, 0);
+        assert!(matches!(
+            effect.0.as_slice(),
+            [
+                Step::Sign { .. },
+                Step::Send {
+                    claim: Claim::Held,
+                    ..
+                }
+            ]
+        ));
+        assert_eq!(
+            panel(&mut state).requirements_requested,
+            vec![VTC.to_string()]
+        );
+        assert!(matches!(
+            config.private.vetting.desk_entry(&id).unwrap().state,
+            DeskState::Accepted
+        ));
+
+        let effect = plan_open_session(&mut state, &mut config, false, &id, 0);
+        assert!(matches!(
+            effect.0.as_slice(),
+            [
+                Step::Sign { .. },
+                Step::KeepSession { .. },
+                Step::Then(Followup::SessionKept { known: false, .. })
+            ]
+        ));
+        assert!(matches!(
+            config.private.vetting.desk_entry(&id).unwrap().state,
+            DeskState::Session { .. }
+        ));
+    }
+
+    /// Busy refuses before the book changes.
+    #[test]
+    fn a_busy_desk_changes_nothing() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let persona = persona(&mut config);
+        let id = desk_entry(&mut config, persona);
+        panel(&mut state).requirements_requested.push(VTC.into());
+
+        assert!(
+            plan_open_session(&mut state, &mut config, true, &id, 0)
+                .0
+                .is_empty()
+        );
+        assert!(
+            plan_decline(&mut state, &mut config, true, &id, None, None)
+                .0
+                .is_empty()
+        );
+        assert!(matches!(
+            config.private.vetting.desk_entry(&id).unwrap().state,
+            DeskState::Accepted
+        ));
+        let said = panel(&mut state).status_message.clone().unwrap();
+        assert_eq!(said.severity, Severity::Warning);
+    }
+
+    /// A decline records the request declined, closes the form, saves, and
+    /// undoes to where the request stood.
+    #[test]
+    fn a_decline_saves_then_sends_and_undoes_to_where_it_stood() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let persona = persona(&mut config);
+        let id = desk_entry(&mut config, persona);
+
+        let effect = plan_decline(&mut state, &mut config, false, &id, None, None);
+
+        assert!(matches!(
+            config.private.vetting.desk_entry(&id).unwrap().state,
+            DeskState::Declined { .. }
+        ));
+        assert!(matches!(panel(&mut state).mode, VettingMode::List));
+        let [
+            Step::Persist(said),
+            Step::Sign { .. },
+            Step::Send { abort, .. },
+        ] = effect.0.as_slice()
+        else {
+            panic!("save, sign, send");
+        };
+        assert_eq!(said, "Declining…");
+        assert_eq!(
+            abort,
+            &Abort::undoing(
+                "Could not send the decline",
+                vec![Undo::RestoreDesk {
+                    request_id: id,
+                    previous: DeskSnapshot(Box::new(DeskState::Accepted)),
+                }],
+            )
+        );
+    }
+
+    /// A decline note over the limit is refused before anything else.
+    #[test]
+    fn a_long_decline_note_is_refused_first() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let max = crate::state_handler::main_page::content::DECLINE_MESSAGE_MAX;
+        let effect = plan_decline_submit(
+            &mut state,
+            &mut config,
+            true,
+            "gone",
+            None,
+            &"x".repeat(max + 1),
+        );
+        assert!(effect.0.is_empty());
+        let said = panel(&mut state).status_message.clone().unwrap();
+        assert_eq!(said.severity, Severity::Warning);
+        assert!(said.text.starts_with("The note is "), "{}", said.text);
     }
 }

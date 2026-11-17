@@ -1,9 +1,12 @@
 //! One request to a community at a time, and the answer it waits for — the
 //! plumbing the panels that speak to a community share.
 //!
-//! A panel (Rooms, Elections) builds a request, and from here on it is the same
-//! for each: the view is armed on the request's thread *before* the send is
-//! spawned ([`CommunityLoop::spawn_send`]) — the answer travels the inbound
+//! A panel (Rooms, Elections) plans a request, and from here on it is the same
+//! for each: [`send`] looks up the persona's signing key, has the panel build
+//! the document ([`CommunityFeature::build`]), claims the lane and arms the
+//! view on the request's thread *before* the send is spawned
+//! ([`CommunityLoop::spawn_send`]), and reports how it went ([`Sent`]) for the
+//! panel to commit or refuse — the answer travels the inbound
 //! channel, not the dispatch one, and can overtake the send's own outcome; a
 //! send that failed ends the wait while the view still waits on it
 //! ([`send_failed`]); an answer is taken only from the community the request
@@ -293,6 +296,8 @@ pub(crate) trait CommunityFeature: 'static {
     type Reply;
     /// The step an answer calls for, taken by [`advance`].
     type Next: Clone;
+    /// What the panel asks the community, before it is a document.
+    type Request;
 
     /// For log lines (`"rooms"`, `"elections"`).
     const NAME: &'static str;
@@ -312,6 +317,15 @@ pub(crate) trait CommunityFeature: 'static {
     fn note(view: &mut Self::View, severity: Severity, text: String);
     /// Wrap a send's outcome for the dispatch channel.
     fn outcome(outcome: SendOutcome) -> DispatchOutcome;
+    /// The document `request` makes, from `sender` to `to` — `sender` adjusted
+    /// for `to` first where the panel needs it. `Err` is what the view is told.
+    fn build(
+        config: &Config,
+        sender: &mut Sender,
+        to: &str,
+        persona: PersonaId,
+        request: Self::Request,
+    ) -> Result<Doc, String>;
 
     /// A refusal, which may answer another panel's request too, so one that
     /// matches nothing here is dropped without a warning.
@@ -339,6 +353,65 @@ pub(crate) fn fail<F: CommunityFeature>(state: &mut State, purpose: &F::Purpose,
     }
 }
 
+/// What a document without an id is said to be when it cannot be sent.
+pub(crate) const UNTHREADED: &str = "couldn't send: a request without an id";
+
+/// How [`send`] went. A failure is returned, not yet shown, so the panel
+/// orders it against its own commit or refusal.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Sent<P> {
+    /// No view is open.
+    NoView,
+    /// The view still waits on an earlier request: nothing was sent.
+    Waiting,
+    /// The persona's key or the document failed, before any claim, for the
+    /// reason given.
+    Failed(P, String),
+    /// The document has no id to thread its answer on ([`UNTHREADED`]).
+    Unthreaded(P),
+    /// The lane is busy: nothing claimed, nothing armed.
+    Busy,
+    /// Claimed and spawned, the view armed on its thread.
+    Dispatched,
+}
+
+/// Send `request` to `to` as `persona`, for `purpose`, in order: the view is
+/// checked for an earlier request still unanswered, the persona's signing key
+/// looked up ([`sender`]), the document built ([`CommunityFeature::build`]),
+/// the lane claimed and the view armed ([`CommunityLoop::spawn_send`]). The
+/// key lookup comes before the claim, so a persona whose key cannot be read is
+/// told so even on a busy lane.
+pub(crate) async fn send<F: CommunityFeature>(
+    lp: &mut CommunityLoop<'_>,
+    to: String,
+    persona: PersonaId,
+    request: F::Request,
+    purpose: F::Purpose,
+) -> Sent<F::Purpose> {
+    let Some(waiting) = F::view_mut(lp.state).map(|v| F::pending_mut(v).is_some()) else {
+        return Sent::NoView;
+    };
+    if waiting {
+        return Sent::Waiting;
+    }
+    let mut sender = match sender(lp.config, lp.tdk, persona, &to).await {
+        Ok(s) => s,
+        Err(e) => return Sent::Failed(purpose, e),
+    };
+    let doc = match F::build(lp.config, &mut sender, &to, persona, request) {
+        Ok(doc) => doc,
+        Err(why) => return Sent::Failed(purpose, why),
+    };
+    if doc.thread().is_none() {
+        return Sent::Unthreaded(purpose);
+    }
+    if lp.spawn_send::<F>(sender, to, persona, doc, purpose) {
+        Sent::Dispatched
+    } else {
+        Sent::Busy
+    }
+}
+
 impl CommunityLoop<'_> {
     /// Arm the open view on `doc`'s thread and spawn its send to `to`. Returns
     /// whether it was dispatched — or failed in a way the view now shows; `false`
@@ -357,11 +430,7 @@ impl CommunityLoop<'_> {
         purpose: F::Purpose,
     ) -> bool {
         let Some(thid) = doc.thread() else {
-            fail::<F>(
-                self.state,
-                &purpose,
-                "couldn't send: a request without an id".into(),
-            );
+            fail::<F>(self.state, &purpose, UNTHREADED.into());
             return true;
         };
         let job = FeatureSend::<F> {

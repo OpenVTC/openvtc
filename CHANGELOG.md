@@ -39,6 +39,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Vetting, Rooms, Elections and Repos use the reducer + effect shape too**
+  ([#612](https://github.com/OpenVTC/openvtc/issues/612)): each panel's handlers are a
+  pure `plan` (no I/O, no awaits) that returns an ordered list of steps, and a runner
+  that does the persona's key lookup and signing, claims the domain, applies what a
+  started request changes only once the claim succeeds, spawns the job and saves —
+  in the order the handlers did. The vetting page plans every action but reading
+  requirements again and the attestation, which a loop-side pass still follows.
+  No visible change.
 - **The communities panel's context actions use the reducer + effect shape of the
   identity, relationship and inbox panels** (part of
   [#612](https://github.com/OpenVTC/openvtc/issues/612)): a pure `plan` decides what a

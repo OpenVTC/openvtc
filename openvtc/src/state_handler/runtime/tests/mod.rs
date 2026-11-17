@@ -555,3 +555,9 @@ async fn a_grant_that_starts_claims_the_domain_then_marks_the_view_busy() {
         view.message
     );
 }
+
+mod elections;
+mod fixtures;
+mod repos;
+mod rooms;
+mod vetting;
