@@ -27,6 +27,11 @@ use crate::state_handler::background_dispatch::DispatchDomain;
 use crate::state_handler::main_page::content::VettingMode;
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::state::State;
+// desk and tickets
+use super::desk::{
+    Asked, BookChange, DeskSnapshot, NamedStatement, deliver_statement, keep_session,
+};
+use chrono::{DateTime, Utc};
 
 /// The steps a planned action still owes, in the order they run.
 #[derive(Default)]
@@ -107,6 +112,28 @@ pub(super) enum Step {
     /// Hand a face or card job to the background, against the loop's VTA
     /// session, held as `claim` says ([`spawn_face`]).
     Face { work: Box<FaceWork>, claim: Claim },
+    // desk and tickets
+    /// Keep the document the [`Step::Sign`] before signed as `request_id`'s
+    /// session document, so the saved desk holds it exactly as it goes out
+    /// ([`keep_session`]). The runner still holds it for the [`Step::Send`]
+    /// that follows.
+    KeepSession { request_id: String, abort: Abort },
+    /// Sign, record and send a named Vetting Statement
+    /// ([`deliver_statement`]): the persona's key lookup, the signing with its
+    /// assertion key, the statement's verification, its delivery, the save,
+    /// and the send, claiming the domain.
+    Statement(Box<NamedStatement>),
+    /// Change the book here, in order with the sends around it.
+    Book(BookChange),
+    /// Sign `document` as `persona` and send it, held as `claim` says, then
+    /// apply `then` with how that went. The run goes on either way.
+    Ask {
+        persona: PersonaId,
+        document: Box<Document>,
+        sent: Box<Sent>,
+        claim: Claim,
+        then: Asked,
+    },
 }
 
 /// A plan made only once the steps before it have run, because it reads what
@@ -116,6 +143,22 @@ pub(super) enum Followup {
     /// An application was started and saved: select its row, then ask its
     /// community what it requires.
     Started { application_id: String },
+    // desk and tickets
+    /// A session's signed document is kept: close the form, save saying the
+    /// match code, and send it.
+    SessionKept { request_id: String, known: bool },
+    /// Ask `community` for its manifest as `persona`, unless the questions
+    /// before this one just did.
+    AskManifest {
+        community: String,
+        persona: PersonaId,
+    },
+    /// Ask `community` which key it bound `persona` to, as of `now`.
+    AskBinding {
+        community: String,
+        persona: PersonaId,
+        now: DateTime<Utc>,
+    },
 }
 
 /// How a send that fails before it went out is given up: the book changes
@@ -167,6 +210,14 @@ pub(super) enum Undo {
         persona: PersonaId,
         previous: Option<Box<VetterProfileRecord>>,
     },
+    // desk and tickets
+    /// The desk request `request_id` stands where it stood again.
+    RestoreDesk {
+        request_id: String,
+        previous: DeskSnapshot,
+    },
+    /// The withdrawal of statement `0` was never sent.
+    NotWithdrawn(String),
 }
 
 impl Undo {
@@ -195,6 +246,20 @@ impl Undo {
                 persona,
                 previous,
             } => book.restore_profile(&community, persona, previous.map(|p| *p)),
+            // desk and tickets
+            Undo::RestoreDesk {
+                request_id,
+                previous,
+            } => {
+                if let Some(entry) = book.desk_entry_mut(&request_id) {
+                    entry.state = *previous.0;
+                }
+            }
+            Undo::NotWithdrawn(statement_id) => {
+                if let Some(s) = book.issued.iter_mut().find(|s| s.id == statement_id) {
+                    s.withdrawal = None;
+                }
+            }
         }
     }
 }
@@ -249,6 +314,35 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                     return;
                 };
                 spawn_face(ctx, client, *work, keys.take(), claim);
+            }
+            // desk and tickets
+            Step::KeepSession { request_id, abort } => {
+                // As with `Send`: a plan keeps a session only after its signing.
+                let Some((_, document)) = signed.as_ref() else {
+                    debug_assert!(false, "a session kept without a signing");
+                    return;
+                };
+                if let Err(e) = keep_session(ctx.config, &request_id, document) {
+                    return abort.apply(ctx.state, ctx.config, e);
+                }
+            }
+            Step::Statement(statement) => deliver_statement(ctx, *statement).await,
+            Step::Book(change) => change.apply(ctx.config),
+            Step::Ask {
+                persona,
+                mut document,
+                sent,
+                claim,
+                then,
+            } => {
+                let result = match sign(ctx, persona, &mut document).await {
+                    Ok(()) => send_signed(ctx, persona, *document, *sent, claim),
+                    Err(e) => Err(e),
+                };
+                match result {
+                    Ok(()) => then.went(ctx.state, ctx.config),
+                    Err(e) => then.failed(ctx.state, ctx.config, e),
+                }
             }
         }
     }

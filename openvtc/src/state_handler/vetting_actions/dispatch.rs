@@ -26,7 +26,8 @@ use super::applicant::{
     plan_started, plan_switch_vetting_path, refresh_application_contexts,
 };
 use super::desk::{
-    attest, decline, open_session, refresh_stale_modes, refresh_vetter_side, withdraw,
+    attest, plan_ask_binding, plan_ask_manifest, plan_decline_submit, plan_open_session,
+    plan_session_kept, plan_switch_tab, plan_withdraw, refresh_vetter_side,
 };
 use super::effect::{Followup, VettingEffect, run};
 use super::faces::{
@@ -34,7 +35,7 @@ use super::faces::{
     plan_wear_face,
 };
 use super::hidden::ask_for_challenge;
-use super::tickets::{delete_ticket, issue_ticket};
+use super::tickets::{plan_delete_ticket, plan_issue_ticket};
 use super::vetter::{
     open_profile, plan_ask_event_mode, plan_ask_resend, plan_profile_submit, profile_form,
 };
@@ -44,8 +45,8 @@ use crate::state_handler::actions::VettingAction;
 use crate::state_handler::background_dispatch::DispatchDomain;
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
 use crate::state_handler::main_page::content::{
-    AttestForm, DECLINE_MESSAGE_MAX, DECLINE_REASONS, DIRECTORY_METHODS, DeskStage, DeskView,
-    EVENT_FIELDS, JourneyTarget, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
+    AttestForm, DECLINE_REASONS, DIRECTORY_METHODS, DeskStage, DeskView, EVENT_FIELDS,
+    JourneyTarget, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
     VETTING_WITHDRAWAL_REASONS, VettingMode, VettingState, VettingTab,
 };
 use crate::state_handler::runtime_actions::ActionCtx;
@@ -482,12 +483,12 @@ pub(super) fn plan(
     Planned::Effect(match action {
         VettingAction::DirectoryPage(forward) => plan_directory_page(state, config, busy, forward),
         VettingAction::SwitchVettingPath => plan_switch_vetting_path(state, config),
+        VettingAction::SwitchTab => plan_switch_tab(state, config),
         VettingAction::Submit => match plan_submit(state, config, busy) {
             Some(effect) => effect,
             None => return Planned::Loop(VettingAction::Submit),
         },
-        VettingAction::SwitchTab
-        | VettingAction::ChooseFace
+        VettingAction::ChooseFace
         | VettingAction::RefreshRequirements
         | VettingAction::RefreshVetterSide
         | VettingAction::CheckHiddenKey
@@ -583,16 +584,36 @@ fn plan_submit(state: &mut State, config: &mut Config, busy: bool) -> Option<Vet
         VettingMode::Profile(form) => plan_profile_submit(state, config, busy, *form),
         VettingMode::Resend { index } => plan_ask_resend(state, config, busy, index),
         VettingMode::EventMode { index } => plan_ask_event_mode(state, config, busy, index),
-        VettingMode::ConfirmDeleteTicket { .. }
-        | VettingMode::ChooseFace { .. }
+        VettingMode::ConfirmDeleteTicket { ticket_id } => {
+            plan_delete_ticket(state, config, &ticket_id)
+        }
+        VettingMode::NewTicket {
+            membership_index,
+            uses_index,
+            ..
+        } => plan_issue_ticket(state, config, busy, membership_index, uses_index),
+        VettingMode::OpenSession {
+            request_id,
+            method_index,
+        } => plan_open_session(state, config, busy, &request_id, method_index),
+        VettingMode::ConfirmDecline {
+            request_id,
+            reason_index,
+            message,
+            ..
+        } => {
+            let code = DECLINE_REASONS.get(reason_index).and_then(|(c, _)| *c);
+            plan_decline_submit(state, config, busy, &request_id, code, &message)
+        }
+        VettingMode::Withdraw {
+            statement_id,
+            reason_index,
+        } => plan_withdraw(state, config, busy, &statement_id, reason_index),
+        VettingMode::ChooseFace { .. }
         | VettingMode::NewFace(_)
         | VettingMode::HiddenVetting { .. }
         | VettingMode::SendCard { .. }
-        | VettingMode::NewTicket { .. }
-        | VettingMode::OpenSession { .. }
-        | VettingMode::Attest { .. }
-        | VettingMode::ConfirmDecline { .. }
-        | VettingMode::Withdraw { .. } => return None,
+        | VettingMode::Attest { .. } => return None,
     })
 }
 
@@ -605,6 +626,18 @@ pub(super) fn plan_followup(
 ) -> VettingEffect {
     match followup {
         Followup::Started { application_id } => plan_started(state, config, busy, &application_id),
+        // desk and tickets
+        Followup::SessionKept { request_id, known } => {
+            plan_session_kept(state, config, &request_id, known)
+        }
+        Followup::AskManifest { community, persona } => {
+            plan_ask_manifest(config, &community, persona)
+        }
+        Followup::AskBinding {
+            community,
+            persona,
+            now,
+        } => plan_ask_binding(config, &community, persona, now),
     }
 }
 
@@ -614,18 +647,6 @@ pub(super) fn plan_followup(
 /// session is connected).
 async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
     match action {
-        VettingAction::SwitchTab => {
-            let v = page(ctx);
-            v.tab = v.tab.next();
-            v.selected = 0;
-            v.mode = VettingMode::List;
-            v.status_message = None;
-            // Opening the desk: how each community vets is read again where the last reading
-            // is stale, so the badges and the ticket gate are not shown from an old answer.
-            if v.tab == VettingTab::Desk {
-                refresh_stale_modes(ctx).await;
-            }
-        }
         // Planned, with whether a VTA session is connected — what `plan` is
         // not given.
         VettingAction::ChooseFace => {
@@ -718,7 +739,8 @@ async fn on_loop(ctx: &mut ActionCtx<'_>, action: VettingAction) {
         }
         VettingAction::Submit => submit(ctx).await,
         // Planned by `plan`, which never hands these back.
-        VettingAction::OpenJourney
+        VettingAction::SwitchTab
+        | VettingAction::OpenJourney
         | VettingAction::OpenApplication(_)
         | VettingAction::CloseJourney
         | VettingAction::ShowTicket
@@ -922,7 +944,6 @@ pub(super) fn cycle(v: &mut VettingState, forward: bool) {
 /// Enter on a view whose submission [`plan_submit`] hands back.
 async fn submit(ctx: &mut ActionCtx<'_>) {
     match page(ctx).mode.clone() {
-        VettingMode::ConfirmDeleteTicket { ticket_id } => delete_ticket(ctx, &ticket_id),
         // Planned, with whether a VTA session is connected — what
         // `plan_submit` is not given.
         VettingMode::ChooseFace {
@@ -978,43 +999,16 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             );
             run(ctx, effect).await;
         }
-        VettingMode::NewTicket {
-            membership_index,
-            uses_index,
-            ..
-        } => issue_ticket(ctx, membership_index, uses_index).await,
-        VettingMode::OpenSession {
-            request_id,
-            method_index,
-        } => open_session(ctx, &request_id, method_index).await,
+        // Planned, then run here with the hidden attestation and the refresh
+        // that enrols, which work on the loop.
         VettingMode::Attest { request_id, form } => attest(ctx, &request_id, &form).await,
-        VettingMode::ConfirmDecline {
-            request_id,
-            reason_index,
-            message,
-            ..
-        } => {
-            let code = DECLINE_REASONS.get(reason_index).and_then(|(c, _)| *c);
-            let message = message.trim();
-            if message.chars().count() > DECLINE_MESSAGE_MAX {
-                return status(
-                    ctx,
-                    Status::warning(format!(
-                        "The note is {} characters; a decline carries at most \
-                         {DECLINE_MESSAGE_MAX}.",
-                        message.chars().count()
-                    )),
-                );
-            }
-            let message = (!message.is_empty()).then(|| message.to_string());
-            decline(ctx, &request_id, code, message).await
-        }
-        VettingMode::Withdraw {
-            statement_id,
-            reason_index,
-        } => withdraw(ctx, &statement_id, reason_index).await,
         // Planned by `plan_submit`, which never hands these back.
-        VettingMode::List
+        VettingMode::ConfirmDeleteTicket { .. }
+        | VettingMode::NewTicket { .. }
+        | VettingMode::OpenSession { .. }
+        | VettingMode::ConfirmDecline { .. }
+        | VettingMode::Withdraw { .. }
+        | VettingMode::List
         | VettingMode::ShowTicket { .. }
         | VettingMode::HolderGrant { .. }
         | VettingMode::NewApplication { .. }
@@ -1074,11 +1068,7 @@ mod tests {
             "reduced: the empty directory is explained"
         );
 
-        for action in [
-            VettingAction::RefreshRequirements,
-            VettingAction::SwitchTab,
-            VettingAction::DrawNow,
-        ] {
+        for action in [VettingAction::RefreshRequirements, VettingAction::DrawNow] {
             let planned = plan(&mut state, &mut config, false, action);
             assert!(matches!(planned, Planned::Loop(_)));
         }
@@ -1089,15 +1079,12 @@ mod tests {
         let planned = plan(&mut state, &mut config, false, VettingAction::Submit);
         assert!(matches!(planned, Planned::Effect(_)));
         assert!(matches!(panel(&mut state).mode, VettingMode::List));
-        panel(&mut state).mode = VettingMode::OpenSession {
+        panel(&mut state).mode = VettingMode::Attest {
             request_id: "r".into(),
-            method_index: 0,
+            form: AttestForm::default(),
         };
         let planned = plan(&mut state, &mut config, true, VettingAction::Submit);
         assert!(matches!(planned, Planned::Loop(VettingAction::Submit)));
-        assert!(matches!(
-            panel(&mut state).mode,
-            VettingMode::OpenSession { .. }
-        ));
+        assert!(matches!(panel(&mut state).mode, VettingMode::Attest { .. }));
     }
 }

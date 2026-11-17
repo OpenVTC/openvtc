@@ -1,5 +1,11 @@
 //! Vetter tickets: whether one may be issued, issuing and minting them,
 //! settling those waiting on a mode reading, and deleting them.
+//!
+//! Issuing and deleting are planned here (`plan_*`), purely, on the state and
+//! the book; what they still owe the loop is the [`VettingEffect`] they
+//! return. Settling a pending ticket ([`settle_pending_tickets`]) sends
+//! nothing: it decides on the book and saves through the scheduler it is
+//! handed, from the loop's sweep and its inbound arm.
 
 use crate::state_handler::main_page::status::Status;
 use chrono::{DateTime, Utc};
@@ -10,9 +16,11 @@ use openvtc_core::vetting::queries::QUERY_TIMEOUT;
 use openvtc_core::vetting::tickets::{DEFAULT_VALIDITY, Ticket};
 use openvtc_core::vetting::wire;
 
-use super::dispatch::{back, page, persist, status};
+use super::desk::Asked;
+use super::dispatch::{back, panel, show};
+use super::effect::{Step, VettingEffect};
 use super::jobs::Sent;
-use super::send::{Claim, abandon, begin, persona_did, sign_and_send};
+use super::send::{Claim, claimable, give_up, persona_did};
 use super::words::{
     clause, community_display, get_tokens_words, pcs_tokens_line, tokens_obtainable_now,
 };
@@ -20,12 +28,9 @@ use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
 use crate::state_handler::main_page::content::{
     DeskView, PendingTicket, VETTING_TICKET_USES, VettingMembership, VettingMode, VettingTab,
 };
-use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::save_coalesce::SaveScheduler;
 use crate::state_handler::state::State;
 
-/// Drop the application the confirmation is armed on.
-///
 /// Delete a ticket, once the confirmation has been taken.
 ///
 /// Irreversible and invisible to the people who matter: whoever is holding a
@@ -33,9 +38,12 @@ use crate::state_handler::state::State;
 /// their request refused with `invalidTicket` and no way to tell that the
 /// ticket was withdrawn rather than mistyped. That is why it is confirmed, and
 /// why the message says what it costs rather than only that it happened.
-pub(super) fn delete_ticket(ctx: &mut ActionCtx<'_>, ticket_id: &str) {
-    let Some(ticket) = ctx
-        .config
+pub(super) fn plan_delete_ticket(
+    state: &mut State,
+    config: &mut Config,
+    ticket_id: &str,
+) -> VettingEffect {
+    let Some(ticket) = config
         .private
         .vetting
         .tickets
@@ -43,24 +51,18 @@ pub(super) fn delete_ticket(ctx: &mut ActionCtx<'_>, ticket_id: &str) {
         .find(|t| t.id == ticket_id)
         .cloned()
     else {
-        back(page(ctx));
-        return status(ctx, Status::warning("That ticket is already gone."));
+        back(panel(state));
+        show(state, Status::warning("That ticket is already gone."));
+        return VettingEffect::none();
     };
-    ctx.config
-        .private
-        .vetting
-        .tickets
-        .retain(|t| t.id != ticket_id);
-    back(page(ctx));
-    page(ctx).selected = 0;
-    persist(
-        ctx,
-        format!(
-            "Ticket {} deleted — anyone already holding it is now refused, and they are not \
-             told why.",
-            ticket.code
-        ),
-    );
+    config.private.vetting.tickets.retain(|t| t.id != ticket_id);
+    back(panel(state));
+    panel(state).selected = 0;
+    VettingEffect(vec![Step::Persist(format!(
+        "Ticket {} deleted — anyone already holding it is now refused, and they are not \
+         told why.",
+        ticket.code
+    ))])
 }
 
 /// Why no ticket should be issued for `membership` now, if there is a reason: the community
@@ -169,71 +171,107 @@ fn ticket_unconfirmed(
 /// ticket when it answers ([`settle_pending_tickets`]). Never decided here, from what the client
 /// remembers — a community can switch between named vetting and PCS ZKP at any time, and the
 /// ticket follows the mode it runs when it is handed out.
-pub(super) async fn issue_ticket(
-    ctx: &mut ActionCtx<'_>,
+///
+/// The form closes before the checks, so a refusal is said on the list.
+pub(super) fn plan_issue_ticket(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
     membership_index: usize,
     uses_index: usize,
-) {
-    let Some(membership) = page(ctx).memberships.get(membership_index).cloned() else {
-        return;
+) -> VettingEffect {
+    let Some(membership) = panel(state).memberships.get(membership_index).cloned() else {
+        return VettingEffect::none();
     };
     let uses = VETTING_TICKET_USES[uses_index.min(VETTING_TICKET_USES.len() - 1)];
-    page(ctx).mode = VettingMode::List;
-    if let Some(waiting) = &page(ctx).pending_ticket {
+    panel(state).mode = VettingMode::List;
+    if let Some(waiting) = &panel(state).pending_ticket {
         let name = waiting.membership.name.clone();
-        return status(
-            ctx,
+        show(
+            state,
             Status::progress(format!(
                 "Still asking {name} how it vets, for the last ticket — a moment."
             )),
         );
+        return VettingEffect::none();
     }
-    let Some(did) = persona_did(ctx.config, membership.persona) else {
-        return status(
-            ctx,
+    let Some(did) = persona_did(config, membership.persona) else {
+        show(
+            state,
             Status::error(
                 "No ticket issued: the persona you vet for that community as is not available.",
             ),
         );
+        return VettingEffect::none();
     };
-    if !begin(ctx) {
-        return;
+    if !claimable(state, busy) {
+        return VettingEffect::none();
     }
     let now = Utc::now();
     let community = membership.community.clone();
-    let protocol = ctx.config.private.vetting.protocol_for(&community);
+    let protocol = config.private.vetting.protocol_for(&community);
     let document = match wire::manifest_request(&did, &community, protocol) {
         Ok(d) => d,
-        Err(e) => return abandon(ctx, "No ticket issued: could not build the question", e),
+        Err(e) => {
+            give_up(
+                state,
+                config,
+                "No ticket issued: could not build the question",
+                e,
+            );
+            return VettingEffect::none();
+        }
     };
-    ctx.config.private.vetting.mode_asked(&community, now);
-    let sent = Sent::Manifest {
-        community: community.clone(),
-    };
-    if let Err(e) = sign_and_send(ctx, membership.persona, document, sent, Claim::Held).await {
-        let failure = ModeFailure::Unsent(e);
-        ctx.config
-            .private
-            .vetting
-            .mode_failed(&community, failure.clone(), now);
-        let reading = ctx.config.private.vetting.vetter_mode(&community);
-        let words = ticket_unconfirmed(&membership.name, &failure, &reading, now);
-        ctx.state.main_page.log(words.clone());
-        return status(ctx, Status::error(words));
-    }
-    let name = membership.name.clone();
-    page(ctx).pending_ticket = Some(PendingTicket {
-        membership,
-        uses,
-        asked_at: now,
-    });
-    status(
-        ctx,
+    config.private.vetting.mode_asked(&community, now);
+    let persona = membership.persona;
+    VettingEffect(vec![Step::Ask {
+        persona,
+        document: Box::new(document),
+        sent: Box::new(Sent::Manifest { community }),
+        claim: Claim::Held,
+        then: Asked::Ticket(PendingTicket {
+            membership,
+            uses,
+            asked_at: now,
+        }),
+    }])
+}
+
+/// A ticket's question went: the ticket waits on the answer.
+pub(super) fn ticket_sent(state: &mut State, pending: PendingTicket) {
+    let name = pending.membership.name.clone();
+    panel(state).pending_ticket = Some(pending);
+    show(
+        state,
         Status::progress(format!(
             "Asking {name} how it vets now — named vetting or PCS ZKP — before issuing the \
              ticket…"
         )),
     );
+}
+
+/// A ticket's question could not be signed or handed off: no ticket, said as
+/// a mode that could not be read, and logged.
+pub(super) fn ticket_unsent(
+    state: &mut State,
+    config: &mut Config,
+    pending: PendingTicket,
+    error: String,
+) {
+    let PendingTicket {
+        membership,
+        asked_at: now,
+        ..
+    } = pending;
+    let failure = ModeFailure::Unsent(error);
+    config
+        .private
+        .vetting
+        .mode_failed(&membership.community, failure.clone(), now);
+    let reading = config.private.vetting.vetter_mode(&membership.community);
+    let words = ticket_unconfirmed(&membership.name, &failure, &reading, now);
+    state.main_page.log(words.clone());
+    show(state, Status::error(words));
 }
 
 /// What a ticket issued under `mode` promises, in words. A community running PCS ZKP alongside
@@ -640,5 +678,74 @@ mod tests {
             ticket_mode_words(&VettingBook::default(), &community, VetterMode::PcsZkp),
             "PCS ZKP"
         );
+    }
+
+    // ---- the plans: pure, so no runtime ----
+
+    fn ticket_form(state: &mut State, persona: openvtc_core::config::account::PersonaId) {
+        let v = &mut state.main_page.content_panel.vetting;
+        v.memberships = vec![VettingMembership {
+            community: "did:web:vtc".into(),
+            name: "VTC".into(),
+            persona,
+            accent: None,
+        }]
+        .into();
+        v.mode = VettingMode::NewTicket {
+            membership_index: 0,
+            uses_index: 1,
+            field: 0,
+        };
+    }
+
+    /// A persona the config does not hold is said before the busy check, and
+    /// the form is closed before either.
+    #[test]
+    fn a_ticket_as_a_persona_not_held_is_refused_before_the_busy_check() {
+        let mut config = test_config();
+        let mut state = State::default();
+        ticket_form(&mut state, openvtc_core::config::account::PersonaId::new());
+
+        let effect = plan_issue_ticket(&mut state, &mut config, true, 0, 1);
+
+        assert!(effect.0.is_empty());
+        let v = &state.main_page.content_panel.vetting;
+        assert!(matches!(v.mode, VettingMode::List));
+        assert_eq!(
+            v.status_message.as_ref().map(|s| s.text.as_str()),
+            Some("No ticket issued: the persona you vet for that community as is not available.")
+        );
+        assert!(
+            !config
+                .private
+                .vetting
+                .manifest_recently_asked("did:web:vtc", Utc::now())
+        );
+    }
+
+    /// Deleting takes the ticket out of the book and saves; nothing is sent.
+    #[test]
+    fn deleting_a_ticket_plans_only_the_save() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let ticket = Ticket::issue(
+            "did:web:vtc",
+            openvtc_core::config::account::PersonaId::new(),
+            vec![],
+            1,
+            DEFAULT_VALIDITY,
+            Utc::now(),
+        );
+        config.private.vetting.tickets.push(ticket.clone());
+        state.main_page.content_panel.vetting.selected = 4;
+
+        let effect = plan_delete_ticket(&mut state, &mut config, &ticket.id);
+
+        assert!(config.private.vetting.tickets.is_empty());
+        assert_eq!(state.main_page.content_panel.vetting.selected, 0);
+        let [Step::Persist(said)] = effect.0.as_slice() else {
+            panic!("only the save");
+        };
+        assert!(said.starts_with(&format!("Ticket {} deleted", ticket.code)));
     }
 }
