@@ -300,6 +300,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The refused press still reset
   which community the view reads from and the membership it presented. Those now change
   only once the read is under way.
+- **Elections: a list refresh on a busy lane says so**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Opening the panel or pressing `r`
+  on the list while another Elections request held the lane read nothing and said
+  nothing. It now says the lane is busy and to press `r` once it finishes, including on
+  the loading screen. The VTA's held election notifications are still read: they come
+  from the VTA on a lane of their own.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

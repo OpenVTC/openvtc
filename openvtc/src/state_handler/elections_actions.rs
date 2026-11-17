@@ -381,6 +381,8 @@ impl Commit {
 enum Refusal {
     /// The community lane is busy.
     Busy,
+    /// The list was not read again: the community lane is busy.
+    ListBusy,
 }
 
 impl Refusal {
@@ -388,6 +390,13 @@ impl Refusal {
         if let Some(view) = view_mut(state) {
             match self {
                 Refusal::Busy => view.note(Severity::Warning, InFlight::busy_message(SEND)),
+                Refusal::ListBusy => view.note(
+                    Severity::Warning,
+                    format!(
+                        "{} The elections were not read again — press r once it finishes.",
+                        InFlight::busy_message(SEND)
+                    ),
+                ),
             }
         }
     }
@@ -465,6 +474,9 @@ fn plan(state: &mut State, config: &Config, has_vta: bool, action: Act) -> Elect
 }
 
 /// Read the list again, and the VTA's held election notifications beside it.
+/// The notifications are the VTA's, on a lane of their own, so they are read
+/// even when the community lane is busy and the list is not; that refusal is
+/// said.
 /// A busy lane reads nothing and says nothing.
 fn plan_refresh(state: &mut State) -> Vec<Step> {
     let Some(view) = view_mut(state) else {
@@ -477,7 +489,7 @@ fn plan_refresh(state: &mut State) -> Vec<Step> {
         Request::List { cursor: None },
         Purpose::List,
         None,
-        None,
+        Some(Refusal::ListBusy),
     )]
 }
 

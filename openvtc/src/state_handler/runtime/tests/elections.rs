@@ -167,18 +167,23 @@ fn armed_on(rt: &mut Runtime, purpose: &Purpose) -> String {
 
 // ---- Open / Refresh ----
 
-/// Opening on a busy lane sends nothing and says nothing; the held
-/// notifications are due.
+/// Opening on a busy lane sends nothing and says the lane is busy. The held
+/// notifications are still due: they are the VTA's, read on its own lane.
 #[tokio::test]
-async fn an_open_on_a_busy_lane_sends_nothing_and_says_nothing() {
+async fn an_open_on_a_busy_lane_sends_nothing_and_says_the_lane_is_busy() {
     let mut rt = with_keys().await;
     assert!(rt.in_flight.try_begin(DispatchDomain::Elections));
     rt.on_action(Action::Elections(Act::Open(0))).await;
     let v = view(&mut rt);
     assert_eq!(v.phase, ElectionsPhase::Loading);
     assert!(v.pending.is_none());
-    assert!(v.status.is_none());
     assert!(v.notified_due);
+    let (severity, text) = status(&mut rt).expect("the busy lane is said");
+    assert_eq!(severity, Severity::Warning);
+    assert!(
+        text.starts_with(&InFlight::busy_message(DispatchDomain::Elections)),
+        "{text}"
+    );
 }
 
 /// Opening with a key lookup that fails fails the empty list with the reason.
