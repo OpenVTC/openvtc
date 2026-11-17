@@ -1062,7 +1062,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
 pub(crate) async fn run(ctx: &mut ActionCtx<'_>, effect: ReposEffect) {
     let steps = match effect {
         ReposEffect::Workspace(w) => {
-            super::repos_workspace::dispatch(ctx, w).await;
+            super::repos_workspace::dispatch(ctx, w);
             return;
         }
         ReposEffect::Opened(steps) => {
