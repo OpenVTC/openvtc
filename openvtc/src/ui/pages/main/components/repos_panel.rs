@@ -463,7 +463,7 @@ fn render_accounts(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[L
                 lines.push(Line::from(dim(format!(
                     "    Waiting for {} to confirm — checking every {}s{expiry}.",
                     link.forge,
-                    git_ns::LINK_POLL_INTERVAL.as_secs()
+                    link.poll_interval().as_secs()
                 ))));
             }
             LinkPhase::Linked { login, .. } => lines.push(Line::from(vec![

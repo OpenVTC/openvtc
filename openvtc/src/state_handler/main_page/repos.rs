@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use openvtc_core::config::account::PersonaId;
@@ -199,9 +199,19 @@ pub struct LinkFlow {
     pub expires_at: Option<DateTime<Utc>>,
     /// The in-flight poll, if any.
     pub poll: Option<Pending>,
-    /// When the last poll was sent, to keep to the five-second floor.
+    /// When the last poll was sent, or last failed, to keep to the poll
+    /// interval ([`LinkFlow::poll_interval`]).
     pub last_poll: Option<Instant>,
+    /// Polls that failed in a row since the last answer: each one doubles the
+    /// interval, up to [`LINK_POLL_MAX_INTERVAL`] (R1.4).
+    pub failures: u32,
+    /// Why the last poll failed, so a failure that repeats is said once.
+    pub last_failure: Option<String>,
 }
+
+/// The longest a failing link poll backs off to between attempts. The attempt
+/// itself lapses at its `expires_at`, which bounds the polling.
+pub const LINK_POLL_MAX_INTERVAL: Duration = Duration::from_secs(60);
 
 impl LinkFlow {
     #[must_use]
@@ -215,11 +225,46 @@ impl LinkFlow {
             expires_at: None,
             poll: None,
             last_poll: None,
+            failures: 0,
+            last_failure: None,
         }
     }
 
-    /// Whether a poll is due at `now`: waiting, nothing in flight, the floor
-    /// passed and the attempt not yet lapsed.
+    /// How long to wait between polls: the five-second floor while polls are
+    /// answered, doubling with each failure in a row up to
+    /// [`LINK_POLL_MAX_INTERVAL`].
+    #[must_use]
+    pub fn poll_interval(&self) -> Duration {
+        git_ns::LINK_POLL_INTERVAL
+            .saturating_mul(1u32 << self.failures.min(8))
+            .min(LINK_POLL_MAX_INTERVAL)
+    }
+
+    /// A poll failed at `now` for `why`: it is no longer in flight, and the
+    /// next waits out the longer interval. Returns whether `why` should be
+    /// said — only when it differs from the failure said before it, so a
+    /// failure that repeats is reported once.
+    pub fn poll_failed(&mut self, now: Instant, why: &str) -> bool {
+        self.poll = None;
+        self.last_poll = Some(now);
+        self.failures = self.failures.saturating_add(1);
+        if self.last_failure.as_deref() == Some(why) {
+            return false;
+        }
+        self.last_failure = Some(why.to_string());
+        true
+    }
+
+    /// A poll was answered: back to the floor, and a later failure is said
+    /// again.
+    pub fn poll_answered(&mut self) {
+        self.poll = None;
+        self.failures = 0;
+        self.last_failure = None;
+    }
+
+    /// Whether a poll is due at `now`: waiting, nothing in flight, the
+    /// interval passed and the attempt not yet lapsed.
     #[must_use]
     pub fn poll_due(&self, now: Instant, wall: DateTime<Utc>) -> bool {
         self.phase == LinkPhase::Waiting
@@ -227,7 +272,7 @@ impl LinkFlow {
             && self.poll.is_none()
             && self
                 .last_poll
-                .is_none_or(|t| now.duration_since(t) >= git_ns::LINK_POLL_INTERVAL)
+                .is_none_or(|t| now.duration_since(t) >= self.poll_interval())
             && self.expires_at.is_none_or(|e| wall < e)
     }
 }

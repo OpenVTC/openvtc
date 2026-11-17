@@ -223,6 +223,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   an acceptance step, a renewals check) whose persona key could not be read was retried
   and its error rewritten on every tick. It now shows the reason once and stops until
   the person acts again, as Elections does.
+- **Repos: a failing forge-link check is reported once and backs off**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). A link-status poll that kept
+  failing (the persona's key, the send, or no answer) repeated its error every 5 s. A
+  failure is now said once until it changes or a poll is answered, and each failure in a
+  row doubles the wait before the next poll, up to 60 s; the panel shows the current
+  interval. A send that failed or a poll that went unanswered was silent before and is
+  now said too.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

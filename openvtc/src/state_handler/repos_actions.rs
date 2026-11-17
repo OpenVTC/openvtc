@@ -630,12 +630,14 @@ impl ReposOutcome {
             return;
         }
         if self.purpose == Purpose::LinkPoll {
-            // A poll that did not leave is retried on the next tick.
-            if let Some(link) = view.link.as_mut() {
-                link.poll = None;
-            }
+            // A poll that did not leave is retried once its backed-off
+            // interval passes.
             tracing::debug!("git-ns link poll failed to send: {e}");
-            return;
+            return link_poll_failed(
+                state,
+                Instant::now(),
+                format!("couldn't check the link with the community: {e}"),
+            );
         }
         view.pending = None;
         match self.purpose {
@@ -1105,15 +1107,34 @@ pub(crate) async fn run_steps(lp: &mut Loop<'_>, steps: Vec<Step>) {
     }
 }
 
-/// Say why a send never left: a first read fails the view, anything else is
-/// said on the status line.
+/// Say why a send never left: a first read fails the view, a link poll backs
+/// off ([`link_poll_failed`]), anything else is said on the status line.
 fn refuse(state: &mut State, purpose: &Purpose, e: String) {
+    if *purpose == Purpose::LinkPoll {
+        return link_poll_failed(state, Instant::now(), e);
+    }
     if let Some(view) = view_mut(state) {
         if view.data.is_none() && *purpose == Purpose::View {
             view.phase = ReposPhase::Failed(e);
         } else {
             view.note(Severity::Error, e);
         }
+    }
+}
+
+/// A link poll failed at `now` for `why`: the next one backs off, and `why`
+/// is said on the status line only when it is not the failure said last, so
+/// a poll that keeps failing the same way does not repeat itself every tick.
+fn link_poll_failed(state: &mut State, now: Instant, why: String) {
+    let Some(view) = view_mut(state) else {
+        return;
+    };
+    let say = view
+        .link
+        .as_mut()
+        .is_some_and(|link| link.poll_failed(now, &why));
+    if say {
+        view.note(Severity::Error, why);
     }
 }
 
@@ -1236,7 +1257,7 @@ fn apply_reply(state: &mut State, config: &Config, thid: &str, reply: Reply) -> 
     {
         let mut linked = None;
         if let Some(link) = view.link.as_mut() {
-            link.poll = None;
+            link.poll_answered();
             match reply {
                 Reply::LinkStatus(r) => match r.state {
                     git_ns::LinkState::Linked => {
@@ -1529,6 +1550,7 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
 /// due poll, the workspace probe and the did-git-sign read, in that order.
 pub(crate) fn plan_tick(state: &mut State, now: Instant, wall: DateTime<Utc>) -> Vec<Step> {
     let mut poll = None;
+    let mut lost = false;
     if let Some(view) = view_mut(state) {
         if view
             .pending
@@ -1582,14 +1604,25 @@ pub(crate) fn plan_tick(state: &mut State, now: Instant, wall: DateTime<Utc>) ->
             }
         }
         if let Some(link) = view.link.as_mut() {
-            // A lost poll is simply retried.
-            if link
+            // A lost poll is retried once its backed-off interval passes.
+            lost = link
                 .poll
                 .as_ref()
-                .is_some_and(|p| now.duration_since(p.sent_at) > REPLY_WINDOW)
-            {
-                link.poll = None;
-            }
+                .is_some_and(|p| now.duration_since(p.sent_at) > REPLY_WINDOW);
+        }
+    }
+    if lost {
+        link_poll_failed(
+            state,
+            now,
+            format!(
+                "no answer to the link check within {}s — the community's bridge may be offline",
+                REPLY_WINDOW.as_secs()
+            ),
+        );
+    }
+    if let Some(view) = view_mut(state) {
+        if let Some(link) = view.link.as_mut() {
             if link.phase == LinkPhase::Waiting && link.expires_at.is_some_and(|e| wall >= e) {
                 link.phase = LinkPhase::Expired;
             }
@@ -2469,6 +2502,79 @@ mod tests {
             !link.poll_due(now + git_ns::LINK_POLL_INTERVAL, Utc::now()),
             "not past the attempt's expiry"
         );
+    }
+
+    /// Each failed poll in a row doubles the interval, up to the cap; an
+    /// answer brings it back to the floor.
+    #[test]
+    fn a_failing_poll_backs_off_to_a_cap_and_an_answer_resets_it() {
+        let mut link = LinkFlow::starting("codeberg.org".into());
+        link.phase = LinkPhase::Waiting;
+        link.link_id = Some("lnk_1".into());
+        let now = Instant::now();
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            link.poll_failed(now, "unreachable");
+            seen.push(link.poll_interval().as_secs());
+        }
+        assert_eq!(seen, vec![10, 20, 40, 60, 60, 60]);
+        assert!(!link.poll_due(now + Duration::from_secs(59), Utc::now()));
+        assert!(link.poll_due(now + Duration::from_secs(60), Utc::now()));
+        link.poll_answered();
+        assert_eq!(link.poll_interval(), git_ns::LINK_POLL_INTERVAL);
+    }
+
+    /// A failure is said once while it repeats; a different one is said, and
+    /// so is the same one again after an answer.
+    #[test]
+    fn a_repeated_poll_failure_is_said_once() {
+        let mut link = LinkFlow::starting("codeberg.org".into());
+        let now = Instant::now();
+        assert!(link.poll_failed(now, "unreachable"));
+        assert!(!link.poll_failed(now, "unreachable"));
+        assert!(link.poll_failed(now, "refused"));
+        link.poll_answered();
+        assert!(link.poll_failed(now, "refused"));
+    }
+
+    /// A poll lost past its reply window says so once and backs off; a second
+    /// lost poll the same way says nothing more.
+    #[test]
+    fn a_lost_poll_is_said_once_and_backs_off() {
+        let mut state = open_state();
+        let mut link = LinkFlow::starting("github.com".into());
+        link.phase = LinkPhase::Waiting;
+        link.link_id = Some("lnk_1".into());
+        view_mut(&mut state).unwrap().link = Some(link);
+        let start = Instant::now();
+        let later = start + REPLY_WINDOW + Duration::from_secs(1);
+        let lose = |state: &mut State, sent_at: Instant| {
+            view_mut(state).unwrap().link.as_mut().unwrap().poll = Some(Pending {
+                thid: "poll-1".into(),
+                sent_at,
+                purpose: Purpose::LinkPoll,
+            });
+        };
+
+        lose(&mut state, start);
+        let steps = plan_tick(&mut state, later, Utc::now());
+        assert!(
+            !steps.iter().any(|s| matches!(s, Step::Send(_))),
+            "not polled again at once"
+        );
+        let v = view(&state);
+        let link = v.link.as_ref().unwrap();
+        assert!(link.poll.is_none());
+        assert_eq!(link.failures, 1);
+        let said = v.status.as_ref().unwrap().text.clone();
+        assert!(said.starts_with("no answer to the link check"), "{said}");
+
+        view_mut(&mut state).unwrap().status = None;
+        lose(&mut state, later);
+        plan_tick(&mut state, later + REPLY_WINDOW + Duration::from_secs(1), Utc::now());
+        let v = view(&state);
+        assert_eq!(v.link.as_ref().unwrap().failures, 2);
+        assert!(v.status.is_none(), "the same failure is not said again");
     }
 
     #[test]
