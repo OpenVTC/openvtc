@@ -441,6 +441,13 @@ impl Runtime {
                 tokio::spawn(openvtc_core::join::status_poll::send_all(atm, polls));
             }
         }
+        // A change syncs only the panels that read it, so text that turns with
+        // the clock alone — a credential expiring, a join awaiting its
+        // acknowledgement, a vetter grant running out — is brought up to date
+        // here, at most a minute late.
+        state
+            .main_page
+            .sync_panels(config, crate::state_handler::main_page::Panels::FROM_CLOCK);
     }
 
     pub(super) async fn on_hidden_vetting_tick(&mut self) {

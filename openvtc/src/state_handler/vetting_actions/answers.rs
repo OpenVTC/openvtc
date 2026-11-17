@@ -21,6 +21,7 @@ use crate::state_handler::main_page::content::{
     VettingTab,
 };
 use crate::state_handler::main_page::menu::MainMenu;
+use crate::state_handler::main_page::sync_clock;
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
 use crate::state_handler::save_coalesce::SaveScheduler;
 use crate::state_handler::state::State;
@@ -400,7 +401,7 @@ pub(crate) fn focus_vetting_target(
                     v.selected = i;
                     v.status_message = None;
                     v.journey_target = Some(JourneyTarget::Desk(request_id.clone()));
-                    sync_journey(v, config, Utc::now());
+                    sync_journey(v, config, sync_clock());
                 }
                 None => {
                     v.status_message = Some(Status::warning(
@@ -433,7 +434,7 @@ pub(crate) fn focus_application(
     // the application's journey, so the holder always arrives at the same
     // picture of where they are.
     v.journey_target = Some(JourneyTarget::Application(application_id.to_string()));
-    sync_journey(v, config, Utc::now());
+    sync_journey(v, config, sync_clock());
 }
 
 #[cfg(test)]

@@ -48,6 +48,7 @@ use crate::state_handler::main_page::content::{
     JourneyTarget, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
     VETTING_WITHDRAWAL_REASONS, VettingMode, VettingState, VettingTab,
 };
+use crate::state_handler::main_page::sync_clock;
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::state::State;
 
@@ -109,7 +110,7 @@ pub(super) fn reduce(state: &mut State, config: &Config, action: &VettingAction)
                 v.journey_target = Some(target);
                 v.mode = VettingMode::List;
                 v.status_message = None;
-                sync_journey(panel(state), config, Utc::now());
+                sync_journey(panel(state), config, sync_clock());
             }
         }
         VettingAction::OpenApplication(application_id) => {

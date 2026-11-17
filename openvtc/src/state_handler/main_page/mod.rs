@@ -243,6 +243,48 @@ impl MainPageState {
     }
 }
 
+/// The time a sync formats its time-dependent text against — a credential
+/// "expired" or "expires in 3 days", a join awaiting acknowledgement, a
+/// vetter grant expiring. Read once per sync, so the panels in it agree.
+///
+/// Tests freeze it ([`test_clock::freeze`]) so two syncs compare equal across
+/// a minute or day rollover.
+#[must_use]
+pub(crate) fn sync_clock() -> chrono::DateTime<chrono::Utc> {
+    #[cfg(test)]
+    if let Some(at) = test_clock::FROZEN.with(std::cell::Cell::get) {
+        return at;
+    }
+    chrono::Utc::now()
+}
+
+/// A frozen [`sync_clock`] for tests, per thread.
+#[cfg(test)]
+pub(crate) mod test_clock {
+    use chrono::{DateTime, Utc};
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static FROZEN: Cell<Option<DateTime<Utc>>> = const { Cell::new(None) };
+    }
+
+    /// Freeze the sync clock on this thread at `at` until the guard drops.
+    #[must_use]
+    pub(crate) fn freeze(at: DateTime<Utc>) -> Frozen {
+        FROZEN.with(|f| f.set(Some(at)));
+        Frozen
+    }
+
+    /// Unfreezes the sync clock when dropped.
+    pub(crate) struct Frozen;
+
+    impl Drop for Frozen {
+        fn drop(&mut self) {
+            FROZEN.with(|f| f.set(None));
+        }
+    }
+}
+
 /// A set of main-page panels whose display state is rebuilt from `Config`
 /// ([`MainPageState::sync_panels`]).
 ///
@@ -295,6 +337,12 @@ impl Panels {
     pub const FROM_DISPLAY_ORDER: Self = Self(Self::COMMUNITIES.0 | Self::HEADER.0);
     /// What reads the friendly name: the header and the settings panel.
     pub const FROM_FRIENDLY_NAME: Self = Self(Self::HEADER.0 | Self::SETTINGS.0);
+    /// What shows text that turns with the clock alone ([`sync_clock`]): the
+    /// credentials (valid / expired), the Communities overview (a join
+    /// awaiting acknowledgement, an application's standing), and the Vetting
+    /// page (grants and sessions expiring). The loop syncs these once a
+    /// minute.
+    pub const FROM_CLOCK: Self = Self(Self::CREDENTIALS.0 | Self::COMMUNITIES.0 | Self::VETTING.0);
 
     /// Whether every panel in `other` is in this set.
     #[must_use]
@@ -383,11 +431,16 @@ impl MainPageState {
     /// `Panels::FROM_*` sets name them by what changed — and syncs
     /// [`Panels::ALL`] when it cannot say.
     pub fn sync_panels(&mut self, config: &Config, panels: Panels) {
+        let now = sync_clock();
         if panels.contains(Panels::HEADER) {
             self.config = MainMenuConfigState::from(config);
         }
         if panels.contains(Panels::VETTING) {
-            crate::state_handler::vetting_actions::sync(&mut self.content_panel.vetting, config);
+            crate::state_handler::vetting_actions::sync(
+                &mut self.content_panel.vetting,
+                config,
+                now,
+            );
         }
         if panels.contains(Panels::INBOX) {
             self.sync_inbox(config);
@@ -396,7 +449,7 @@ impl MainPageState {
             self.sync_relationships(config);
         }
         if panels.contains(Panels::CREDENTIALS) {
-            self.sync_credentials(config);
+            self.sync_credentials(config, now);
         }
         if panels.contains(Panels::SETTINGS) {
             self.sync_settings(config);
@@ -408,7 +461,7 @@ impl MainPageState {
             self.sync_identity(config);
         }
         if panels.contains(Panels::COMMUNITIES) {
-            self.sync_communities(config);
+            self.sync_communities(config, now);
         }
     }
 
@@ -665,7 +718,7 @@ impl MainPageState {
 
     /// The credentials: VRCs scoped to the working community's persona, then
     /// every membership credential and vetting statement.
-    fn sync_credentials(&mut self, config: &Config) {
+    fn sync_credentials(&mut self, config: &Config, now: chrono::DateTime<chrono::Utc>) {
         let active_persona = config.active_persona;
         let persona_count = config.account.personas.len();
         let memo = &mut self.post_quantum;
@@ -678,6 +731,7 @@ impl MainPageState {
                 config,
                 active_persona,
                 persona_count,
+                now,
             ),
         )
         .into();
@@ -689,14 +743,19 @@ impl MainPageState {
                 config,
                 active_persona,
                 persona_count,
+                now,
             ),
         )
         .into();
         self.content_panel.credentials.membership =
-            finish_credential_rows(&persona_labels, memo, collect_membership_creds(config)).into();
-        self.content_panel.credentials.vetting =
-            finish_credential_rows(&persona_labels, memo, collect_vetting_statements(config))
+            finish_credential_rows(&persona_labels, memo, collect_membership_creds(config, now))
                 .into();
+        self.content_panel.credentials.vetting = finish_credential_rows(
+            &persona_labels,
+            memo,
+            collect_vetting_statements(config, now),
+        )
+        .into();
         memo.finish_sync();
         self.content_panel.credentials.retired_vrcs = config.private.vrcs_received.retired()
             + config.private.vrcs_issued.retired()
@@ -904,12 +963,11 @@ impl MainPageState {
     }
 
     /// The Communities overview.
-    fn sync_communities(&mut self, config: &Config) {
+    fn sync_communities(&mut self, config: &Config, now: chrono::DateTime<chrono::Utc>) {
         // Sync the Communities overview (R-C-*): display order from the model,
         // archived excluded, with the actions-required count for the badge.
         let mut community_items = Vec::new();
         let show_archived = self.content_panel.communities.show_archived;
-        let now = chrono::Utc::now();
         for c in config.account.communities_for_display(show_archived) {
             let persona = config.account.personas.get(&c.persona_ref);
             // Precedence follows `resolve_did_to_display`: the user's own label
@@ -1205,6 +1263,7 @@ fn collect_vrcs(
     config: &Config,
     active_persona: Option<PersonaId>,
     persona_count: usize,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<VrcSummary> {
     let mut result = Vec::new();
     for remote_p_did in vrcs.keys() {
@@ -1245,19 +1304,13 @@ fn collect_vrcs(
                         .agent_name_for(vrc.subject())
                         .map(|n| sanitize_display(n, 256)),
                     validity: {
-                        let (v, _) = format_validity_from_dates(
-                            vrc.valid_from(),
-                            vrc.valid_until(),
-                            chrono::Utc::now(),
-                        );
+                        let (v, _) =
+                            format_validity_from_dates(vrc.valid_from(), vrc.valid_until(), now);
                         v
                     },
                     status: {
-                        let (_, s) = format_validity_from_dates(
-                            vrc.valid_from(),
-                            vrc.valid_until(),
-                            chrono::Utc::now(),
-                        );
+                        let (_, s) =
+                            format_validity_from_dates(vrc.valid_from(), vrc.valid_until(), now);
                         s
                     },
                     // A peer-to-peer VRC carries no membership/role kind; the
@@ -1320,7 +1373,10 @@ fn persona_labels_by_did(config: &Config) -> std::collections::HashMap<&str, Opt
     labels
 }
 
-fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
+fn collect_membership_creds(
+    config: &Config,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<VrcSummary> {
     let mut result = Vec::new();
     for c in config.account.memberships() {
         let community = crate::state_handler::community_label(
@@ -1365,8 +1421,7 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
             // already-parsed JSON value by Arc pointer (a `serde_json::Value`
             // pretty-prints identically whether done now or later).
             let raw_json = content::RawCredential::Value(Arc::new(vc.clone()));
-            let (validity, status) =
-                format_validity(&valid_from, valid_until.as_deref(), chrono::Utc::now());
+            let (validity, status) = format_validity(&valid_from, valid_until.as_deref(), now);
             result.push(VrcSummary {
                 vrc_id: vc_id,
                 remote_p_did: sanitize_display(&c.vtc_did, 256),
@@ -1424,8 +1479,7 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
                 .get("validUntil")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            let (validity, status) =
-                format_validity(&valid_from, valid_until.as_deref(), chrono::Utc::now());
+            let (validity, status) = format_validity(&valid_from, valid_until.as_deref(), now);
 
             // Does it still acknowledge the grant we hold? The digest names one
             // grant; once the community re-issues, ours no longer matches and we
@@ -1535,8 +1589,7 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
             // decides on, so fall back to it rather than showing no window for
             // a credential whose `validUntil` this build could not read.
             .or_else(|| grant.valid_until.map(|u| u.to_rfc3339()));
-        let (validity, status) =
-            format_validity(&valid_from, valid_until.as_deref(), chrono::Utc::now());
+        let (validity, status) = format_validity(&valid_from, valid_until.as_deref(), now);
         // Labelled the way the membership rows above label the same community —
         // its own display name first — so the three credentials from one
         // community sit under one name rather than two.
@@ -1680,8 +1733,10 @@ fn joining_summaries(
 /// `status` is the validity window only. Whether a vetter has withdrawn a
 /// statement is the community's to record (design §9.6), and nothing here
 /// claims otherwise.
-fn collect_vetting_statements(config: &Config) -> Vec<VrcSummary> {
-    let now = chrono::Utc::now();
+fn collect_vetting_statements(
+    config: &Config,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<VrcSummary> {
     let mut result = Vec::new();
     for app in &config.private.vetting.applications {
         // Labelled the way the Membership tab labels the same community.
@@ -2169,7 +2224,7 @@ mod tests {
             }),
         });
 
-        let creds = collect_membership_creds(&config);
+        let creds = collect_membership_creds(&config, chrono::Utc::now());
         let grant = creds
             .iter()
             .find(|c| c.kind.as_deref() == Some("Vetter"))
@@ -2222,7 +2277,7 @@ mod tests {
             credential: serde_json::json!({ "id": "urn:uuid:statement-1" }),
         });
 
-        let statements = collect_vetting_statements(&config);
+        let statements = collect_vetting_statements(&config, chrono::Utc::now());
         let [statement] = statements.as_slice() else {
             panic!("one statement listed, got {}", statements.len());
         };
@@ -2461,7 +2516,7 @@ mod tests {
                 chrono::Utc::now(),
             )
             .unwrap();
-        assert!(collect_vetting_statements(&config).is_empty());
+        assert!(collect_vetting_statements(&config, chrono::Utc::now()).is_empty());
     }
 
     /// A grant whose stored credential this build cannot read still shows a
@@ -2487,7 +2542,7 @@ mod tests {
             credential: serde_json::json!({ "shape": "from a newer build" }),
         });
 
-        let creds = collect_membership_creds(&config);
+        let creds = collect_membership_creds(&config, chrono::Utc::now());
         let grant = creds
             .iter()
             .find(|c| c.kind.as_deref() == Some("Vetter"))
@@ -3817,6 +3872,7 @@ mod tests {
     /// leaves every other panel as it was.
     #[test]
     fn each_panel_synced_alone_shows_what_the_full_sync_shows() {
+        let _clock = test_clock::freeze(chrono::Utc::now());
         let config = busy_config();
         let mut full = MainPageState::default();
         full.sync_from_config(&config);
@@ -3844,6 +3900,7 @@ mod tests {
     /// The full sync is every panel synced, in any order.
     #[test]
     fn the_full_sync_is_every_panel_synced() {
+        let _clock = test_clock::freeze(chrono::Utc::now());
         let config = busy_config();
         let mut full = MainPageState::default();
         full.sync_from_config(&config);
@@ -3866,6 +3923,7 @@ mod tests {
     /// After `change`, syncing only `panels` leaves the page as a full sync
     /// would, and the change shows on at least one of them.
     fn assert_reaches_only(panels: Panels, change: impl FnOnce(&mut Config, &mut MainPageState)) {
+        let _clock = test_clock::freeze(chrono::Utc::now());
         let mut config = busy_config();
         let mut page = MainPageState::default();
         page.sync_from_config(&config);
