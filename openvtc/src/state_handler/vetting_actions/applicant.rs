@@ -1,5 +1,10 @@
 //! The applicant side: starting and abandoning applications, switching
 //! vetting path, requesting a vetter, and searching the vetter directory.
+//!
+//! Each action is planned here (`plan_*`), purely, on the state and the book;
+//! what it still owes the loop — saving, signing, the send — is the
+//! [`VettingEffect`] it returns. The form changes that read the book and touch
+//! nothing else are plain functions [`super::dispatch::reduce`] calls.
 
 use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
@@ -12,15 +17,16 @@ use openvtc_core::vetting::queries::{CommunityQuery, QueryKind};
 use openvtc_core::vetting::wire;
 use vta_sdk::protocols::vetting::{VETTING_REQUEST_TYPE, request};
 
-use super::dispatch::{back, page, persist, status};
+use super::dispatch::{back, panel, show};
+use super::effect::{Abort, Followup, Step, Undo, VettingEffect};
 use super::jobs::Sent;
-use super::send::{Claim, abandon, begin, persona_did, sign_and_send};
+use super::send::{Claim, claimable, give_up, persona_did};
 use super::words::community_display;
 use crate::state_handler::main_page::content::{
     DIRECTORY_LABELS, DIRECTORY_METHODS, DirectoryView, VettingMode, VettingTab, row_of,
 };
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
-use crate::state_handler::runtime_actions::ActionCtx;
+use crate::state_handler::state::State;
 
 /// The criterion `app` gathers for and the path it takes, in words, and a note when one is
 /// owed. `None` before its requirements are known.
@@ -79,19 +85,18 @@ pub(crate) fn criterion_words(
 
 /// `p` on an application: move it to the next way its community offers to be vetted, and say
 /// what that means for the requests already out.
-pub(super) fn switch_vetting_path(ctx: &mut ActionCtx<'_>) {
-    let v = page(ctx);
+pub(super) fn plan_switch_vetting_path(state: &mut State, config: &mut Config) -> VettingEffect {
+    let v = panel(state);
     let Some(row) = v.applications.get(v.selected).cloned() else {
-        return;
+        return VettingEffect::none();
     };
-    let had_requests = ctx
-        .config
+    let had_requests = config
         .private
         .vetting
         .applications
         .iter()
         .any(|a| a.id == row.id && !a.requests.is_empty());
-    match ctx.config.private.vetting.switch_vetting(&row.id) {
+    match config.private.vetting.switch_vetting(&row.id) {
         Ok(now) => {
             let resend = if had_requests {
                 match now.path {
@@ -108,22 +113,27 @@ pub(super) fn switch_vetting_path(ctx: &mut ActionCtx<'_>) {
             } else {
                 ""
             };
-            persist(
-                ctx,
-                format!(
-                    "This application now uses criterion {} with {}.{resend}",
-                    now.criterion_id,
-                    now.path.words()
-                ),
-            );
+            VettingEffect(vec![Step::Persist(format!(
+                "This application now uses criterion {} with {}.{resend}",
+                now.criterion_id,
+                now.path.words()
+            ))])
         }
-        Err(why) => status(ctx, Status::error(why)),
+        Err(why) => {
+            show(state, Status::error(why));
+            VettingEffect::none()
+        }
     }
 }
 
-pub(super) async fn refresh_requirements(ctx: &mut ActionCtx<'_>, application_id: &str) {
-    let Some(app) = ctx
-        .config
+/// Ask `application_id`'s community what it requires.
+pub(super) fn plan_refresh_requirements(
+    state: &mut State,
+    config: &Config,
+    busy: bool,
+    application_id: &str,
+) -> VettingEffect {
+    let Some(app) = config
         .private
         .vetting
         .applications
@@ -131,33 +141,42 @@ pub(super) async fn refresh_requirements(ctx: &mut ActionCtx<'_>, application_id
         .find(|a| a.id == application_id)
         .cloned()
     else {
-        return;
+        return VettingEffect::none();
     };
-    if !begin(ctx) {
-        return;
+    if !claimable(state, busy) {
+        return VettingEffect::none();
     }
-    let protocol = ctx.config.private.vetting.protocol_for(&app.community);
+    const WHAT: &str = "Could not ask the community";
+    let protocol = config.private.vetting.protocol_for(&app.community);
     let document = match wire::manifest_request(&app.join_did, &app.community, protocol) {
         Ok(d) => d,
-        Err(e) => return abandon(ctx, "Could not ask the community", e),
+        Err(e) => {
+            give_up(state, config, WHAT, e);
+            return VettingEffect::none();
+        }
     };
-    status(
-        ctx,
+    show(
+        state,
         Status::progress("Asking the community what it requires…"),
     );
     let sent = Sent::Manifest {
         community: app.community.clone(),
     };
-    if let Err(e) = sign_and_send(ctx, app.persona, document, sent, Claim::Held).await {
-        abandon(ctx, "Could not ask the community", e);
-    }
+    VettingEffect::sign_and_send(
+        [],
+        app.persona,
+        document,
+        sent,
+        Claim::Held,
+        Abort::say(WHAT),
+    )
 }
 
 /// Recompute the contexts a new application can use, for the community and
 /// persona on the form. An application that already exists keeps its own.
-pub(super) fn refresh_application_contexts(ctx: &mut ActionCtx<'_>) {
+pub(super) fn refresh_application_contexts(state: &mut State, config: &Config) {
     let (community, persona) = {
-        let v = page(ctx);
+        let v = panel(state);
         let VettingMode::NewApplication {
             community,
             persona_index,
@@ -171,7 +190,6 @@ pub(super) fn refresh_application_contexts(ctx: &mut ActionCtx<'_>) {
             v.personas.get(*persona_index).map(|p| p.persona),
         )
     };
-    let config: &Config = ctx.config;
     let existing = persona
         .and_then(|p| config.private.vetting.application(&community, p))
         .and_then(|a| a.context_id.clone());
@@ -192,7 +210,7 @@ pub(super) fn refresh_application_contexts(ctx: &mut ActionCtx<'_>) {
         context_options,
         context_index,
         ..
-    } = &mut page(ctx).mode
+    } = &mut panel(state).mode
     {
         if *context_options != options {
             *context_index = 0;
@@ -201,25 +219,30 @@ pub(super) fn refresh_application_contexts(ctx: &mut ActionCtx<'_>) {
     }
 }
 
-pub(super) async fn start_application(
-    ctx: &mut ActionCtx<'_>,
+/// Start an application to `community` as the persona at `persona_index`,
+/// save it, then ask the community what it requires ([`Followup::Started`]).
+pub(super) fn plan_start_application(
+    state: &mut State,
+    config: &mut Config,
     community: &str,
     persona_index: usize,
     context: Option<String>,
-) {
+) -> VettingEffect {
     if !community.starts_with("did:") {
-        return status(
-            ctx,
+        show(
+            state,
             Status::warning("Enter the community's DID (it starts with did:)."),
         );
+        return VettingEffect::none();
     }
-    let Some(persona) = page(ctx).personas.get(persona_index).cloned() else {
-        return status(
-            ctx,
+    let Some(persona) = panel(state).personas.get(persona_index).cloned() else {
+        show(
+            state,
             Status::warning("Choose the persona you will join with."),
         );
+        return VettingEffect::none();
     };
-    let application_id = match ctx.config.private.vetting.start_application(
+    let application_id = match config.private.vetting.start_application(
         community,
         persona.persona,
         &persona.did,
@@ -232,16 +255,16 @@ pub(super) async fn start_application(
             app.id.clone()
         }
         Err(e) => {
-            return status(
-                ctx,
+            show(
+                state,
                 Status::error(format!("Could not start the application: {e}")),
             );
+            return VettingEffect::none();
         }
     };
     // Said, not dropped (R6.4): a criterion this build cannot honour is the one thing that
     // makes this application gather evidence the community will not count.
-    let unadopted = ctx
-        .config
+    let unadopted = config
         .private
         .vetting
         .adopt_known_requirements(&application_id)
@@ -249,19 +272,32 @@ pub(super) async fn start_application(
         .map(|e| format!(" Its requirements could not be taken up: {e}."))
         .unwrap_or_default();
     {
-        let v = page(ctx);
+        let v = panel(state);
         v.mode = VettingMode::List;
         v.tab = VettingTab::Applications;
     }
-    persist(ctx, format!("Application started.{unadopted}"));
-    if let Some(i) = page(ctx)
+    VettingEffect(vec![
+        Step::Persist(format!("Application started.{unadopted}")),
+        Step::Then(Followup::Started { application_id }),
+    ])
+}
+
+/// [`Followup::Started`]: the saved application's row is on the page now, so
+/// select it, then ask its community what it requires.
+pub(super) fn plan_started(
+    state: &mut State,
+    config: &Config,
+    busy: bool,
+    application_id: &str,
+) -> VettingEffect {
+    if let Some(i) = panel(state)
         .applications
         .iter()
         .position(|a| a.id == application_id)
     {
-        page(ctx).selected = i;
+        panel(state).selected = i;
     }
-    refresh_requirements(ctx, &application_id).await;
+    plan_refresh_requirements(state, config, busy, application_id)
 }
 
 /// Send a vetting request carrying the ticket from a `vetting-ticket:` link.
@@ -270,40 +306,45 @@ pub(super) async fn start_application(
 /// read out of it. Enter with neither of those set — someone typed or pasted
 /// without the paste hook firing — reads `entry` here, so the form behaves the
 /// same whichever way the text arrived.
-pub(super) async fn request_vetter(
-    ctx: &mut ActionCtx<'_>,
+pub(super) fn plan_request_vetter(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
     application_id: &str,
     entry: &str,
     vetter: &str,
     ticket: Option<request::v0_1::Ticket>,
-) {
+) -> VettingEffect {
     // Not yet read (typed rather than pasted): read it now, which also reports
     // a link for the wrong community or one that cannot be decoded.
     let (vetter, presentation) = match (ticket, vetter.starts_with("did:")) {
         (Some(ticket), true) => (vetter.to_string(), ticket),
         _ => {
-            let Some(app) = ctx
-                .config
+            let Some(app) = config
                 .private
                 .vetting
                 .applications
                 .iter()
                 .find(|a| a.id == application_id)
             else {
-                return;
+                return VettingEffect::none();
             };
             match app.ticket_from_uri(entry) {
                 Ok(ticket) => (ticket.vetter, ticket.presentation),
                 Err(_) if entry.is_empty() => {
-                    return status(
-                        ctx,
+                    show(
+                        state,
                         Status::warning(
                             "Paste the link from the vetter's QR code — it carries their ticket, \
                          and a request without one is never answered.",
                         ),
                     );
+                    return VettingEffect::none();
                 }
-                Err(e) => return status(ctx, Status::error(sanitize_display(&e.to_string(), 400))),
+                Err(e) => {
+                    show(state, Status::error(sanitize_display(&e.to_string(), 400)));
+                    return VettingEffect::none();
+                }
             }
         }
     };
@@ -311,30 +352,27 @@ pub(super) async fn request_vetter(
     // Under a hidden criterion the request carries the application's PCS identifier, which the
     // VTA mints. Before it has, a request would ask the vetter for a named statement this
     // application cannot use.
-    if ctx
-        .config
+    if config
         .private
         .vetting
         .application_by_id(application_id)
         .is_some_and(Application::hidden_app_owed)
     {
-        ctx.config.private.vetting.pcs_due = true;
-        return status(
-            ctx,
+        config.private.vetting.pcs_due = true;
+        show(
+            state,
             Status::error(openvtc_core::vetting::hidden::HiddenError::NotReady.to_string()),
         );
+        return VettingEffect::none();
     }
-    if !begin(ctx) {
-        return;
+    if !claimable(state, busy) {
+        return VettingEffect::none();
     }
+    const WHAT: &str = "Could not send the request";
     let document_id = wire::new_id();
-    let Some(app) = ctx
-        .config
-        .private
-        .vetting
-        .application_by_id_mut(application_id)
-    else {
-        return abandon(ctx, "Could not send the request", "the application is gone");
+    let Some(app) = config.private.vetting.application_by_id_mut(application_id) else {
+        give_up(state, config, WHAT, "the application is gone");
+        return VettingEffect::none();
     };
     let (persona, join_did) = (app.persona, app.join_did.clone());
     let body = match app.prepare_request(
@@ -345,7 +383,10 @@ pub(super) async fn request_vetter(
         Utc::now(),
     ) {
         Ok(body) => body,
-        Err(e) => return abandon(ctx, "Could not send the request", e),
+        Err(e) => {
+            give_up(state, config, WHAT, e);
+            return VettingEffect::none();
+        }
     };
     let document = match wire::document(
         VETTING_REQUEST_TYPE,
@@ -355,37 +396,41 @@ pub(super) async fn request_vetter(
         &body,
     ) {
         Ok(d) => d,
-        Err(e) => return abandon(ctx, "Could not send the request", e),
+        Err(e) => {
+            give_up(state, config, WHAT, e);
+            return VettingEffect::none();
+        }
     };
-    page(ctx).mode = VettingMode::List;
-    persist(ctx, "Sending your request…");
+    panel(state).mode = VettingMode::List;
     let sent = Sent::Request {
         application_id: application_id.to_string(),
         document_id: document_id.clone(),
         vetter: vetter.to_string(),
     };
-    if let Err(e) = sign_and_send(ctx, persona, document, sent, Claim::Held).await {
-        if let Some(app) = ctx
-            .config
-            .private
-            .vetting
-            .application_by_id_mut(application_id)
-        {
-            app.forget_unsent(&document_id);
-        }
-        abandon(ctx, "Could not send the request", e);
-    }
+    VettingEffect::sign_and_send(
+        [Step::Persist("Sending your request…".to_string())],
+        persona,
+        document,
+        sent,
+        Claim::Held,
+        Abort::undoing(
+            WHAT,
+            vec![Undo::ForgetUnsent {
+                application_id: application_id.to_string(),
+                document_id,
+            }],
+        ),
+    )
 }
 
 /// Fill the request form from a pasted `vetting-ticket:` link — the vetter's
 /// DID and the scanned ticket — or say why it cannot be used.
-pub(super) fn paste_ticket(ctx: &mut ActionCtx<'_>, text: &str) {
-    let VettingMode::RequestVetter { application_id, .. } = &page(ctx).mode else {
+pub(super) fn paste_ticket(state: &mut State, config: &Config, text: &str) {
+    let VettingMode::RequestVetter { application_id, .. } = &panel(state).mode else {
         return;
     };
     let application_id = application_id.clone();
-    let Some(app) = ctx
-        .config
+    let Some(app) = config
         .private
         .vetting
         .applications
@@ -403,28 +448,28 @@ pub(super) fn paste_ticket(ctx: &mut ActionCtx<'_>, text: &str) {
                 vetter,
                 ticket: slot,
                 ..
-            } = &mut page(ctx).mode
+            } = &mut panel(state).mode
             {
                 *entry = pasted;
                 *vetter = ticket.vetter;
                 *slot = Some(ticket.presentation);
             }
-            status(
-                ctx,
+            show(
+                state,
                 Status::info(format!(
                     "Read the ticket link. It goes to {shown} — Enter sends the request."
                 )),
             );
         }
-        Err(e) => status(ctx, Status::error(sanitize_display(&e.to_string(), 400))),
+        Err(e) => show(state, Status::error(sanitize_display(&e.to_string(), 400))),
     }
 }
 
-pub(super) fn open_directory(ctx: &mut ActionCtx<'_>) {
-    let v = page(ctx);
+pub(super) fn open_directory(state: &mut State) {
+    let v = panel(state);
     if v.directory_communities.is_empty() {
-        return status(
-            ctx,
+        return show(
+            state,
             Status::warning(
                 "The vetter directory is searched per community: start an application (n) or join a \
              community first.",
@@ -460,17 +505,22 @@ pub(super) fn open_directory(ctx: &mut ActionCtx<'_>) {
 /// Ask the directory's community for one page. `cursors` is what the view's
 /// page stack becomes once the answer arrives; its last entry is the cursor
 /// sent.
-pub(super) async fn search_directory(ctx: &mut ActionCtx<'_>, cursors: Vec<Option<String>>) {
+pub(super) fn plan_search_directory(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
+    cursors: Vec<Option<String>>,
+) -> VettingEffect {
     let prepared = {
-        let v = page(ctx);
+        let v = panel(state);
         let VettingMode::Directory(view) = &mut v.mode else {
-            return;
+            return VettingEffect::none();
         };
         if view.pending.is_some() {
-            return;
+            return VettingEffect::none();
         }
         let Some(target) = v.directory_communities.get(view.community_index).cloned() else {
-            return;
+            return VettingEffect::none();
         };
         let mut filter = view.filter.clone();
         filter.method = DIRECTORY_METHODS[view.method_index.min(DIRECTORY_METHODS.len() - 1)];
@@ -484,39 +534,44 @@ pub(super) async fn search_directory(ctx: &mut ActionCtx<'_>, cursors: Vec<Optio
                     view.field = row;
                 }
                 view.error = Some(e.to_string());
-                return;
+                return VettingEffect::none();
             }
         }
     };
     let (target, body) = prepared;
-    let Some(asker) = persona_did(ctx.config, target.persona) else {
-        return status(
-            ctx,
+    let Some(asker) = persona_did(config, target.persona) else {
+        show(
+            state,
             Status::error("The persona the directory would be searched as is not available."),
         );
+        return VettingEffect::none();
     };
-    if !begin(ctx) {
-        return;
+    if !claimable(state, busy) {
+        return VettingEffect::none();
     }
+    const WHAT: &str = "Could not search the directory";
     let document = match wire::vetter_list_request(&asker, &target.community, &body) {
         Ok(d) => d,
-        Err(e) => return abandon(ctx, "Could not search the directory", e),
+        Err(e) => {
+            give_up(state, config, WHAT, e);
+            return VettingEffect::none();
+        }
     };
     let document_id = document.id.clone();
-    ctx.config.private.vetting.ask(CommunityQuery {
+    config.private.vetting.ask(CommunityQuery {
         document_id: document_id.clone(),
         community: target.community.clone(),
         persona: target.persona,
         kind: QueryKind::VetterList,
         sent_at: Utc::now(),
     });
-    if let VettingMode::Directory(view) = &mut page(ctx).mode {
+    if let VettingMode::Directory(view) = &mut panel(state).mode {
         view.pending = Some(document_id.clone());
         view.pending_cursors = Some(cursors);
         view.error = None;
     }
-    status(
-        ctx,
+    show(
+        state,
         Status::progress(format!("Asking {} for its vetter directory…", target.name)),
     );
     let sent = Sent::Query {
@@ -524,42 +579,52 @@ pub(super) async fn search_directory(ctx: &mut ActionCtx<'_>, cursors: Vec<Optio
         community: target.community.clone(),
         kind: QueryKind::VetterList,
     };
-    if let Err(e) = sign_and_send(ctx, target.persona, document, sent, Claim::Held).await {
-        ctx.config.private.vetting.forget_query(&document_id);
-        if let VettingMode::Directory(view) = &mut page(ctx).mode {
-            view.pending = None;
-            view.pending_cursors = None;
-        }
-        abandon(ctx, "Could not search the directory", e);
-    }
+    VettingEffect::sign_and_send(
+        [],
+        target.persona,
+        document,
+        sent,
+        Claim::Held,
+        Abort::undoing(
+            WHAT,
+            vec![Undo::ForgetQuery(document_id), Undo::DirectoryNotPending],
+        ),
+    )
 }
 
-pub(super) async fn directory_page(ctx: &mut ActionCtx<'_>, forward: bool) {
-    let (mut cursors, next) = match &page(ctx).mode {
+pub(super) fn plan_directory_page(
+    state: &mut State,
+    config: &mut Config,
+    busy: bool,
+    forward: bool,
+) -> VettingEffect {
+    let (mut cursors, next) = match &panel(state).mode {
         VettingMode::Directory(view) if view.pending.is_none() => {
             (view.cursors.clone(), view.next_cursor.clone())
         }
-        _ => return,
+        _ => return VettingEffect::none(),
     };
     if forward {
         let Some(next) = next else {
-            return status(ctx, Status::warning("That is the last page."));
+            show(state, Status::warning("That is the last page."));
+            return VettingEffect::none();
         };
         cursors.push(Some(next));
     } else {
         if cursors.len() <= 1 {
-            return status(ctx, Status::warning("This is the first page."));
+            show(state, Status::warning("This is the first page."));
+            return VettingEffect::none();
         }
         cursors.pop();
     }
-    search_directory(ctx, cursors).await;
+    plan_search_directory(state, config, busy, cursors)
 }
 
 /// Open the request form for the highlighted directory vetter. The directory
 /// finds a vetter; it does not let anyone skip the ticket, so the form says
 /// how this vetter hands them out.
-pub(super) fn ask_listed_vetter(ctx: &mut ActionCtx<'_>) {
-    let v = page(ctx);
+pub(super) fn ask_listed_vetter(state: &mut State) {
+    let v = panel(state);
     let VettingMode::Directory(view) = &v.mode else {
         return;
     };
@@ -574,8 +639,8 @@ pub(super) fn ask_listed_vetter(ctx: &mut ActionCtx<'_>) {
         return;
     };
     let Some(application_id) = target.application_id.clone() else {
-        return status(
-            ctx,
+        return show(
+            state,
             Status::warning(format!(
                 "To ask {} you need an application to {} — start one on the Applications tab (n), \
                  then find them here again.",
@@ -587,7 +652,7 @@ pub(super) fn ask_listed_vetter(ctx: &mut ActionCtx<'_>) {
         Some(hint) => format!("they say: {hint}"),
         None => "they have not said how, so ask them".to_string(),
     };
-    let v = page(ctx);
+    let v = panel(state);
     v.mode = VettingMode::RequestVetter {
         application_id,
         entry: String::new(),
@@ -609,28 +674,23 @@ pub(super) fn ask_listed_vetter(ctx: &mut ActionCtx<'_>) {
 /// was sent to the community and there is nothing to withdraw from it. What the
 /// message says instead is the part that is *not* tidied — a vetter who already
 /// accepted a request still holds it, and this cannot reach them.
-pub(super) fn abandon_application(ctx: &mut ActionCtx<'_>) {
-    let VettingMode::ConfirmAbandon { application_id } = page(ctx).mode.clone() else {
-        return;
+pub(super) fn plan_abandon_application(state: &mut State, config: &mut Config) -> VettingEffect {
+    let VettingMode::ConfirmAbandon { application_id } = panel(state).mode.clone() else {
+        return VettingEffect::none();
     };
-    let Some(app) = ctx
-        .config
-        .private
-        .vetting
-        .abandon_application(&application_id)
-    else {
-        back(page(ctx));
-        return status(ctx, Status::warning("That application is already gone."));
+    let Some(app) = config.private.vetting.abandon_application(&application_id) else {
+        back(panel(state));
+        show(state, Status::warning("That application is already gone."));
+        return VettingEffect::none();
     };
-    let community = community_display(ctx.config, &app.community);
+    let community = community_display(config, &app.community);
     let asked = app.requests.len();
-    back(page(ctx));
-    ctx.state.main_page.content_panel.vetting.selected = 0;
-    ctx.state.main_page.sync_from_config(ctx.config);
-    ctx.save.mark_dirty();
-    status(
-        ctx,
-        Status::success(if asked == 0 {
+    back(panel(state));
+    panel(state).selected = 0;
+    state.main_page.sync_from_config(config);
+    VettingEffect(vec![
+        Step::MarkDirty,
+        Step::Status(Status::success(if asked == 0 {
             format!("Abandoned your application to {community}.")
         } else {
             format!(
@@ -640,8 +700,8 @@ pub(super) fn abandon_application(ctx: &mut ActionCtx<'_>) {
                 if asked == 1 { "" } else { "s" },
                 if asked == 1 { "s" } else { "" }
             )
-        }),
-    );
+        })),
+    ])
 }
 
 #[cfg(test)]
@@ -679,5 +739,290 @@ mod tests {
         assert!(line.contains("· named vetting ·"), "{line}");
         let note = note.expect("named where PCS ZKP is on offer is explained");
         assert!(note.contains("also accepts PCS ZKP"), "{note}");
+    }
+
+    // ---- the plans: pure, so no runtime ----
+
+    use crate::state_handler::background_dispatch::{DispatchDomain, InFlight};
+    use crate::state_handler::dispatch_util::test_config;
+    use crate::state_handler::main_page::content::VettingPersona;
+    use crate::state_handler::main_page::status::Severity;
+
+    const VTC: &str = "did:web:vtc.example";
+
+    /// A config holding one application to [`VTC`], shown on the page.
+    fn applying() -> (State, Config, String, PersonaId) {
+        let mut config = test_config();
+        let persona = PersonaId::new();
+        let id = config
+            .private
+            .vetting
+            .start_application(VTC, persona, "did:key:zApplicant", Utc::now())
+            .unwrap()
+            .id
+            .clone();
+        let mut state = State::default();
+        state.main_page.sync_from_config(&config);
+        (state, config, id, persona)
+    }
+
+    fn status(state: &mut State) -> Status {
+        panel(state).status_message.clone().expect("a status")
+    }
+
+    fn busy_refusal() -> Status {
+        Status::warning(InFlight::busy_message(DispatchDomain::Vetting))
+    }
+
+    /// The signing and the send at the end of `effect`: who signs, and how a
+    /// failure of either gives up.
+    fn signed_send(effect: &VettingEffect) -> (PersonaId, &Sent, &Abort) {
+        let [.., sign, send] = effect.0.as_slice() else {
+            panic!("a signing and a send");
+        };
+        let Step::Sign {
+            persona,
+            abort: sign_abort,
+            ..
+        } = sign
+        else {
+            panic!("the signing comes first");
+        };
+        let Step::Send { sent, claim, abort } = send else {
+            panic!("then the send");
+        };
+        assert!(
+            matches!(claim, Claim::Held),
+            "a person's send holds the domain"
+        );
+        assert_eq!(sign_abort, abort, "either failing gives up the same way");
+        (*persona, sent, abort)
+    }
+
+    #[test]
+    fn a_refresh_on_a_busy_domain_is_refused_before_anything_is_built() {
+        let (mut state, config, id, _) = applying();
+        let effect = plan_refresh_requirements(&mut state, &config, true, &id);
+        assert!(effect.0.is_empty());
+        assert_eq!(status(&mut state), busy_refusal());
+    }
+
+    #[test]
+    fn a_refresh_signs_and_sends_a_manifest_question_as_the_applicant() {
+        let (mut state, config, id, persona) = applying();
+        let effect = plan_refresh_requirements(&mut state, &config, false, &id);
+        assert_eq!(effect.0.len(), 2);
+        let (signer, sent, abort) = signed_send(&effect);
+        assert_eq!(signer, persona);
+        assert!(matches!(sent, Sent::Manifest { community } if community == VTC));
+        assert_eq!(abort, &Abort::say("Could not ask the community"));
+        assert_eq!(
+            status(&mut state),
+            Status::progress("Asking the community what it requires…")
+        );
+        // Filed by the send, once signed — not by the plan.
+        assert!(config.private.vetting.queries.is_empty());
+    }
+
+    #[test]
+    fn starting_an_application_records_it_then_saves_before_the_followup() {
+        let mut config = test_config();
+        let mut state = State::default();
+        let persona = PersonaId::new();
+        panel(&mut state).personas = vec![VettingPersona {
+            persona,
+            did: "did:key:zApplicant".into(),
+            label: "me".into(),
+        }]
+        .into();
+        let effect =
+            plan_start_application(&mut state, &mut config, VTC, 0, Some("openvtc/vtc".into()));
+        let app = &config.private.vetting.applications[0];
+        assert_eq!(app.context_id.as_deref(), Some("openvtc/vtc"));
+        let [Step::Persist(message), Step::Then(followup)] = effect.0.as_slice() else {
+            panic!("a save, then the followup");
+        };
+        assert!(message.starts_with("Application started."), "{message}");
+        assert_eq!(
+            followup,
+            &Followup::Started {
+                application_id: app.id.clone()
+            }
+        );
+        assert!(matches!(panel(&mut state).mode, VettingMode::List));
+        assert_eq!(panel(&mut state).tab, VettingTab::Applications);
+    }
+
+    #[test]
+    fn the_started_followup_selects_the_row_then_plans_the_refresh() {
+        let (mut state, mut config, _, _) = applying();
+        let second = config
+            .private
+            .vetting
+            .start_application(
+                "did:web:other.example",
+                PersonaId::new(),
+                "did:key:zB",
+                Utc::now(),
+            )
+            .unwrap()
+            .id
+            .clone();
+        state.main_page.sync_from_config(&config);
+        let effect = plan_started(&mut state, &config, true, &second);
+        let v = panel(&mut state);
+        assert_eq!(v.applications[v.selected].id, second);
+        assert!(effect.0.is_empty(), "the refresh is refused as busy");
+        assert_eq!(status(&mut state), busy_refusal());
+    }
+
+    fn code_ticket() -> request::v0_1::Ticket {
+        request::v0_1::Ticket::ShortCodeTicket(
+            request::v0_1::ShortCodeTicket::try_from(
+                request::v0_1::ShortCodeTicket::builder().code("0000-0000"),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_request_on_a_busy_domain_records_nothing() {
+        let (mut state, mut config, id, _) = applying();
+        let effect = plan_request_vetter(
+            &mut state,
+            &mut config,
+            true,
+            &id,
+            "",
+            "did:key:zVetter",
+            Some(code_ticket()),
+        );
+        assert!(effect.0.is_empty());
+        assert_eq!(status(&mut state), busy_refusal());
+        assert!(config.private.vetting.applications[0].requests.is_empty());
+    }
+
+    #[test]
+    fn a_request_is_recorded_saved_signed_and_sent_and_forgotten_if_unsent() {
+        let (mut state, mut config, id, persona) = applying();
+        panel(&mut state).mode = VettingMode::RequestVetter {
+            application_id: id.clone(),
+            entry: String::new(),
+            vetter: "did:key:zVetter".into(),
+            ticket: None,
+            note: None,
+        };
+        let effect = plan_request_vetter(
+            &mut state,
+            &mut config,
+            false,
+            &id,
+            "",
+            "did:key:zVetter",
+            Some(code_ticket()),
+        );
+        let requests = &config.private.vetting.applications[0].requests;
+        assert_eq!(requests.len(), 1);
+        let document_id = requests[0].document_id.clone();
+        assert!(matches!(
+            effect.0.first(),
+            Some(Step::Persist(m)) if m == "Sending your request…"
+        ));
+        assert_eq!(effect.0.len(), 3);
+        let (signer, sent, abort) = signed_send(&effect);
+        assert_eq!(signer, persona);
+        assert!(matches!(sent, Sent::Request { vetter, .. } if vetter == "did:key:zVetter"));
+        assert_eq!(
+            abort,
+            &Abort::undoing(
+                "Could not send the request",
+                vec![Undo::ForgetUnsent {
+                    application_id: id,
+                    document_id,
+                }],
+            )
+        );
+        assert!(matches!(panel(&mut state).mode, VettingMode::List));
+    }
+
+    #[test]
+    fn a_request_with_no_link_is_refused_before_the_busy_check() {
+        let (mut state, mut config, id, _) = applying();
+        let effect = plan_request_vetter(&mut state, &mut config, true, &id, "", "", None);
+        assert!(effect.0.is_empty());
+        let s = status(&mut state);
+        assert_eq!(s.severity, Severity::Warning);
+        assert!(s.text.starts_with("Paste the link"), "{}", s.text);
+    }
+
+    #[test]
+    fn abandoning_removes_the_application_then_marks_the_save_and_says_so() {
+        let (mut state, mut config, id, _) = applying();
+        panel(&mut state).mode = VettingMode::ConfirmAbandon { application_id: id };
+        panel(&mut state).selected = 2;
+        let effect = plan_abandon_application(&mut state, &mut config);
+        assert!(config.private.vetting.applications.is_empty());
+        assert!(panel(&mut state).applications.is_empty(), "synced");
+        assert_eq!(panel(&mut state).selected, 0);
+        let [Step::MarkDirty, Step::Status(said)] = effect.0.as_slice() else {
+            panic!("the save marked, then the status");
+        };
+        assert_eq!(
+            said,
+            &Status::success(format!("Abandoned your application to {VTC}."))
+        );
+    }
+
+    #[test]
+    fn switching_path_saves_what_the_application_now_uses() {
+        let (book, community) = first_vtc_book();
+        let mut config = test_config();
+        config.private.vetting = book;
+        let id = config
+            .private
+            .vetting
+            .start_application(&community, PersonaId::new(), "did:key:zA", Utc::now())
+            .unwrap()
+            .id
+            .clone();
+        config
+            .private
+            .vetting
+            .adopt_known_requirements(&id)
+            .unwrap();
+        let mut state = State::default();
+        state.main_page.sync_from_config(&config);
+        let effect = plan_switch_vetting_path(&mut state, &mut config);
+        let [Step::Persist(message)] = effect.0.as_slice() else {
+            panic!("a save");
+        };
+        assert_eq!(
+            message,
+            "This application now uses criterion vetted-member with named vetting."
+        );
+    }
+
+    #[test]
+    fn a_directory_search_as_a_persona_not_held_is_refused_before_the_busy_check() {
+        use crate::state_handler::main_page::content::DirectoryCommunity;
+        let (mut state, mut config, _, _) = applying();
+        let persona = PersonaId::new();
+        let v = panel(&mut state);
+        v.directory_communities = vec![DirectoryCommunity {
+            community: VTC.into(),
+            name: "VTC".into(),
+            accent: None,
+            persona,
+            application_id: None,
+        }]
+        .into();
+        v.mode = VettingMode::Directory(Box::default());
+        let effect = plan_search_directory(&mut state, &mut config, true, vec![None]);
+        assert!(effect.0.is_empty());
+        assert_eq!(
+            status(&mut state),
+            Status::error("The persona the directory would be searched as is not available.")
+        );
+        assert!(config.private.vetting.queries.is_empty());
     }
 }
