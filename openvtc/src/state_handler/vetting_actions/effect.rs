@@ -26,6 +26,11 @@ use crate::state_handler::background_dispatch::DispatchDomain;
 use crate::state_handler::main_page::content::VettingMode;
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::state::State;
+// Hidden vetting
+use super::desk::refresh_vetter_side;
+use super::pcs::{self, PcsAnswer, PcsStart};
+use super::send::{sign_and_send, spawn_send};
+use affinidi_tdk::didcomm::Message;
 
 /// The steps a planned action still owes, in the order they run.
 #[derive(Default)]
@@ -89,6 +94,61 @@ pub(super) enum Step {
     },
     /// Plan the rest on the state and book as the steps before left them.
     Then(Followup),
+    // Hidden vetting
+    /// Sign `document` as `persona` and send it as the client's own step
+    /// ([`Claim::Unheld`]). A failure is said as `"{failed}: {error}"` in the
+    /// status line, and the steps after it still run.
+    SendOrSay {
+        persona: PersonaId,
+        document: Box<Document>,
+        sent: Box<Sent>,
+        failed: &'static str,
+    },
+    /// Hand an unsigned `message` from `from` to `to` to a background job,
+    /// held as `claim` says ([`spawn_send`]).
+    SendMessage {
+        message: Box<Message>,
+        from: String,
+        to: String,
+        sent: Box<Sent>,
+        claim: Claim,
+    },
+    /// Start the job at the VTA [`plan_pcs_work`](super::pcs::plan_pcs_work)
+    /// planned, claiming the hidden-vetting domain ([`pcs::start`]). `commit`
+    /// is applied once it started; `refused` is said when it did not.
+    StartPcs {
+        start: PcsStart,
+        commit: Option<PcsCommit>,
+        refused: Option<Status>,
+    },
+    /// Run the vetter side's pass: each community's requirements read again,
+    /// and what its hidden-vetting schedule owes
+    /// ([`refresh_vetter_side`], awaited).
+    RefreshVetterSide,
+    /// Plan one of a PCS job's answers on the state and book as the steps
+    /// before left them ([`pcs::plan_pcs_answer`]), and run its steps next.
+    PcsAnswer(Box<PcsAnswer>),
+}
+
+/// What a started job at the VTA changes on the page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum PcsCommit {
+    /// The VTA is making a hidden attestation: back to the list, saying so.
+    Attesting,
+}
+
+impl PcsCommit {
+    fn apply(self, state: &mut State) {
+        match self {
+            PcsCommit::Attesting => {
+                panel(state).mode = VettingMode::List;
+                show(
+                    state,
+                    Status::progress("Your VTA is making the attestation — it names nobody…"),
+                );
+            }
+        }
+    }
 }
 
 /// A plan made only once the steps before it have run, because it reads what
@@ -217,6 +277,60 @@ pub(super) async fn run(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
                     steps.push_front(step);
                 }
             }
+            // Hidden vetting
+            Step::SendOrSay {
+                persona,
+                document,
+                sent,
+                failed,
+            } => {
+                if let Err(e) = sign_and_send(ctx, persona, *document, *sent, Claim::Unheld).await {
+                    show(ctx.state, Status::error(format!("{failed}: {e}")));
+                }
+            }
+            Step::SendMessage {
+                message,
+                from,
+                to,
+                sent,
+                claim,
+            } => spawn_send(ctx, *message, &from, &to, *sent, claim),
+            Step::StartPcs {
+                start,
+                commit,
+                refused,
+            } => {
+                if pcs::start(ctx, start) {
+                    if let Some(commit) = commit {
+                        commit.apply(ctx.state);
+                    }
+                } else if let Some(refused) = refused {
+                    show(ctx.state, refused);
+                }
+            }
+            // Boxed: the pass is a long future of its own, and boxing keeps
+            // this one small should the pass ever run an effect in turn.
+            Step::RefreshVetterSide => Box::pin(refresh_vetter_side(ctx)).await,
+            Step::PcsAnswer(answer) => {
+                let VettingEffect(next) = pcs::plan_pcs_answer(ctx.state, ctx.config, *answer);
+                for step in next.into_iter().rev() {
+                    steps.push_front(step);
+                }
+            }
+        }
+    }
+}
+
+/// Run an effect of local steps — [`Step::Persist`], [`Step::MarkDirty`],
+/// [`Step::Status`] — without awaiting, for a plan made inside a synchronous
+/// pass ([`hidden_vetting_tick`](super::hidden::hidden_vetting_tick)).
+pub(super) fn run_local(ctx: &mut ActionCtx<'_>, effect: VettingEffect) {
+    for step in effect.0 {
+        match step {
+            Step::Persist(message) => persist(ctx, message),
+            Step::MarkDirty => ctx.save.mark_dirty(),
+            Step::Status(message) => show(ctx.state, message),
+            _ => debug_assert!(false, "a step that awaits, run without awaiting"),
         }
     }
 }
