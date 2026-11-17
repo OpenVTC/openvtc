@@ -476,7 +476,7 @@ fn plan_recovery(
                 RecoverRefusal::Refused {
                     code: "unreadable".to_string(),
                     message: format!(
-                        "this client and your VTA disagree about vta/pcs/vetter/recover — update                          one or the other ({e})"
+                        "this client and your VTA disagree about vta/pcs/vetter/recover — update one or the other ({e})"
                     ),
                 },
                 now,

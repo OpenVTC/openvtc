@@ -243,6 +243,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ([#614](https://github.com/OpenVTC/openvtc/pull/614)). Attesting the hidden way with no
   VTA session said the hidden-vetting work was busy. It now says the VTA is not connected
   and the request stays open; "busy" is said only when the VTA is busy.
+- **Six messages no longer show a long run of spaces mid-sentence**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). A line of text wrapped in the
+  source without its trailing `\` carried the next line's indentation into the message:
+  the hidden-vetting key-recovery mismatch, the identity panel's "worlds apart" warning,
+  three wallet join messages (session expired, unreadable answer, no answer) and the
+  unreadable directory-disclosure failure. A source check now catches the mistake.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

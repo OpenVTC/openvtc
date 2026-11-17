@@ -2353,7 +2353,7 @@ impl JoinDriver {
             ctx.state.join.page = JoinPage::Progress;
             ctx.state.join.messages.clear();
             ctx.state.join.fail(format!(
-                "{name} published a statement of what its member directory would show about                  you, and it could not be read ({}). Nothing has been sent: joining without                  seeing it is not offered. Ask the community to fix it, then try again.",
+                "{name} published a statement of what its member directory would show about you, and it could not be read ({}). Nothing has been sent: joining without seeing it is not offered. Ask the community to fix it, then try again.",
                 sanitize_display(why, 200)
             ));
             return;
