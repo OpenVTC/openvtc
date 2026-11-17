@@ -23,7 +23,7 @@ use openvtc_core::vetting::wire;
 
 use super::desk::session_id_of;
 use super::dispatch::{panel, show};
-use super::effect::{Abort, PcsCommit, Step, VettingEffect, run, run_local};
+use super::effect::{Abort, PcsCommit, Step, Undo, VettingEffect, run, run_local};
 use super::jobs::Sent;
 use super::pcs::plan_pcs_work;
 use super::send::{Claim, give_up, persona_did};
@@ -50,8 +50,8 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
 }
 
 /// Plan [`ask_for_challenge`]: file the question and say so; the effect signs and sends it as
-/// the client's own step, never refused for a busy domain. The question stays filed when the
-/// signing fails, and expires on its reply window.
+/// the client's own step, never refused for a busy domain. A signing or send that fails
+/// un-files the question, as a send that fails off the loop does.
 pub(super) fn plan_ask_for_challenge(
     state: &mut State,
     config: &mut Config,
@@ -87,7 +87,7 @@ pub(super) fn plan_ask_for_challenge(
         Status::progress("Asking the community for a submission challenge…"),
     );
     let sent = Sent::Query {
-        document_id,
+        document_id: document_id.clone(),
         community: app.community.clone(),
         kind: QueryKind::PcsChallenge,
     };
@@ -97,7 +97,7 @@ pub(super) fn plan_ask_for_challenge(
         document,
         sent,
         Claim::Unheld,
-        Abort::say(CHALLENGE_FAILED),
+        Abort::undoing(CHALLENGE_FAILED, vec![Undo::ForgetQuery(document_id)]),
     )
 }
 
@@ -641,8 +641,12 @@ mod tests {
             panic!("signed, then sent unheld");
         };
         assert_eq!(*signer, persona);
-        // Nothing is undone: the question stays filed until its window.
-        assert_eq!(abort, &Abort::say(CHALLENGE_FAILED));
+        // A failure before it goes out un-files the question.
+        let filed = config.private.vetting.queries[0].document_id.clone();
+        assert_eq!(
+            abort,
+            &Abort::undoing(CHALLENGE_FAILED, vec![Undo::ForgetQuery(filed)])
+        );
         assert_eq!(same, abort);
     }
 

@@ -2785,7 +2785,7 @@ mod hidden {
     // ---- the submission challenge ----
 
     #[tokio::test]
-    async fn a_challenge_without_keys_gives_up_and_leaves_its_question_filed() {
+    async fn a_challenge_without_keys_gives_up_and_unfiles_its_question() {
         let (mut rt, _h) = runtime().await;
         let persona = persona_without_keys(&mut rt, "did:key:zApplicant").await;
         hidden_application(&mut rt, persona);
@@ -2799,9 +2799,9 @@ mod hidden {
             "the requirements are asked for first"
         );
         assert!(!asked(&rt, QueryKind::Manifest));
-        // Filed before the signing and left filed when it fails: it expires
-        // on its reply window.
-        assert!(asked(&rt, QueryKind::PcsChallenge));
+        // Filed before the signing and un-filed when it fails: nothing waits
+        // on a question that never went.
+        assert!(!asked(&rt, QueryKind::PcsChallenge));
         assert!(!rt.save.is_pending());
     }
 

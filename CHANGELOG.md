@@ -235,6 +235,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   to build after the request was prepared, the prepared request stayed in the
   application as though sent. It is now forgotten, as it already was when the signing or
   the send failed.
+- **Vetting: a submission-challenge request that cannot be signed is un-filed**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). When the persona's key lookup or
+  signing failed, the challenge question stayed filed as though asked until its reply
+  window ran out. It is now un-filed, as it already was when the send failed.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard
