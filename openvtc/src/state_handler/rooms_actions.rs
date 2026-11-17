@@ -380,6 +380,10 @@ fn open(state: &mut State, config: &Config, index: usize) {
     state.main_page.content_panel.rooms.view = Some(RoomsView::new(vtc, persona, me, name));
 }
 
+/// An acceptance pressed while the view still waits on an earlier request.
+const ACCEPT_WAITING: &str =
+    "A request to this community is still waiting — try again when it answers.";
+
 /// `⏎` on a room: accept its offer, or finish an acceptance begun elsewhere.
 fn plan_accept(state: &mut State, has_vta: bool) -> RoomsEffect {
     let Some(view) = view_mut(state) else {
@@ -450,17 +454,10 @@ fn plan_accept(state: &mut State, has_vta: bool) -> RoomsEffect {
         community_rooms::display_label(&row.room)
     );
     if view.pending.is_some() {
-        // The view still waits on an earlier request, so the offers read is
-        // not sent; the acceptance is set regardless and said to be waiting.
-        view.accept = Some(AcceptFlow {
-            room,
-            step: AcceptStep::Collecting,
-            offer: None,
-        });
-        view.note(
-            Severity::Warning,
-            "Still waiting for the community's answer.",
-        );
+        // The view still waits on an earlier request: one request to a
+        // community at a time, so the press is refused and nothing is set,
+        // leaving it to be pressed again, as Elections refuses.
+        view.note(Severity::Warning, ACCEPT_WAITING);
         return RoomsEffect::done();
     }
     // Not sent (lane busy): the press is dropped with the busy message, to be
@@ -1400,21 +1397,18 @@ mod tests {
         assert!(view.status.is_none());
     }
 
-    /// An acceptance while an earlier request is unanswered sends nothing, and
-    /// is left set saying it waits.
+    /// An acceptance while an earlier request is unanswered sends nothing,
+    /// sets nothing and says to try again.
     #[test]
-    fn an_accept_while_waiting_is_planned_with_nothing_to_send() {
+    fn an_accept_while_waiting_is_refused_with_nothing_set() {
         let mut state = with_offered_room();
         arm(&mut state, Purpose::Memberships);
         let config = crate::state_handler::dispatch_util::test_config();
         let effect = plan(&mut state, &config, true, Act::Accept);
         assert!(effect.steps.is_empty());
         let view = view_mut(&mut state).unwrap();
-        assert!(view.accept.is_some());
-        assert_eq!(
-            view.status.as_ref().unwrap().text,
-            "Still waiting for the community's answer."
-        );
+        assert!(view.accept.is_none());
+        assert_eq!(view.status.as_ref().unwrap().text, ACCEPT_WAITING);
     }
 
     /// Without a VTA a refresh says why the custody is not shown and reads only

@@ -213,6 +213,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ([#614](https://github.com/OpenVTC/openvtc/pull/614)). When the persona's key lookup or
   the request failed, the "busy" note replaced the real reason; the reason is now shown,
   and "busy" only when the lane is busy.
+- **Rooms: accepting while a request is still unanswered is refused, not left stuck**
+  ([#614](https://github.com/OpenVTC/openvtc/pull/614)). The acceptance was set to
+  "Collecting" with nothing sent, and stayed there. The press now changes nothing and
+  says "A request to this community is still waiting — try again when it answers.",
+  as Elections refuses the same case.
 - **A vetting send no longer starts alongside one already running**
   ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
   its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard

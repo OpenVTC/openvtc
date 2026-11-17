@@ -245,10 +245,11 @@ async fn an_accept_without_a_vta_is_refused() {
     assert!(!rt.in_flight.is_busy(DispatchDomain::Rooms));
 }
 
-/// An acceptance pressed while the view still waits on an earlier request
-/// says so — and leaves the acceptance set, with no request behind it.
+/// An acceptance pressed while the view still waits on an earlier request is
+/// refused: nothing is set, nothing sent, and the press can be made again once
+/// the earlier request answers.
 #[tokio::test]
-async fn an_accept_while_waiting_leaves_the_acceptance_set() {
+async fn an_accept_while_waiting_is_refused_and_can_be_pressed_again() {
     let mut rt = with_keys().await;
     connect_vta(&mut rt);
     open_quietly(&mut rt).await;
@@ -264,18 +265,24 @@ async fn an_accept_while_waiting_leaves_the_acceptance_set() {
     rt.on_action(Action::Rooms(Act::Accept)).await;
 
     let v = view(&mut rt);
-    let flow = v.accept.as_ref().expect("the acceptance is left set");
-    assert_eq!(flow.room, ROOM);
-    assert_eq!(flow.step, AcceptStep::Collecting);
+    assert!(v.accept.is_none());
     assert_eq!(v.pending, Some(earlier));
     assert_eq!(
         status(&mut rt),
         Some((
             Severity::Warning,
-            "Still waiting for the community's answer.".into()
+            "A request to this community is still waiting — try again when it answers.".into()
         ))
     );
     assert!(!rt.in_flight.is_busy(DispatchDomain::Rooms));
+
+    // The earlier request answers; the same press now starts the acceptance.
+    view(&mut rt).pending = None;
+    rt.on_action(Action::Rooms(Act::Accept)).await;
+    assert!(rt.in_flight.is_busy(DispatchDomain::Rooms));
+    armed_on(&mut rt, &Purpose::Offers { room: ROOM.into() });
+    let flow = view(&mut rt).accept.clone().expect("the acceptance is set");
+    assert_eq!(flow.step, AcceptStep::Collecting);
 }
 
 /// An acceptance whose key lookup fails says why, not that the lane is busy
