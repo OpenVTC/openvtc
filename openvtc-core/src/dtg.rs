@@ -125,8 +125,9 @@ pub fn nonconformance(value: &Value) -> Option<String> {
 
 /// The roles a **community role credential** confers: a VAC (`AuthorityCredential`)
 /// the community issued in its own scope — `authority.scope` is its `issuer`,
-/// `issuerScope` is `public`, no `authority.parent` — carrying `role:<name>`
-/// actions. `None` for anything else, including a VAC someone attenuated.
+/// `issuerScope` is `directed` or `public` (a community is `directed` at
+/// minimum, `public` where it is open to outsiders), no `authority.parent` —
+/// carrying `role:<name>` actions. `None` for anything else, including a VAC someone attenuated.
 ///
 /// This is the shape `vtc/join-requests/decide`, `vtc/members/*` and
 /// `vtc/vetting/vetters/grant` deliver a role in, and the one
@@ -134,7 +135,7 @@ pub fn nonconformance(value: &Value) -> Option<String> {
 #[must_use]
 pub fn community_roles(credential: &DTGCredential) -> Option<Vec<String>> {
     if credential.type_() != DTGCredentialType::Authority
-        || credential.issuer_scope() != IssuerScope::Public
+        || !credential.issuer_scope().satisfies(IssuerScope::Directed)
     {
         return None;
     }
@@ -313,8 +314,18 @@ pub(crate) mod fixtures {
 
     /// A community-issued VMC (`issuerScope` public), unsigned.
     pub(crate) fn grant(community: &str, member: &str) -> Value {
+        grant_scoped(community, dtg_credentials::IssuerScope::Public, member)
+    }
+
+    /// [`grant`], the community declaring `scope`.
+    pub(crate) fn grant_scoped(
+        community: &str,
+        scope: dtg_credentials::IssuerScope,
+        member: &str,
+    ) -> Value {
         serde_json::to_value(DTGCredential::new_vmc(
             community.to_string(),
+            scope,
             member.to_string(),
             Utc::now() - Duration::minutes(1),
             Some(Utc::now() + Duration::days(365)),
@@ -325,9 +336,25 @@ pub(crate) mod fixtures {
 
     /// A community role VAC conferring `role:<role>`, unsigned.
     pub(crate) fn role_vac(community: &str, member: &str, role: &str) -> Value {
+        role_vac_scoped(
+            community,
+            dtg_credentials::IssuerScope::Public,
+            member,
+            role,
+        )
+    }
+
+    /// [`role_vac`], the community declaring `scope`.
+    pub(crate) fn role_vac_scoped(
+        community: &str,
+        scope: dtg_credentials::IssuerScope,
+        member: &str,
+        role: &str,
+    ) -> Value {
         serde_json::to_value(
             DTGCredential::new_community_role_vac(
                 community.to_string(),
+                scope,
                 member.to_string(),
                 role,
                 Utc::now() - Duration::minutes(1),
@@ -447,6 +474,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(community_roles(&other), None);
+    }
+
+    /// A community is `directed` at minimum, `public` where it is open to
+    /// outsiders: a role VAC declaring either names its roles, and one
+    /// declaring `pairwise` is not a community role grant.
+    #[test]
+    fn a_community_role_vac_may_declare_directed_or_public() {
+        for scope in [IssuerScope::Directed, IssuerScope::Public] {
+            let vac = fixtures::role_vac_scoped("did:example:c", scope, "did:example:m", "vetter");
+            assert_eq!(vac["issuerScope"], scope.as_str());
+            let parsed = parse_conformant(&vac).unwrap();
+            assert_eq!(
+                community_roles(&parsed),
+                Some(vec!["vetter".to_string()]),
+                "{scope}"
+            );
+        }
+        let pairwise = DTGCredential::new_vac(
+            "did:example:c".into(),
+            IssuerScope::Pairwise,
+            "did:example:m".into(),
+            "did:example:c".into(),
+            vec!["role:vetter".into()],
+            chrono::Utc::now(),
+            chrono::Utc::now() + chrono::Duration::days(1),
+        )
+        .unwrap();
+        assert_eq!(community_roles(&pairwise), None);
     }
 
     /// A `vetted/1` value: a vetter's (all three vetter-only members) or the

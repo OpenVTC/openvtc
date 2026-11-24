@@ -469,6 +469,7 @@ async fn community_reply(
 async fn role_vac(vtc: &str, key: &Secret) -> serde_json::Value {
     let vac = DTGCredential::new_community_role_vac(
         vtc.to_string(),
+        dtg_credentials::IssuerScope::Public,
         PERSONA.to_string(),
         "member",
         chrono::Utc::now() - chrono::Duration::minutes(1),
