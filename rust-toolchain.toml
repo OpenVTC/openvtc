@@ -1,0 +1,11 @@
+# The compiler every CI job builds with, as in verifiable-trust-infrastructure.
+#
+# Before this file every job ran `rustup toolchain install stable` under
+# `-D warnings`, so a new stable release's lints could turn main red with no
+# code change. The workspace `rust-version` (Cargo.toml) is the MSRV and stays
+# separate: the MSRV job builds with it through `RUSTUP_TOOLCHAIN`, which takes
+# precedence over this file.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

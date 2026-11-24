@@ -39,6 +39,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The Fig release line.** `vta-sdk` 0.92, `affinidi-tdk` 0.49, `affinidi-messaging-sdk`
+  0.50, `trust-tasks` 0.41, `dtg-credentials` 0.15 and `did-git-sign` 0.35 (and the
+  matching VTI test crates), so this release talks to Fig VTAs and VTCs. DIDs are listed
+  through the VTA's method-neutral `vta/dids/list`, so the setup probe sees a context's
+  DIDs of every method and a context deletion's confirmation lists them all, not only
+  did:webvh. Elections read with `vta/pcs/voter/read/0.7`. The build is pinned to Rust
+  1.100.0 (`rust-toolchain.toml`); the minimum supported Rust stays 1.95.0.
 - **A change rebuilds only the panels that show it**
   ([#612](https://github.com/OpenVTC/openvtc/issues/612)): the main page's sync from
   `Config` is split per panel (`sync_panels`), and each caller rebuilds the panels

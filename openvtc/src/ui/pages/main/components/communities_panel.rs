@@ -1491,7 +1491,7 @@ mod key_hint_tests {
                     DeleteContextPreviewResultBody {
                         id: CTX.to_string(),
                         keys: vec!["key-1".to_string()],
-                        webvh_dids: vec!["did:webvh:scid:host:persona".to_string()],
+                        dids: vec!["did:webvh:scid:host:persona".to_string()],
                         acl_entries_removed: vec!["did:key:zLaptop".to_string()],
                         ..Default::default()
                     },

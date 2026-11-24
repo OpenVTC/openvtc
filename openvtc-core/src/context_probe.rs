@@ -117,8 +117,14 @@ impl ProbeOutcome {
 /// authenticated to (D6). Runs on every setup rather than behind a flag,
 /// because a user who needs the answer is by definition not expecting to.
 pub async fn probe(client: &VtaClient, context_id: &str) -> ProbeOutcome {
-    let dids = match client.list_dids_webvh(Some(context_id), None).await {
-        Ok(body) => body.dids,
+    // Every method's identities (`vta/dids/list`): any DID at all means the
+    // context is in use.
+    let filter = vta_sdk::client::DidListFilter {
+        context_id: Some(context_id.to_string()),
+        ..Default::default()
+    };
+    let dids = match client.list_dids(&filter).await {
+        Ok(dids) => dids,
         Err(e) => {
             // The listing OpenVTC most depends on. If this one is refused the
             // probe cannot claim the context is empty, so it says so.
@@ -147,7 +153,7 @@ pub async fn probe(client: &VtaClient, context_id: &str) -> ProbeOutcome {
     };
 
     let contents = ContextContents {
-        persona_dids: dids.into_iter().map(|d| d.did).collect(),
+        persona_dids: dids.into_iter().map(|d| d.did.to_string()).collect(),
         sub_context_count,
     };
 

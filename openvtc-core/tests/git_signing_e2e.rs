@@ -14,7 +14,7 @@ use vta_sdk::client::{ClientIdentity, CreateContextRequest, CreateKeyRequest, Vt
 use vta_sdk::error::VtaError;
 use vta_sdk::keys::KeyType;
 use vta_sdk::provision_client::EphemeralSetupKey;
-use vta_service::test_support::MockVta;
+use vta_test_support::MockVta;
 
 const TOP: &str = "openvtc-acct";
 const ALICE: &str = "openvtc-acct/alice";

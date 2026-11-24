@@ -1012,8 +1012,8 @@ impl StateHandler {
         // Unbounded, deliberately: by the time an event reaches this channel the
         // delivery layer has already acked the message, so a bounded channel's
         // overflow drop destroys a membership credential or join verdict rather
-        // than deferring it (#221). Full rationale on
-        // `didcomm::DIDCOMM_EVENT_CHANNEL_CAPACITY`.
+        // than deferring it (#221). Full rationale in openvtc-core's
+        // `didcomm.rs` ("The DIDComm event channel is unbounded").
         let (didcomm_event_tx, didcomm_event_rx) = mpsc::unbounded_channel();
         let shutdown_token = tokio_util::sync::CancellationToken::new();
         let didcomm_service =

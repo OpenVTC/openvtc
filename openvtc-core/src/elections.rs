@@ -32,7 +32,7 @@
 //!   the persona's key, builds and signs the whole `tickets/issue/0.3` document as the member
 //!   ([`Claim`], [`Registered::Document`]), and this client carries it unchanged. Likewise the
 //!   read of an election put to the members of a party that is itself a member of the
-//!   community, which the community shows nobody else (VTI-VOT-015): `vta/pcs/voter/read/0.6`
+//!   community, which the community shows nobody else (VTI-VOT-015): `vta/pcs/voter/read/0.7`
 //!   signs it with the presentation, offered only for the party the member chose to show
 //!   ([`read_presenting`], VTI-VOT-016). A presentation is made only for the party the roll
 //!   names: [`membership_credential_for`] picks the credential that party itself issued.
@@ -68,7 +68,7 @@ use crate::errors::OpenVTCError;
 use crate::specs::voting::ballot::{cast::v0_1 as cast, cast_encrypted::v0_1 as cast_encrypted};
 use crate::specs::vta::pcs::{
     vote::v0_4 as pcs_vote, vote_encrypted::v0_5 as pcs_vote_encrypted,
-    voter::accept::v0_1 as pcs_accept, voter::read::v0_6 as pcs_read,
+    voter::accept::v0_1 as pcs_accept, voter::read::v0_7 as pcs_read,
     voter::receipt::v0_1 as pcs_receipt, voter::register::v0_5 as pcs_register,
 };
 use crate::specs::vtc::elections::{
@@ -1265,7 +1265,7 @@ fn registered_from(
     }))
 }
 
-/// The `vta/pcs/voter/read/0.6` payload for a `show` that presents `credential`, the member's
+/// The `vta/pcs/voter/read/0.7` payload for a `show` that presents `credential`, the member's
 /// membership credential for `member_of`: the VTA presents it only where `member_of` issued it
 /// (`membershipCredentialMismatch` otherwise), so it never shows a membership unrelated to the
 /// election (VTI-VOT-016).

@@ -23,7 +23,7 @@ use vta_sdk::client::{ClientIdentity, CreateContextRequest, CreateDidWebvhReques
 use vta_sdk::error::VtaError;
 use vta_sdk::protocols::did_management::create::WebvhPathMode;
 use vta_sdk::provision_client::EphemeralSetupKey;
-use vta_service::test_support::MockVta;
+use vta_test_support::MockVta;
 
 const TOP: &str = "openvtc-acct";
 const ACME: &str = "openvtc-acct/acme";
@@ -224,7 +224,7 @@ async fn a_context_deleted_with_its_persona_removes_the_persona_did_first() {
         .await
         .expect("preview the context");
     assert!(
-        preview.contexts[0].webvh_dids.contains(&minted.did),
+        preview.contexts[0].dids.contains(&minted.did),
         "the persona's DID lives in the context: {:?}",
         preview.contexts[0]
     );

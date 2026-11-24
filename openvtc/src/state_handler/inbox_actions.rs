@@ -239,7 +239,7 @@ fn handle_inbox_open_detail(state: &mut State, config: &Config, index: usize) {
             }),
             // Handled above, before a detail view is built.
             TaskKind::Vetting(_) => None,
-            TaskKind::TrustPing | TaskKind::Informational(_) => Some(ActiveTaskView::Info {
+            TaskKind::TrustPing | TaskKind::Informational => Some(ActiveTaskView::Info {
                 task_id: task.id.clone(),
                 type_display: task.type_display.clone(),
                 remote_did: task.remote_did.clone(),

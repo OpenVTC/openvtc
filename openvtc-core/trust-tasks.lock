@@ -214,9 +214,9 @@ digest = "sha256:ad9118f4f87571ac8c787e1fadda7c0e9b1e52157968bc2f5fe0b0509332738
 
 [[task]]
 slug = "vta/pcs/voter/read"
-version = "0.6"
-type_uri = "https://trusttasks.org/spec/vta/pcs/voter/read/0.6"
-digest = "sha256:80c1fa7199868b520fd3b28bd73cb29b2e0354b48fd0b6205c20e08943544619"
+version = "0.7"
+type_uri = "https://trusttasks.org/spec/vta/pcs/voter/read/0.7"
+digest = "sha256:67f1ff858c2c33631ebe48f22f39966cbb4980002b44d88e4b9b4b75bebef117"
 
 [[task]]
 slug = "vta/pcs/voter/receipt"

@@ -35,7 +35,7 @@ use vta_sdk::keys::KeyType;
 use vta_sdk::provision_client::EphemeralSetupKey;
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::trust_task_sign::{HolderKey, sign_in_place_with, sign_object_for_assertion};
-use vta_service::test_support::MockVta;
+use vta_test_support::MockVta;
 
 const CTX: &str = "personal";
 
@@ -266,7 +266,7 @@ impl World {
                     &state.acl_ks,
                     &state.seed_store,
                     &state.audit_sink,
-                    &vta_service::test_support::admin_claims_for_context(CTX),
+                    &vta_test_support::admin_claims_for_context(CTX),
                     &created.key_id,
                     vta_service::operations::keys::ExportChannel::EndToEnd("didcomm"),
                 )

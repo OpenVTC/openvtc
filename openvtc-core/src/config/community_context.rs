@@ -701,7 +701,7 @@ impl ContextDeletionPreview {
     pub fn holds_nothing(&self) -> bool {
         self.contexts.iter().all(|c| {
             c.keys.is_empty()
-                && c.webvh_dids.is_empty()
+                && c.dids.is_empty()
                 && c.acl_entries_removed.is_empty()
                 && c.acl_entries_updated.is_empty()
                 && c.did_templates.is_empty()
@@ -720,7 +720,7 @@ impl ContextDeletionPreview {
             });
             let before = lines.len();
             lines.extend(c.keys.iter().map(|k| format!("  key           {k}")));
-            lines.extend(c.webvh_dids.iter().map(|d| format!("  DID           {d}")));
+            lines.extend(c.dids.iter().map(|d| format!("  DID           {d}")));
             lines.extend(
                 c.acl_entries_removed
                     .iter()
@@ -1305,7 +1305,7 @@ mod tests {
                 DeleteContextPreviewResultBody {
                     id: "openvtc/kernel".into(),
                     keys: vec!["key-1".into()],
-                    webvh_dids: vec!["did:webvh:scid:host:p".into()],
+                    dids: vec!["did:webvh:scid:host:p".into()],
                     acl_entries_removed: vec!["did:key:zDevice".into()],
                     acl_entries_updated: vec!["did:key:zWide".into()],
                     did_templates: vec![],

@@ -312,7 +312,7 @@ fn read_bit(
         .get("credentialSubject")
         .and_then(Value::as_object)
         .ok_or_else(|| "the status list has no credentialSubject".to_string())?;
-    if subject.get("statusPurpose").and_then(Value::as_str) != Some(purpose_str(entry.purpose)) {
+    if subject.get("statusPurpose").and_then(Value::as_str) != Some(entry.purpose.as_str()) {
         return Err("the status list's purpose is not the entry's".into());
     }
     let encoded = subject
@@ -325,7 +325,7 @@ fn read_bit(
         _ => encoded,
     };
     let size = entry.index.saturating_add(1);
-    let decoded = BitstringStatusList::decode(encoded, size, entry.purpose)
+    let decoded = BitstringStatusList::decode(encoded, size, entry.purpose.clone())
         .map_err(|e| format!("the status list does not decode as far as the entry: {e}"))?;
     decoded
         .get(entry.index)
@@ -349,13 +349,6 @@ fn check_window(obj: &serde_json::Map<String, Value>, now: DateTime<Utc>) -> Res
         return Err("the status list has expired".into());
     }
     Ok(())
-}
-
-fn purpose_str(purpose: StatusPurpose) -> &'static str {
-    match purpose {
-        StatusPurpose::Revocation => "revocation",
-        StatusPurpose::Suspension => "suspension",
-    }
 }
 
 #[cfg(test)]

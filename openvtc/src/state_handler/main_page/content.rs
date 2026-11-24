@@ -3739,9 +3739,6 @@ pub struct TaskSummary {
 
 /// Categorizes tasks for UI rendering and determining available actions.
 #[derive(Clone, Debug)]
-// Some variant fields (e.g. `Informational(String)`) are populated but not yet
-// read by the UI — kept for future detail-view rendering.
-#[allow(dead_code)]
 pub enum TaskKind {
     /// Inbound relationship request awaiting accept/reject
     RelationshipRequestInbound {
@@ -3766,8 +3763,9 @@ pub enum TaskKind {
     VRCIssued,
     /// Trust ping awaiting pong
     TrustPing,
-    /// Informational task (accepted, rejected, finalized, etc.)
-    Informational(String),
+    /// Informational task (accepted, rejected, finalized, etc.), shown by the
+    /// summary's `type_display`.
+    Informational,
     /// A step in a vetting exchange that waits on us. Opening it goes to the
     /// page where that step is taken, rather than to a detail view that could
     /// only say it exists.

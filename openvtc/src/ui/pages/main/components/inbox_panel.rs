@@ -108,7 +108,7 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
                 TaskKind::VRCRequestOutbound => "⬆ VRC ",
                 TaskKind::VRCIssued => "📄 VRC ",
                 TaskKind::TrustPing => "🏓 PING",
-                TaskKind::Informational(_) => "ℹ INFO",
+                TaskKind::Informational => "ℹ INFO",
                 TaskKind::Vetting(_) => "✓ VET ",
             };
 
