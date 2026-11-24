@@ -46,6 +46,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   DIDs of every method and a context deletion's confirmation lists them all, not only
   did:webvh. Elections read with `vta/pcs/voter/read/0.7`. The build is pinned to Rust
   1.100.0 (`rust-toolchain.toml`); the minimum supported Rust stays 1.95.0.
+- **A personhood presentation signs its challenge.** `proof.challenge` is now set as a
+  signed proof option rather than added after signing: a Fig VTC (affinidi-data-integrity
+  0.8.3 and later) hashes it with the proof configuration, so an unsigned one failed
+  verification there. The challenge is still also written to `nonce`.
 - **A change rebuilds only the panels that show it**
   ([#612](https://github.com/OpenVTC/openvtc/issues/612)): the main page's sync from
   `Config` is split per panel (`sync_panels`), and each caller rebuilds the panels

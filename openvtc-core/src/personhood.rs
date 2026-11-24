@@ -30,16 +30,17 @@
 //! replayed into another". In W3C Data Integrity that holds because the proof
 //! options are canonicalised with the document, so `challenge` is signed.
 //!
-//! `affinidi_data_integrity` has no `challenge` proof option, and the VTC
-//! verifies over the presentation with the whole `proof` block removed — so a
-//! value written only to `proof.challenge` is **not covered by the
-//! signature**, and swapping it on a captured presentation would go unnoticed.
+//! `affinidi_data_integrity` before 0.8.3 had no `challenge` proof member, so
+//! a value written to `proof.challenge` was **not covered by the signature**
+//! and the VTC required the same value at top-level `nonce`, which is. From
+//! 0.8.3 the proof models `challenge` and every verifier hashes it with the
+//! proof configuration, so [`build_presentation`] now signs it as a proof
+//! option (`SignOptions::with_challenge`): a challenge added after signing
+//! fails verification at a VTC on that line (VTI's Fig release).
 //!
-//! So [`build_presentation`] writes the challenge to `proof.challenge` (what
-//! the spec names) *and* to top-level `nonce` (what the signature actually
-//! covers), and the VTC requires both to agree. Do not "simplify" this by
-//! dropping one: `proof.challenge` alone is unsigned, and `nonce` alone is
-//! off-spec.
+//! The challenge is still written to `nonce` too, because the VTC requires
+//! both to agree. Do not "simplify" this by dropping one: `nonce` alone is
+//! off-spec, and a VTC still checks it.
 
 use std::sync::Arc;
 
@@ -275,8 +276,8 @@ async fn build_challenge_request(
 /// decide; presenting more than it needs discloses more than it needs, so
 /// callers should pass what the community asked for rather than the wallet.
 ///
-/// The challenge is written to both `nonce` and `proof.challenge` — see this
-/// module's header for why neither alone is sufficient.
+/// The challenge is written to both `nonce` and `proof.challenge` (signed as
+/// a proof option) — see this module's header.
 pub async fn build_presentation(
     signing_secret: &Secret,
     member_did: &str,
@@ -301,20 +302,16 @@ pub async fn build_presentation(
         signing_secret,
         SignOptions::new()
             .with_proof_purpose("authentication")
-            .with_cryptosuite(CryptoSuite::EddsaJcs2022),
+            .with_cryptosuite(CryptoSuite::EddsaJcs2022)
+            // Signed with the proof configuration: a verifier on
+            // affinidi-data-integrity >= 0.8.3 hashes it (see the module header).
+            .with_challenge(challenge),
     )
     .await
     .map_err(|e| OpenVTCError::Config(format!("sign personhood presentation: {e}")))?;
 
-    let mut proof_value = serde_json::to_value(&proof)
+    let proof_value = serde_json::to_value(&proof)
         .map_err(|e| OpenVTCError::Config(format!("serialize presentation proof: {e}")))?;
-    // `challenge` is not a field `DataIntegrityProof` carries, so it is
-    // added to the serialised proof rather than set through `SignOptions`.
-    // That is precisely why it is unsigned, and why `nonce` above exists.
-    proof_value
-        .as_object_mut()
-        .ok_or_else(|| OpenVTCError::Config("proof did not serialize to an object".into()))?
-        .insert("challenge".to_string(), Value::String(challenge));
 
     let mut signed = vp;
     signed
