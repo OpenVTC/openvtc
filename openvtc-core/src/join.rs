@@ -648,12 +648,13 @@ pub fn invitation_is_expired(vic: &Value, now: DateTime<Utc>) -> bool {
 pub use dtg_credentials::{DTG_CONTEXT_V1 as DTG_CONTEXT, W3C_VC_V2_CONTEXT};
 /// The base `type` every DTG credential carries.
 pub const DTG_BASE_TYPE: &str = "DTGCredential";
-/// The `issuerScope` a community's invitation declares. The VIC a joining
-/// client presents is issued by the community itself
-/// ([`invitation_matches_community`]), and a community can truthfully declare
-/// nothing narrower than `public`.
-pub const INVITATION_ISSUER_SCOPE: dtg_credentials::IssuerScope =
-    dtg_credentials::IssuerScope::Public;
+/// The narrowest `issuerScope` a community's invitation may declare. The VIC a
+/// joining client presents is issued by the community itself
+/// ([`invitation_matches_community`]), and a community is `directed` at
+/// minimum, `public` where it is open to outsiders (DTG Core, *Correlation
+/// Scope*).
+pub const INVITATION_MIN_ISSUER_SCOPE: dtg_credentials::IssuerScope =
+    dtg_credentials::IssuerScope::Directed;
 
 /// Whether a JSON value is an InvitationCredential (its `type` array carries
 /// the `InvitationCredential` tag). Used to validate a pasted/loaded VIC
@@ -714,8 +715,13 @@ pub fn validate_invitation_credential(vic: &Value) -> Result<(), String> {
              (an invitation under an older DTG context must be re-issued)",
         );
     }
-    if vic.get("issuerScope").and_then(Value::as_str) != Some(INVITATION_ISSUER_SCOPE.as_str()) {
-        missing.push("issuerScope (a community's invitation declares \"public\")");
+    if !vic
+        .get("issuerScope")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<dtg_credentials::IssuerScope>().ok())
+        .is_some_and(|s| s.satisfies(INVITATION_MIN_ISSUER_SCOPE))
+    {
+        missing.push("issuerScope (a community's invitation declares \"directed\" or \"public\")");
     }
     if !is_invitation_credential(vic) {
         missing
@@ -1376,13 +1382,17 @@ mod tests {
         old_ctx["@context"][1] = json!(crate::dtg::fixtures::RETIRED_CONTEXT);
         assert!(validate_invitation_credential(&old_ctx).is_err());
 
-        // `issuerScope` is REQUIRED, and a community's invitation is `public`.
+        // `issuerScope` is REQUIRED, and a community's invitation is `directed`
+        // or `public`.
         let mut no_scope = complete_vic();
         no_scope.as_object_mut().unwrap().remove("issuerScope");
         let err = validate_invitation_credential(&no_scope).expect_err("no issuerScope");
         assert!(err.contains("issuerScope"), "{err}");
+        let mut directed = complete_vic();
+        directed["issuerScope"] = json!("directed");
+        assert!(validate_invitation_credential(&directed).is_ok());
         let mut narrow = complete_vic();
-        narrow["issuerScope"] = json!("directed");
+        narrow["issuerScope"] = json!("pairwise");
         assert!(validate_invitation_credential(&narrow).is_err());
 
         // Exactly one concrete type.

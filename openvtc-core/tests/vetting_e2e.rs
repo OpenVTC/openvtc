@@ -278,6 +278,7 @@ async fn role_credential(issuer: &Secret, community: &str, subject: &str) -> Val
     let now = Utc::now();
     let mut credential = DTGCredential::new_community_role_vac(
         community.to_string(),
+        dtg_credentials::IssuerScope::Public,
         subject.to_string(),
         VETTER_ROLE,
         now - chrono::Duration::minutes(1),

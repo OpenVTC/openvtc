@@ -230,9 +230,11 @@ fn check_shape(
             "it is not a membership credential".into(),
         ));
     }
-    if grant.issuer_scope() != IssuerScope::Public {
+    // A community is `directed` at minimum, `public` where it is open to
+    // outsiders (DTG Core, *Correlation Scope*).
+    if !grant.issuer_scope().satisfies(IssuerScope::Directed) {
         return Err(RenewalError::VmcShape(
-            "it does not declare issuerScope public".into(),
+            "it does not declare issuerScope directed or public".into(),
         ));
     }
     if grant.issuer() != community {
@@ -254,11 +256,11 @@ fn check_shape(
         return Err(RenewalError::WrongMember);
     }
     // `community_roles` holds the VAC to the community role shape: an
-    // `AuthorityCredential`, `issuerScope` public, `authority.scope` its own
+    // `AuthorityCredential`, `issuerScope` directed or public, `authority.scope` its own
     // issuer (the community), no parent, `role:<name>` actions.
     crate::dtg::community_roles(&vac).ok_or_else(|| {
         RenewalError::RoleShape(
-            "it confers no role in the community's own scope (issuerScope public, \
+            "it confers no role in the community's own scope (issuerScope directed or public, \
              authority.scope the community, role:<name> actions)"
                 .into(),
         )
@@ -632,6 +634,34 @@ mod tests {
         )
         .await
         .expect("resolver")
+    }
+
+    /// A renewal from a community declaring `directed` is as good as one
+    /// declaring `public`; a `pairwise` grant is refused.
+    #[test]
+    fn a_directed_community_renewal_has_the_right_shape() {
+        use crate::dtg::fixtures::{grant_scoped, role_vac_scoped};
+        let vtc = "did:example:community";
+        for scope in [IssuerScope::Directed, IssuerScope::Public] {
+            let roles = check_shape(
+                &grant_scoped(vtc, scope, MEMBER),
+                &role_vac_scoped(vtc, scope, MEMBER, "member"),
+                vtc,
+                MEMBER,
+            )
+            .unwrap_or_else(|e| panic!("{scope}: {e:?}"));
+            assert_eq!(roles, vec!["member".to_string()]);
+        }
+        let mut pairwise = grant_scoped(vtc, IssuerScope::Directed, MEMBER);
+        pairwise["issuerScope"] = json!("pairwise");
+        let err = check_shape(
+            &pairwise,
+            &role_vac_scoped(vtc, IssuerScope::Directed, MEMBER, "member"),
+            vtc,
+            MEMBER,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RenewalError::VmcShape(_)), "{err:?}");
     }
 
     #[test]

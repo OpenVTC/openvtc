@@ -323,6 +323,7 @@ impl World {
     async fn vmc(&self, member: &str) -> Value {
         let vc = DTGCredential::new_vmc(
             self.community.did.clone(),
+            dtg_credentials::IssuerScope::Public,
             member.to_string(),
             Utc::now() - TimeDelta::days(1),
             None,
