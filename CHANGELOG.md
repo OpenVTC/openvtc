@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-24 (cut to release/0.8)
+
 ### Security
 
 - **The unlock-code key has a random salt of each profile's own**
