@@ -28,7 +28,7 @@ use vta_sdk::client::{ClientIdentity, CreateContextRequest, VtaClient};
 use vta_sdk::provision_client::EphemeralSetupKey;
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::trust_task_sign::{HolderKey, sign_in_place_with};
-use vta_service::test_support::MockVta;
+use vta_test_support::MockVta;
 use vti_vetting_pcs::scheme::{enc, point_from_text};
 use vti_voting::{
     election::{Election, ElectionId},

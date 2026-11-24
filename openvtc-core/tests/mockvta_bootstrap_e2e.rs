@@ -37,7 +37,7 @@ use vta_sdk::protocols::did_management::create::WebvhPathMode;
 use vta_sdk::provision_client::{
     EphemeralSetupKey, ProvisionAsk, provision_admin_rotated_via_rest,
 };
-use vta_service::test_support::MockVta;
+use vta_test_support::MockVta;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "slow: spins up a provisionable VTA + URL-direct admin-rotation round-trip"]

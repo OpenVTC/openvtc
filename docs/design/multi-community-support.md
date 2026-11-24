@@ -4,8 +4,9 @@
 > **Hierarchical contexts are now real and VTA-enforced** (VTI #257): D2/D9
 > updated, sub-context
 > authorization resolved (ancestry ACL), and a real **MockVta** harness exists
-> for T9 (VTI #256). Only open item: VP discovery (deferred, D4). Task breakdown
-> in `tasks/archive/plan.md` + `tasks/archive/todo.md`.
+> for T9 (VTI #256). Only open item: VP discovery (deferred, D4). The task
+> breakdown (`tasks/archive/plan.md`, `todo.md`) has been removed; it is in git
+> history.
 > Scope: the `openvtc` CLI (ratatui TUI) and `openvtc-core` config model. No
 > changes to the verifiable-trust-infrastructure repo are in scope here; where
 > infra/SDK changes are required they are called out as **external

@@ -18,7 +18,7 @@ use serde_json::json;
 use vta_sdk::client::{ClientIdentity, CreateContextRequest, CreateDidWebvhRequest, VtaClient};
 use vta_sdk::protocols::did_management::create::WebvhPathMode;
 use vta_sdk::provision_client::EphemeralSetupKey;
-use vta_service::test_support::MockVta;
+use vta_test_support::MockVta;
 
 const CONTEXT: &str = "persona";
 

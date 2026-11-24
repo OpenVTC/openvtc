@@ -39,7 +39,7 @@
 "vta/pcs/vote" = "0.4"
 "vta/pcs/vote-encrypted" = "0.5"
 "vta/pcs/voter/accept" = "0.1"
-"vta/pcs/voter/read" = "0.6"
+"vta/pcs/voter/read" = "0.7"
 "vta/pcs/voter/receipt" = "0.1"
 "vta/pcs/voter/register" = "0.5"
 "vta/webvh/agent-name/list" = "1.1"

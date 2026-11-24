@@ -43,8 +43,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - run: cargo fmt --all --check
 
   clippy:
@@ -60,8 +60,8 @@ jobs:
       - uses: ./.github/actions/add-swap
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
@@ -85,8 +85,8 @@ jobs:
         if: runner.os == 'Linux'
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -109,8 +109,8 @@ jobs:
       - uses: ./.github/actions/add-swap
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install system dependencies
         # libpcsclite-dev: the pcsc build script runs even with default
@@ -141,8 +141,8 @@ jobs:
       - uses: ./.github/actions/add-swap
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
@@ -159,8 +159,8 @@ jobs:
       - uses: ./.github/actions/add-swap
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
@@ -180,8 +180,8 @@ jobs:
       - uses: ./.github/actions/add-swap
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
@@ -200,8 +200,8 @@ jobs:
       - uses: ./.github/actions/add-swap
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
@@ -217,10 +217,13 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/add-swap
       # Pinned to the workspace's `rust-version`; move both together.
+      # RUSTUP_TOOLCHAIN, not `rustup default`: rust-toolchain.toml takes
+      # precedence over the default, so `rustup default 1.95.0` would leave this
+      # job building with the pin while still reporting "MSRV".
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.95.0 --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=1.95.0" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
@@ -260,8 +263,8 @@ jobs:
       - uses: ./.github/actions/add-swap
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: semver
@@ -335,8 +338,9 @@ jobs:
       - uses: ./.github/actions/add-swap
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component llvm-tools-preview
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
+          rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # `@cargo-llvm-cov` is a tool tag that upstream re-points on every
       # release, so the tool moves to the `with: tool:` input and the action

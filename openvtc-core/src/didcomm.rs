@@ -1039,38 +1039,31 @@ pub enum DIDCommEvent {
     },
 }
 
-/// The DIDComm event channel is **unbounded**, deliberately.
-///
-/// A bounded channel whose overflow is `try_send` → log → drop would stop a
-/// pathological mediator growing memory without bound, but misses what a
-/// dropped event costs here.
-///
-/// By the time an event reaches this channel the delivery layer has already
-/// acked the message — `run_dispatcher` in `affinidi-messaging-delivery` acks
-/// immediately after handing off to its subscriber broadcast — and an ack is a
-/// delete at the mediator. So a dropped event is not a deferred message, it is a
-/// **permanently destroyed** one, with a single `warn!` line as the only record.
-/// These carry membership credentials and join verdicts, so a drop strands a
-/// join with nothing on screen to say why (#221).
-///
-/// Backpressure is not available either. Blocking on a full channel would
-/// stall this consumer, the layer's broadcast buffer would overflow instead,
-/// and `subscribe()` swallows that as `Lagged` **silently** — strictly worse
-/// than a warned drop. The only choice actually on offer is
-/// where the loss happens, so we choose nowhere.
-///
-/// The memory concern is bounded in practice by the mediator: events arrive only
-/// as fast as it delivers, the consumer is the state handler's `select!` (always
-/// draining unless mid-await), and the payloads are small. Unbounded growth
-/// requires a consumer stalled indefinitely, which is a bug that would strand the
-/// UI too — visible, unlike a silent credential loss.
-///
-/// Kept as a named constant for the historical record and for anyone who goes
-/// looking for the old capacity; nothing reads it.
-#[deprecated(
-    note = "the event channel is unbounded; this value is retained only to document what it was"
-)]
-pub const DIDCOMM_EVENT_CHANNEL_CAPACITY: usize = 256;
+// The DIDComm event channel is **unbounded**, deliberately.
+//
+// A bounded channel whose overflow is `try_send` → log → drop would stop a
+// pathological mediator growing memory without bound, but misses what a
+// dropped event costs here.
+//
+// By the time an event reaches this channel the delivery layer has already
+// acked the message — `run_dispatcher` in `affinidi-messaging-delivery` acks
+// immediately after handing off to its subscriber broadcast — and an ack is a
+// delete at the mediator. So a dropped event is not a deferred message, it is a
+// **permanently destroyed** one, with a single `warn!` line as the only record.
+// These carry membership credentials and join verdicts, so a drop strands a
+// join with nothing on screen to say why (#221).
+//
+// Backpressure is not available either. Blocking on a full channel would
+// stall this consumer, the layer's broadcast buffer would overflow instead,
+// and `subscribe()` swallows that as `Lagged` **silently** — strictly worse
+// than a warned drop. The only choice actually on offer is
+// where the loss happens, so we choose nowhere.
+//
+// The memory concern is bounded in practice by the mediator: events arrive only
+// as fast as it delivers, the consumer is the state handler's `select!` (always
+// draining unless mid-await), and the payloads are small. Unbounded growth
+// requires a consumer stalled indefinitely, which is a bug that would strand the
+// UI too — visible, unlike a silent credential loss.
 
 /// Reason string included in a "Reconnect failed" log entry, plus the
 /// updated MediatorStatus the caller should drive into the connection
@@ -1507,8 +1500,8 @@ async fn dispatch_inbound(
             // Unbounded: `send` fails only when the receiver is gone, which means
             // the state handler has shut down and there is nothing left to
             // deliver to. It cannot fail because the channel is full — see
-            // `DIDCOMM_EVENT_CHANNEL_CAPACITY` for why dropping there would
-            // destroy messages the mediator has already deleted.
+            // "The DIDComm event channel is unbounded" above for why dropping
+            // there would destroy messages the mediator has already deleted.
             if event_tx.send(event).is_err() {
                 tracing::debug!("state handler has gone away — ending inbound dispatch");
                 return;

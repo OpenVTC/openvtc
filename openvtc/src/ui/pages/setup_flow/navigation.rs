@@ -66,11 +66,6 @@ pub enum NavResult {
     SendAction(Action),
     /// Send SetupCompleted (needs flow.clone()).
     CompleteSetup,
-    /// Do nothing.
-    // No navigation branch currently returns this no-op, but the dispatcher
-    // handles it; kept so `navigate` can express "stay put" without a new arm.
-    #[allow(dead_code)]
-    None,
 }
 
 /// Central navigation function — all conditional flow logic lives here.
@@ -210,7 +205,6 @@ pub fn handle_nav_result(result: NavResult, flow: &mut SetupFlow) {
                 .action_tx
                 .send(Action::SetupCompleted(Box::new(flow.clone())));
         }
-        NavResult::None => {}
     }
 }
 

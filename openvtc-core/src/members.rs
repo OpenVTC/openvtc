@@ -228,7 +228,9 @@ mod tests {
     }
 
     async fn signed_vmc() -> (Secret, Value) {
-        let secret = Secret::generate_ed25519(None, None);
+        // The key is the member's: dtg-credentials 0.15 refuses a proof whose
+        // verification method is not the issuer's DID.
+        let secret = Secret::generate_ed25519(Some(&format!("{MEMBER}#key-0")), None);
         let vc = build_member_vmc(&secret, MEMBER, &grant())
             .await
             .expect("build the member VMC");

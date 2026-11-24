@@ -40,8 +40,8 @@ jobs:
       # Plain rustup, as in ci.yml.
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
       - name: Bump versions, write the changelog, move RELEASE
         env:
           KIND: ${{ inputs.kind }}

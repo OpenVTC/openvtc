@@ -17,7 +17,7 @@ use openvtc_core::notifications::{self, Deposited, NOTIFY_TYPE};
 use serde_json::json;
 use vta_sdk::client::{ClientIdentity, CreateContextRequest, VtaClient};
 use vta_sdk::provision_client::EphemeralSetupKey;
-use vta_service::test_support::MockVta;
+use vta_test_support::MockVta;
 
 const CONTEXT: &str = "persona";
 

@@ -511,34 +511,14 @@ impl MainPageState {
                     TaskType::VRCRequestOutbound { .. } => TaskKind::VRCRequestOutbound,
                     TaskType::VRCIssued { .. } => TaskKind::VRCIssued,
                     TaskType::TrustPing { .. } => TaskKind::TrustPing,
-                    TaskType::RelationshipRequestAccepted => {
-                        TaskKind::Informational("Accepted".to_string())
-                    }
-                    TaskType::RelationshipRequestRejected => {
-                        TaskKind::Informational("Rejected".to_string())
-                    }
-                    TaskType::RelationshipRequestFinalized => {
-                        TaskKind::Informational("Finalised".to_string())
-                    }
-                    TaskType::TrustPong => TaskKind::Informational("Pong received".to_string()),
-                    TaskType::VRCRequestRejected => {
-                        TaskKind::Informational("VRC Rejected".to_string())
-                    }
-                    // Says what it costs, not just that a date passed: a lapsed
-                    // grant means requests are being refused at the applicant's
-                    // end, which is the part nobody can see from here.
-                    TaskType::VetterGrantExpiring {
-                        community,
-                        expired,
-                        valid_until,
-                    } => TaskKind::Informational(if *expired {
-                        format!(
-                            "Your vetter credential from {community} expired {valid_until} — \
-                             requests to you there are refused until it is reissued"
-                        )
-                    } else {
-                        format!("Your vetter credential from {community} expires {valid_until}")
-                    }),
+                    // Shown by its `type_display` alone ("Accepted", "Vetter
+                    // Credential Expiring", …).
+                    TaskType::RelationshipRequestAccepted
+                    | TaskType::RelationshipRequestRejected
+                    | TaskType::RelationshipRequestFinalized
+                    | TaskType::TrustPong
+                    | TaskType::VRCRequestRejected
+                    | TaskType::VetterGrantExpiring { .. } => TaskKind::Informational,
                     TaskType::VettingSessionInbound {
                         application_id,
                         session_id,
@@ -553,7 +533,7 @@ impl MainPageState {
                             request_id: request_id.clone(),
                         })
                     }
-                    _ => TaskKind::Informational("Unknown".to_string()),
+                    _ => TaskKind::Informational,
                 };
                 let remote_did = match &task.type_ {
                     TaskType::RelationshipRequestInbound { from, request, .. } => {
@@ -2052,17 +2032,6 @@ pub enum MainPanel {
     ContentPanel,
 }
 
-impl MainPanel {
-    /// Switches to the next panel when pressing `TAB`
-    #[allow(dead_code)]
-    pub fn switch(&self) -> Self {
-        match self {
-            MainPanel::MainMenu => MainPanel::ContentPanel,
-            MainPanel::ContentPanel => MainPanel::MainMenu,
-        }
-    }
-}
-
 /// What the community last said about re-delivering an approved join's
 /// credential, for the Communities row. `None` when it has said nothing yet.
 fn credential_resend_note(
@@ -3481,16 +3450,6 @@ pub(crate) mod tests {
         );
     }
 
-    // --- MainPanel::switch ---
-
-    #[test]
-    fn test_main_panel_switch() {
-        let panel = MainPanel::MainMenu;
-        assert!(matches!(panel.switch(), MainPanel::ContentPanel));
-        let panel = MainPanel::ContentPanel;
-        assert!(matches!(panel.switch(), MainPanel::MainMenu));
-    }
-
     // --- RawCredential lazy rendering (Part 2) ---
 
     /// The lazy `RawCredential::Vrc` path must pretty-print byte-identically to
@@ -3655,7 +3614,7 @@ pub(crate) mod tests {
         state.content_panel.inbox.tasks = vec![TaskSummary {
             id: "t1".to_string(),
             type_display: "Test".to_string(),
-            kind: TaskKind::Informational("x".to_string()),
+            kind: TaskKind::Informational,
             remote_did: "did:test:remote".to_string(),
             remote_agent_name: None,
             created: "2024-01-01 00:00".to_string(),

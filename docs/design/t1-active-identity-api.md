@@ -4,7 +4,8 @@
 > `openvtc-core/src/config/account.rs`, `openvtc/src/state_handler/session_manager.rs`).
 > Originally written as the API-shapes sign-off gate before T1 foundation code.
 > Companion to [`multi-community-support.md`](./multi-community-support.md)
-> (spec) and [`../../tasks/archive/todo.md`](../../tasks/archive/todo.md) (T1).
+> (spec). The T1 task list it pointed at (`tasks/archive/`) has been removed;
+> it is in git history.
 
 This sketch pins down the three new surfaces T1 introduces and how the existing
 singleton consumers map onto them. Names are proposals; types reference the

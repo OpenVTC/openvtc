@@ -91,8 +91,8 @@ jobs:
       - name: Install Rust toolchain
         if: steps.gate.outputs.publish == 'true'
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # The compiler rust-toolchain.toml pins, with its components.
+          rustup toolchain install --no-self-update
 
       - name: Install system dependencies
         if: steps.gate.outputs.publish == 'true'

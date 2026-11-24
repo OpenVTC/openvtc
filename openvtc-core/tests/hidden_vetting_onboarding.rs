@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use vta_sdk::client::{ClientIdentity, CreateContextRequest, VtaClient};
 use vta_sdk::protocols::vetting::VETTED_PREDICATE;
 use vta_sdk::provision_client::EphemeralSetupKey;
-use vta_service::test_support::MockVta;
+use vta_test_support::MockVta;
 use vti_vetting_pcs::{
     issuer::{RootRequestWire, TokenRequestWire},
     rand::{SeedableRng, rngs::StdRng},

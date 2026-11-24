@@ -823,7 +823,7 @@ fn vti_vot_016_a_presenting_read_names_the_party_it_proves() {
     assert_eq!(p["memberOf"], PARTY);
     assert_eq!(p["membershipCredential"], "cred-1");
     assert_eq!(p["payload"], json!({ "electionId": "agm-2027" }));
-    serde_json::from_value::<pcs_read::Payload>(p).expect("a valid voter/read/0.6 payload");
+    serde_json::from_value::<pcs_read::Payload>(p).expect("a valid voter/read/0.7 payload");
 }
 
 /// The credential presented is the party's own — never a group's, nor one revoked, expired or

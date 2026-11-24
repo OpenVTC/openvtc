@@ -25,7 +25,7 @@ use openvtc_core::vta_sync::{SyncParts, SyncReport, SyncState, sync_at_load};
 use uuid::Uuid;
 use vta_sdk::client::{ClientIdentity, CreateContextRequest, VtaClient};
 use vta_sdk::provision_client::EphemeralSetupKey;
-use vta_service::test_support::MockVta;
+use vta_test_support::MockVta;
 
 const CTX: &str = "openvtc-acct";
 const VTC: &str = "did:webvh:scid:vtc.example.com";

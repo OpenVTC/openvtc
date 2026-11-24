@@ -481,6 +481,7 @@ pub async fn revoke_device_grant(
                     approve_scope: None,
                     allowed_keys: None,
                     capabilities: None,
+                    purposes: None,
                 },
             )
             .await

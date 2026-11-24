@@ -345,17 +345,24 @@ pub async fn plan(
     context_id: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<RebuildPlan, OpenVTCError> {
+    // The persona methods: did:webvh and its did:scid presentation
+    // (`scid:vh`), which is what `webvh/dids/list` returned before the VTA's
+    // method-neutral `vta/dids/list`.
+    let filter = vta_sdk::client::DidListFilter {
+        context_id: Some(context_id.to_string()),
+        methods: Some(vec!["webvh".to_string(), "scid:vh".to_string()]),
+        ..Default::default()
+    };
     let dids = client
-        .list_dids_webvh(Some(context_id), None)
+        .list_dids(&filter)
         .await
-        .map_err(|e| OpenVTCError::vta(format!("could not list DIDs in {context_id}"), &e))?
-        .dids;
+        .map_err(|e| OpenVTCError::vta(format!("could not list DIDs in {context_id}"), &e))?;
 
     let personas: Vec<RebuiltPersona> = dids
         .into_iter()
         .map(|d| RebuiltPersona {
-            did: d.did,
-            context_id: d.context_id,
+            did: d.did.to_string(),
+            context_id: d.context_id.unwrap_or_else(|| context_id.to_string()),
             // Filled from the resolved document by the caller, which already
             // has a resolver; keeping the network surface here to VTA calls
             // makes this function testable against a VTA alone.
