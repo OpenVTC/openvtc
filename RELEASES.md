@@ -71,8 +71,9 @@ crate is no longer part of this workspace.
 | Release | Branch | First RC | GA | Latest | Status |
 |---|---|---|---|---|---|
 | ≤ 0.6 | — | — | — | `0.6.0` | released from `main` by hand |
-| 0.7 | `release/0.7` | 2026-11-05 | 2026-11-05 | `0.7.0` | supported (N-1) |
-| 0.8 | `release/0.8` | 2026-11-24 | 2026-11-24 | `0.8.0` | supported (N) |
+| 0.7 | `release/0.7` | 2026-11-05 | 2026-11-05 | `0.7.0` | end of life (2026-11-24) |
+| 0.8 | `release/0.8` | 2026-11-24 | 2026-11-24 | `0.8.0` | supported (N-1) |
+| 0.9 | `release/0.9` | 2026-11-24 | 2026-11-24 | `0.9.0` | supported (N) |
 
 ## Support
 
