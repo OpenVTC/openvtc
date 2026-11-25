@@ -91,7 +91,6 @@ pub mod tsp_store;
 pub mod vetting;
 pub mod vrc;
 pub mod vta_receive;
-pub mod vta_receive_leg;
 pub mod vta_sync;
 pub mod vta_task;
 pub mod witness;

@@ -47,11 +47,7 @@ async fn runtime() -> (Runtime, Handles) {
         config: Box::new(test_config()),
         admin_vta: None,
         presence_rx,
-        vta_supervisor: vta_recovery::AdminVtaSupervisor::new(
-            None,
-            None,
-            openvtc_core::vta_receive_leg::ReceiveLegTracker::new(),
-        ),
+        vta_supervisor: vta_recovery::AdminVtaSupervisor::new(None, None),
         didcomm_event_rx,
         shutdown_token,
         didcomm_service,

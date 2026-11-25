@@ -8,7 +8,7 @@
 //! collecting (observed 2026-10-05: two admin sessions, an hour, every VTA reply
 //! refused once the mediator's per-peer queue filled) looks exactly like a VTA
 //! that never answers — and retrying only queues another reply. The state is
-//! detected by [`crate::vta_receive_leg`]; this module is where OpenVTC turns
+//! detected by the SDK ([`vta_sdk::client::VtaClient::receive_health`]); this module is where OpenVTC turns
 //! it into words and a schedule.
 //!
 //! - [`replies_not_arriving_text`] is the one sentence for it (R6.4): neither
@@ -16,8 +16,8 @@
 //! - [`RebuildBackoff`] is the bounded, jittered schedule the runtime rebuilds
 //!   the session on (R1.4).
 
-use crate::vta_receive_leg::ReceiveHealth;
 use std::time::Duration;
+use vta_sdk::client::ReceiveLegHealth;
 
 /// The state, without what is being done about it: the request *did* reach the
 /// VTA (so it is not unreachable), and what is missing is the way back (so it is
@@ -46,7 +46,7 @@ pub fn replies_not_arriving_text(consecutive_timeouts: u32) -> String {
 /// A short, human reading of a receive-leg health snapshot for a status line,
 /// e.g. `last reply 12s ago` or `no reply for 4m 10s (3 missed in a row)`.
 #[must_use]
-pub fn describe_health(health: &ReceiveHealth) -> String {
+pub fn describe_health(health: &ReceiveLegHealth) -> String {
     let last = match health.since_last_reply {
         Some(age) => format!("last reply {} ago", short_duration(age)),
         None => "no reply yet this session".to_string(),
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn health_reads_for_a_person() {
-        let mut h = ReceiveHealth::default();
+        let mut h = ReceiveLegHealth::default();
         assert_eq!(describe_health(&h), "no reply yet this session");
         h.since_last_reply = Some(Duration::from_secs(12));
         assert_eq!(describe_health(&h), "last reply 12s ago");

@@ -788,11 +788,10 @@ mod tests {
         since_last_reply: Option<u64>,
         recovery: crate::state_handler::main_page::content::VtaRecoveryView,
     ) -> VtaState {
-        let health = openvtc_core::vta_receive_leg::ReceiveHealth {
-            consecutive_reply_timeouts: consecutive,
-            since_last_reply: since_last_reply.map(std::time::Duration::from_secs),
-            ..Default::default()
-        };
+        // `ReceiveLegHealth` is `#[non_exhaustive]`: built by assignment.
+        let mut health = vta_sdk::client::ReceiveLegHealth::default();
+        health.consecutive_reply_timeouts = consecutive;
+        health.since_last_reply = since_last_reply.map(std::time::Duration::from_secs);
         let mut state = vta_managed(None);
         state.receive.health = Some(health);
         state.receive.recovery = recovery;

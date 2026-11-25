@@ -172,7 +172,7 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # `trust-tasks-rs`, `affinidi-tdk`, `affinidi-messaging-sdk` and
 # `dtg-credentials`. Name the patch when a specific release is what makes the
 # line work. Check: `cargo tree -d -e normal,build,dev`.
-vta-sdk = { version = "0.94.0", features = [
+vta-sdk = { version = "0.94.1", features = [
   "session",
   "client",
   # Registers the same per-platform credential store as the other VTI tools
