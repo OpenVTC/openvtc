@@ -286,20 +286,21 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # `checks: write` is what audit-check needs to publish its advisories as
-    # check-run annotations; without it the action cannot create the check and
-    # the job fails on that instead of on the advisory. Narrower than the
-    # repository default this job would otherwise inherit.
+    # cargo-audit runs directly: rustsec/audit-check's only release (v2.0.0)
+    # targets the deprecated Node.js 20 runtime. The ignore list lives in
+    # `.cargo/audit.toml`, which cargo-audit reads from the workspace root.
     permissions:
       contents: read
-      checks: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit@0.22.2
+      - name: cargo audit
+        run: cargo audit
 
   machete:
     name: Unused dependencies (cargo-machete)
@@ -364,4 +365,5 @@ jobs:
         with:
           name: lcov.info
           path: lcov.info
-          retention-days: 30
+          # The repository caps artifact retention at 14 days.
+          retention-days: 14
