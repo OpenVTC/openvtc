@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **A community may declare `issuerScope: directed`**
+  ([#626](https://github.com/OpenVTC/openvtc/pull/626)). DTG Core Credentials 0.16 makes a
+  community `directed` at minimum and `public` where it is open to outsiders. Role VACs,
+  a renewed VMC and an invitation credential are accepted with either scope; `pairwise`
+  is still refused. In `openvtc-core`, `INVITATION_ISSUER_SCOPE` is replaced by
+  `INVITATION_MIN_ISSUER_SCOPE`.
+
+### Changed
+
+- **VTA reply health comes from `vta-sdk`**
+  ([#627](https://github.com/OpenVTC/openvtc/pull/627)). The recovery supervisor reads
+  `VtaClient::receive_health()`, which counts every DIDComm and TSP request on the admin
+  session. Breaking for `openvtc-core`: the `vta_receive_leg` module is removed and
+  `devices::{register, list, heartbeat}` no longer take a `ReceiveLegTracker`.
+- **Dependencies for the Fig release.** `did-git-sign` / `vgi-core` 0.37, `vta-sdk` 0.94.1,
+  `dtg-credentials` 0.16, `affinidi-tdk` 0.50, `affinidi-messaging-sdk` 0.51 and
+  `trust-tasks` 0.41.3, with the matching VTI test crates; one node of each in the graph.
+
 ## [0.8.0] - 2026-11-24 (cut to release/0.8)
 
 ### Security
