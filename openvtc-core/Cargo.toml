@@ -122,11 +122,11 @@ affinidi-messaging-test-mediator = "0.56"
 # manifest's `vta-sdk` line: an older one pulls a second sdk into the dev graph
 # and the generated wire types the tests assert on stop unifying. Check:
 # `cargo tree -i vti-common` and `-i vta-sdk` (one node each).
-vta-service = { version = "0.87.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
+vta-service = { version = "0.87.1", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
 # `MockVta`, the stub DID host and the transport harness moved out of
 # `vta-service::test_support` into this crate (VTI #2730), which re-exports the
 # rest of `vta_service::test_support`. Same `vta-service` line as above.
-vta-test-support = { version = "0.6", features = ["transport-harness"] }
+vta-test-support = { version = "0.6.1", features = ["transport-harness"] }
 # The community's half of hidden vetting, in process (`vtc::Vtc`, feature
 # `harness`), for `tests/hidden_vetting_onboarding.rs`. The PCS engine is the
 # VTA's; this client holds no PCS key. Same `vta-sdk` line as `vta-service`.

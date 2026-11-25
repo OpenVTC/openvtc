@@ -254,7 +254,7 @@ impl RemoteKind {
     #[must_use]
     pub fn from_vta(e: &vta_sdk::error::VtaError) -> Self {
         use vta_sdk::error::VtaError as E;
-        if crate::vta_receive_leg::is_reply_timeout(e) {
+        if e.is_reply_timeout() {
             return RemoteKind::Timeout;
         }
         match e {

@@ -5,7 +5,8 @@
 //! nobody reads until the mediator's per-peer cap refuses the rest. On
 //! 2026-10-05 two admin sessions sat in that state for an hour and nothing in
 //! OpenVTC noticed. The state is now counted — reply timeouts in a row on the
-//! admin session, [`openvtc_core::vta_receive_leg`] — and the remedy is the one
+//! admin session, by the SDK ([`VtaClient::receive_health`], every request on
+//! the session over DIDComm or TSP) — and the remedy is the one
 //! this module drives: a *fresh* session, whose connect re-registers for live
 //! delivery and drains the inbox. Retrying on the old one only queues another
 //! reply.
@@ -21,13 +22,12 @@ use super::main_page::MainPageState;
 use super::main_page::content::{VtaReceiveStatus, VtaRecoveryView};
 use openvtc_core::config::RuntimeVtaConnect;
 use openvtc_core::vta_receive::{RebuildBackoff, replies_not_arriving_text, short_duration};
-use openvtc_core::vta_receive_leg::{ReceiveHealth, ReceiveLegTracker};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tracing::{info, warn};
-use vta_sdk::client::VtaClient;
+use vta_sdk::client::{ReceiveLegHealth, VtaClient};
 
 /// How often the loop reads the admin session's receive health. The read is a
 /// lock on three fields — no I/O — so this only bounds how stale the panel is and
@@ -127,7 +127,7 @@ impl AdminVtaRecovery {
     /// replaced.
     pub(crate) fn observe(
         &mut self,
-        health: &ReceiveHealth,
+        health: &ReceiveLegHealth,
         now: Instant,
         unit: f64,
     ) -> Option<Transition> {
@@ -216,13 +216,13 @@ impl AdminVtaRecovery {
 ///
 /// The old session is closed *first*: a second session for the same DID would
 /// fight it for the mediator's one live stream. Every step is bounded (R1.2).
-/// Once connected, `receive` starts counting afresh for the new session and one
-/// read-only call is sent so a reply has the chance to come back and close
-/// recovery; its result only matters through that count.
+/// Once connected, the new session's receive leg starts afresh (it is the
+/// session's, in the SDK) and one read-only call is sent so a reply has the
+/// chance to come back and close recovery; its result only matters through that
+/// count.
 pub(crate) async fn rebuild(
     old: Option<VtaClient>,
     connect: &RuntimeVtaConnect,
-    receive: &ReceiveLegTracker,
 ) -> Result<VtaClient, String> {
     if let Some(old) = old
         && tokio::time::timeout(SHUTDOWN_TIMEOUT, old.shutdown())
@@ -245,12 +245,7 @@ pub(crate) async fn rebuild(
             ));
         }
     };
-    receive.reset();
-    match tokio::time::timeout(PROBE_TIMEOUT, async {
-        receive.observe(client.list_contexts().await)
-    })
-    .await
-    {
+    match tokio::time::timeout(PROBE_TIMEOUT, client.list_contexts()).await {
         Ok(Ok(_)) => info!("the rebuilt admin VTA session is receiving replies"),
         Ok(Err(e)) => warn!("the rebuilt admin VTA session's first request failed: {e}"),
         Err(_) => warn!(
@@ -270,8 +265,6 @@ pub(crate) type RebuildOutcome = Result<VtaClient, String>;
 /// starts in one lands in the other rather than being lost at the hand-off.
 pub(crate) struct AdminVtaSupervisor {
     recovery: AdminVtaRecovery,
-    /// The admin session's receive leg, fed by every wrapped call on it.
-    receive: ReceiveLegTracker,
     /// `None` for a local-key account: nothing to rebuild.
     connect: Option<Arc<RuntimeVtaConnect>>,
     /// Long-lived holders of the session (the device-presence task) follow it
@@ -285,31 +278,23 @@ pub(crate) struct AdminVtaSupervisor {
 }
 
 impl AdminVtaSupervisor {
-    /// `receive` is the admin session's receive leg, already shared with the
-    /// session's other observers (the device-presence task).
+    /// The admin session's receive health is read from the session itself
+    /// ([`VtaClient::receive_health`]), so nothing else is shared with it.
     pub(crate) fn new(
         connect: Option<RuntimeVtaConnect>,
         watch: Option<watch::Sender<VtaClient>>,
-        receive: ReceiveLegTracker,
     ) -> Self {
         let mut tick = tokio::time::interval(HEALTH_CHECK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let (done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             recovery: AdminVtaRecovery::default(),
-            receive,
             connect: connect.map(Arc::new),
             watch,
             tick,
             done_tx,
             done_rx,
         }
-    }
-
-    /// The admin session's receive leg, for a caller to count its calls on
-    /// ([`ReceiveLegTracker::observe`]). It follows the session across rebuilds.
-    pub(crate) fn receive(&self) -> &ReceiveLegTracker {
-        &self.receive
     }
 
     /// One health check of the admin session, run from the loop's tick (and
@@ -320,7 +305,7 @@ impl AdminVtaSupervisor {
     pub(crate) fn check(&mut self, client: Option<&VtaClient>, main_page: &mut MainPageState) {
         let Some(client) = client else { return };
         let now = Instant::now();
-        let health = self.receive.health_at(now);
+        let health = client.receive_health();
         {
             let view = &mut main_page.content_panel.vta.receive;
             view.health = Some(health.clone());
@@ -338,10 +323,9 @@ impl AdminVtaSupervisor {
             );
             let old = client.clone();
             let connect = Arc::clone(connect);
-            let receive = self.receive.clone();
             let done = self.done_tx.clone();
             tokio::spawn(async move {
-                let outcome = rebuild(Some(old), &connect, &receive).await;
+                let outcome = rebuild(Some(old), &connect).await;
                 // The loops have exited: nobody will own this session, so close
                 // it rather than leak a second connection for this DID.
                 if let Err(tokio::sync::mpsc::error::SendError(Ok(orphan))) = done.send(outcome) {
@@ -360,7 +344,7 @@ impl AdminVtaSupervisor {
         outcome: RebuildOutcome,
         main_page: &mut MainPageState,
     ) -> Option<VtaClient> {
-        let client = land(&mut self.recovery, outcome, &self.receive, main_page)?;
+        let client = land(&mut self.recovery, outcome, main_page)?;
         if let Some(watch) = self.watch.as_ref() {
             watch.send_replace(client.clone());
         }
@@ -375,7 +359,6 @@ impl AdminVtaSupervisor {
 fn land(
     recovery: &mut AdminVtaRecovery,
     outcome: RebuildOutcome,
-    receive: &ReceiveLegTracker,
     main_page: &mut MainPageState,
 ) -> Option<VtaClient> {
     let now = Instant::now();
@@ -388,10 +371,10 @@ fn land(
     };
     announce(main_page, &transition);
     let view = &mut main_page.content_panel.vta.receive;
-    if client.is_some() {
+    if let Some(client) = client.as_ref() {
         // Fresh session, fresh counters: show the new session's health, not the
         // stalled one's.
-        view.health = Some(receive.health_at(now));
+        view.health = Some(client.receive_health());
         view.observed_at = Some(now);
     }
     sync_view(recovery, view);
@@ -465,19 +448,19 @@ fn announce(main_page: &mut MainPageState, t: &Transition) {
 mod tests {
     use super::*;
 
-    fn stalled(n: u32) -> ReceiveHealth {
-        ReceiveHealth {
-            consecutive_reply_timeouts: n,
-            since_last_reply: Some(Duration::from_secs(600)),
-            since_last_timeout: Some(Duration::from_secs(1)),
-        }
+    // `ReceiveLegHealth` is `#[non_exhaustive]`: built by assignment.
+    fn stalled(n: u32) -> ReceiveLegHealth {
+        let mut h = ReceiveLegHealth::default();
+        h.consecutive_reply_timeouts = n;
+        h.since_last_reply = Some(Duration::from_secs(600));
+        h.since_last_timeout = Some(Duration::from_secs(1));
+        h
     }
 
-    fn replying() -> ReceiveHealth {
-        ReceiveHealth {
-            since_last_reply: Some(Duration::from_secs(1)),
-            ..ReceiveHealth::default()
-        }
+    fn replying() -> ReceiveLegHealth {
+        let mut h = ReceiveLegHealth::default();
+        h.since_last_reply = Some(Duration::from_secs(1));
+        h
     }
 
     #[test]
@@ -485,26 +468,21 @@ mod tests {
         let mut r = AdminVtaRecovery::default();
         let now = Instant::now();
         assert_eq!(r.observe(&replying(), now, 0.5), None);
-        assert_eq!(r.observe(&ReceiveHealth::default(), now, 0.5), None);
+        assert_eq!(r.observe(&ReceiveLegHealth::default(), now, 0.5), None);
         // One timeout is below the breaker: the SDK's own self-repair's turn.
         assert_eq!(r.observe(&stalled(1), now, 0.5), None);
         assert!(!r.try_begin(now + Duration::from_secs(3600)));
         assert_eq!(r.phase(), RecoveryPhase::Healthy);
     }
 
-    /// The reply-timeout errors themselves, counted on the leg, trigger the
-    /// rebuild: two in a row is "replies not arriving".
+    /// The SDK's breaker — `REPLY_TIMEOUT_BREAKER` reply timeouts in a row —
+    /// triggers the rebuild: two in a row is "replies not arriving".
     #[test]
-    fn reply_timeout_errors_trigger_a_rebuild_after_the_first_backoff() {
+    fn reply_timeouts_at_the_breaker_trigger_a_rebuild_after_the_first_backoff() {
         let mut r = AdminVtaRecovery::default();
         let now = Instant::now();
-        let leg = ReceiveLegTracker::new();
-        for _ in 0..openvtc_core::vta_receive_leg::REPLY_TIMEOUT_BREAKER {
-            let _ = leg.observe::<()>(Err(vta_sdk::error::VtaError::TspTransport(
-                "timed out waiting for the TSP reply to request 'urn:uuid:1'".into(),
-            )));
-        }
-        let health = leg.health_at(now);
+        assert_eq!(vta_sdk::client::REPLY_TIMEOUT_BREAKER, 2);
+        let health = stalled(vta_sdk::client::REPLY_TIMEOUT_BREAKER);
         assert!(health.replies_not_arriving());
         assert_eq!(
             r.observe(&health, now, 0.5),
@@ -528,7 +506,7 @@ mod tests {
     fn a_timeout_below_the_breaker_does_not_trigger_a_rebuild() {
         let mut r = AdminVtaRecovery::default();
         let now = Instant::now();
-        let health = stalled(openvtc_core::vta_receive_leg::REPLY_TIMEOUT_BREAKER - 1);
+        let health = stalled(vta_sdk::client::REPLY_TIMEOUT_BREAKER - 1);
         assert!(!health.replies_not_arriving());
         assert_eq!(r.observe(&health, now, 0.5), None);
         assert!(!r.try_begin(now + Duration::from_secs(3600)));
@@ -544,8 +522,7 @@ mod tests {
         r.observe(&stalled(2), now, 0.5);
         assert!(r.try_begin(now + Duration::from_secs(5)));
 
-        let leg = ReceiveLegTracker::new();
-        assert!(land(&mut r, Err("mediator down".into()), &leg, &mut page).is_none());
+        assert!(land(&mut r, Err("mediator down".into()), &mut page).is_none());
         let view = &page.content_panel.vta.receive;
         assert!(matches!(
             view.recovery,
@@ -555,7 +532,7 @@ mod tests {
 
         assert!(r.try_begin(Instant::now() + Duration::from_secs(60)));
         let fresh = VtaClient::new("https://vta.example");
-        assert!(land(&mut r, Ok(fresh), &leg, &mut page).is_some());
+        assert!(land(&mut r, Ok(fresh), &mut page).is_some());
         let view = &page.content_panel.vta.receive;
         assert_eq!(view.recovery, VtaRecoveryView::Reconnected);
         assert_eq!(view.last_rebuild_error, None);

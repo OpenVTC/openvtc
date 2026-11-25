@@ -1778,7 +1778,7 @@ pub struct VtaState {
 #[derive(Clone, Debug, Default)]
 pub struct VtaReceiveStatus {
     /// The session's last health snapshot. `None` with no admin session.
-    pub health: Option<openvtc_core::vta_receive_leg::ReceiveHealth>,
+    pub health: Option<vta_sdk::client::ReceiveLegHealth>,
     /// When [`health`](Self::health) was taken, so the panel can age the
     /// "last reply" between checks.
     pub observed_at: Option<std::time::Instant>,

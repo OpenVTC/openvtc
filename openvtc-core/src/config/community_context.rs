@@ -762,8 +762,8 @@ pub(crate) fn vta_failure(action: &str, e: VtaError) -> OpenVTCError {
     match e {
         // Not "could not reach": the request was sent, and it is the reply that
         // is missing — which, repeated, is a session whose inbox is not being
-        // collected, with its own remedy (R6.4, `vta_receive_leg`).
-        ref e if crate::vta_receive_leg::is_reply_timeout(e) => OpenVTCError::vta(
+        // collected, with its own remedy (R6.4, `VtaClient::receive_health`).
+        ref e if e.is_reply_timeout() => OpenVTCError::vta(
             format!(
                 "the request to {action} was sent, but no reply from your VTA reached this app \
              in time"
