@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **First-time setup no longer stops at "This Trust Context is already in use"**
+  ([#632](https://github.com/OpenVTC/openvtc/issues/632)). The context probe counted every
+  DID in the context, including the `did:key` admin identity setup had just rotated into
+  it, so every fresh context read as holding one persona. It now counts persona methods
+  only (`did:webvh` and `scid:vh`), the same set the rebuild plan lists; `openvtc-core`
+  exports them as `context_probe::PERSONA_DID_METHODS`.
+
+### Documentation
+
+- **Linux runtime libraries** ([#633](https://github.com/OpenVTC/openvtc/issues/633)). The
+  README names `libpcsclite.so.1` and `libdbus-1.so.3`, which the Linux binary needs
+  before it will start, with the package for each distribution.
+
 ## [0.9.0] - 2026-11-24 (cut to release/0.9)
 
 ### Added

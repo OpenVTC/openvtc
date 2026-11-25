@@ -28,6 +28,15 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 use vta_sdk::client::VtaClient;
 
+/// The `vta/dids/list` method profiles an OpenVTC persona is minted under:
+/// `did:webvh` and its `did:scid` presentation (`scid:vh`).
+///
+/// Deliberately excludes `key`: the long-term admin identity setup provisions
+/// is a `did:key` in the same context, and it is OpenVTC's own credential, not
+/// an account's persona. The probe and the rebuild plan share this list so the
+/// two cannot disagree about what a persona is.
+pub const PERSONA_DID_METHODS: &[&str] = &["webvh", "scid:vh"];
+
 /// What a probe found in a Trust Context.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextContents {
@@ -117,10 +126,20 @@ impl ProbeOutcome {
 /// authenticated to (D6). Runs on every setup rather than behind a flag,
 /// because a user who needs the answer is by definition not expecting to.
 pub async fn probe(client: &VtaClient, context_id: &str) -> ProbeOutcome {
-    // Every method's identities (`vta/dids/list`): any DID at all means the
-    // context is in use.
+    // Persona identities only. `vta/dids/list` with no method filter also
+    // returns the `did:key` admin identity setup has just rotated into this
+    // context, so counting "any DID at all" reported every fresh context as
+    // holding one persona (#632). The `class` filter is no help: the VTA
+    // records a class for `did:webs` only, so `class: "persona"` would hide
+    // every `did:webvh` persona and read an occupied context as empty.
     let filter = vta_sdk::client::DidListFilter {
         context_id: Some(context_id.to_string()),
+        methods: Some(
+            PERSONA_DID_METHODS
+                .iter()
+                .map(|m| (*m).to_string())
+                .collect(),
+        ),
         ..Default::default()
     };
     let dids = match client.list_dids(&filter).await {
