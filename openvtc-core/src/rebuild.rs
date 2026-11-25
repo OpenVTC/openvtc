@@ -350,7 +350,12 @@ pub async fn plan(
     // method-neutral `vta/dids/list`.
     let filter = vta_sdk::client::DidListFilter {
         context_id: Some(context_id.to_string()),
-        methods: Some(vec!["webvh".to_string(), "scid:vh".to_string()]),
+        methods: Some(
+            crate::context_probe::PERSONA_DID_METHODS
+                .iter()
+                .map(|m| (*m).to_string())
+                .collect(),
+        ),
         ..Default::default()
     };
     let dids = client

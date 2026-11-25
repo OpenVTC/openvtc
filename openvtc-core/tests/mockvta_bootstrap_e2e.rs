@@ -15,6 +15,8 @@
 //!     `grant_super_admin`, the `pnm acl create` step) drives
 //!     `provision_admin_rotated_via_rest`, which returns a freshly-minted
 //!     long-term admin DID + key (not the setup pair).
+//!   * `probe_reads_a_fresh_context_as_empty_after_admin_rotation` — #632: the
+//!     context probe does not count the rotated admin `did:key` as a persona.
 //!   * `bootstrap_creates_top_context_and_lists_webvh_server` — the rest of the
 //!     State-A VTA surface: an authenticated client creates the account's
 //!     top-level context and sees a seeded webvh hosting server in the catalogue.
@@ -78,6 +80,68 @@ async fn admin_rotation_provisions_against_mock_vta() {
         !reply.admin_private_key_mb.is_empty(),
         "the rotated admin must carry its private key"
     );
+
+    mock.shutdown().await;
+}
+
+/// #632: setup probes the context *after* rotating the setup DID into the
+/// long-term admin `did:key`, which the VTA records in that same context. The
+/// probe must not count OpenVTC's own admin identity as a persona, or every
+/// first-time setup stops at "This Trust Context is already in use".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow: spins up a provisionable VTA + URL-direct admin-rotation round-trip"]
+async fn probe_reads_a_fresh_context_as_empty_after_admin_rotation() {
+    use openvtc_core::context_probe::{ProbeOutcome, probe};
+    use vta_sdk::client::DidListFilter;
+
+    let mock = MockVta::start_provisionable().await;
+    let setup = EphemeralSetupKey::generate().expect("generate setup key");
+    mock.grant_super_admin(&setup.did).await;
+
+    let reply = provision_admin_rotated_via_rest(
+        mock.base_url(),
+        mock.vta_did(),
+        setup.did.clone(),
+        setup.private_key_multibase().to_string(),
+        ProvisionAsk::vta_admin_rotated("ctx1"),
+    )
+    .await
+    .expect("URL-direct admin rotation round-trips against MockVta");
+
+    // Authenticate as the rotated admin, as the wizard does before probing.
+    let token = mock.ctx.mint_token(&reply.admin_did, "admin", vec![]).await;
+    let client = VtaClient::authenticated(
+        mock.base_url(),
+        ClientIdentity::did_key(
+            reply.admin_did.clone(),
+            reply.admin_private_key_mb.clone(),
+            mock.vta_did(),
+        ),
+        token,
+    )
+    .await;
+
+    // The precondition that made #632 happen: the admin did:key is listed in
+    // the context it was provisioned for. Without it this test proves nothing.
+    let everything = client
+        .list_dids(&DidListFilter {
+            context_id: Some("ctx1".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("list every DID in ctx1");
+    assert!(
+        everything
+            .iter()
+            .any(|d| d.did.to_string() == reply.admin_did),
+        "the rotated admin DID should be listed in ctx1, got {:?}",
+        everything
+            .iter()
+            .map(|d| d.did.to_string())
+            .collect::<Vec<_>>()
+    );
+
+    assert_eq!(probe(&client, "ctx1").await, ProbeOutcome::Empty);
 
     mock.shutdown().await;
 }
@@ -206,6 +270,14 @@ async fn persona_did_webvh_mint_round_trips() {
         "result records the server the persona was minted against"
     );
     assert!(!minted.scid.is_empty(), "minted DID must carry an SCID");
+
+    // The other half of #632: filtering the probe down to persona methods must
+    // still see a real persona, so an occupied context is never read as empty.
+    let probed = openvtc_core::context_probe::probe(&client, "ctx1").await;
+    let contents = probed
+        .contents()
+        .expect("a context holding a persona is occupied");
+    assert_eq!(contents.persona_dids, vec![minted.did.clone()]);
 
     mock.shutdown().await;
 }

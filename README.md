@@ -170,6 +170,36 @@ directory; OpenVTC creates it if it does not exist.
 3. A Personal Network Manager (`pnm`) that can grant OpenVTC access to the VTA,
    or a VTA administrator who will run the grant for you.
 
+### Linux runtime libraries
+
+The Linux `openvtc` binary links two system libraries dynamically, so they must
+be installed before it will start — including the pre-built download, and even
+if you never use a hardware token:
+
+| Library           | Why                                         | Debian / Ubuntu | Fedora           | Arch       |
+| ----------------- | ------------------------------------------- | --------------- | ---------------- | ---------- |
+| `libpcsclite.so.1` | PC/SC, for hardware tokens (`openpgp-card`) | `libpcsclite1`  | `pcsc-lite-libs` | `pcsclite` |
+| `libdbus-1.so.3`  | Secret Service keyring                      | `libdbus-1-3`   | `dbus-libs`      | `dbus`     |
+
+Desktop installs usually have both already. Server images, containers and WSL
+often lack `libpcsclite1`, and the binary then fails before OpenVTC can explain
+anything:
+
+```text
+openvtc: error while loading shared libraries: libpcsclite.so.1: cannot open shared object file
+```
+
+On Debian or Ubuntu:
+
+```bash
+sudo apt install libpcsclite1 libdbus-1-3
+```
+
+Using a hardware token additionally needs the PC/SC daemon (`pcscd`) running. To
+build without hardware token support, and so without the PC/SC dependency, see
+`--no-default-features` below. Building from source needs the development
+packages instead (`libpcsclite-dev libdbus-1-dev pkgconf` on Debian/Ubuntu).
+
 ## Feature Flags
 
 | Flag            | Description                                                         | Default  |
