@@ -334,10 +334,18 @@ pub async fn list(client: &VtaClient) -> Result<Vec<DeviceRecord>, OpenVTCError>
     Ok(out)
 }
 
-/// Pull a `DeviceBinding` out of a register/heartbeat response, whether the VTA
-/// returned it bare or wrapped in a `device` envelope.
+/// Pull a `DeviceBinding` out of a register/heartbeat response.
+///
+/// `device/register/0.2` defines the response as `{ "binding": DeviceBinding }`,
+/// and that is what current VTAs send. The `device` envelope and the bare record
+/// are kept as fallbacks for older VTAs. Reading only the latter two is what made
+/// every first launch warn "returned no binding" for a registration that had
+/// succeeded (#636).
 fn parse_binding(response: &serde_json::Value) -> Option<DeviceRecord> {
-    let candidate = response.get("device").unwrap_or(response);
+    let candidate = response
+        .get("binding")
+        .or_else(|| response.get("device"))
+        .unwrap_or(response);
     serde_json::from_value(candidate.clone()).ok()
 }
 
@@ -525,6 +533,38 @@ mod tests {
         assert_eq!(d.device_id, "dev-1");
         assert!(d.last_seen_at.is_none());
         assert!(d.is_active());
+    }
+
+    /// The `device/register/0.2` response shape — `{ "binding": … }` — is what
+    /// the VTA sends. Missing it made every first launch warn falsely (#636).
+    #[test]
+    fn a_register_response_parses_from_the_spec_binding_envelope() {
+        let raw = serde_json::json!({
+            "binding": { "deviceId": "dev-1", "displayName": "OpenVTC on host" }
+        });
+        let d = parse_binding(&raw).expect("spec envelope parses");
+        assert_eq!(d.device_id, "dev-1");
+    }
+
+    /// Older VTAs: a `device` envelope, or the record bare.
+    #[test]
+    fn a_register_response_parses_from_legacy_shapes() {
+        let wrapped = serde_json::json!({ "device": { "deviceId": "dev-2" } });
+        assert_eq!(
+            parse_binding(&wrapped).expect("device envelope").device_id,
+            "dev-2"
+        );
+
+        let bare = serde_json::json!({ "deviceId": "dev-3" });
+        assert_eq!(
+            parse_binding(&bare).expect("bare record").device_id,
+            "dev-3"
+        );
+    }
+
+    #[test]
+    fn a_register_response_with_no_binding_is_none() {
+        assert!(parse_binding(&serde_json::json!({ "ok": true })).is_none());
     }
 
     #[test]
