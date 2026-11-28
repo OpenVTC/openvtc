@@ -118,7 +118,7 @@ multibase = "0.9"
 pgp = "0.20"
 # Default features off: only the module matrix is needed (drawn with
 # half-blocks), not `image` output.
-qrcode = { version = "0.14", default-features = false }
+qrcode = { version = "0.15", default-features = false }
 # Held at 0.8 by `pgp` 0.20, which takes an `R: CryptoRng + Rng` from the
 # rand_core 0.6 traits; our `OsRng` is handed to it directly. Moves with `pgp`.
 rand = "0.8"
@@ -202,7 +202,7 @@ zeroize = "1.8"
 # OpenPGP card support (the default `openpgp-card` feature).
 openpgp-card = "0.7"
 card-backend-pcsc = "0.5"
-openpgp-card-rpgp = "0.8"
+openpgp-card-rpgp = "0.9"
 
 [profile.release]
 lto = true
