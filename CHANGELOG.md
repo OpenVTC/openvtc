@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only (`did:webvh` and `scid:vh`), the same set the rebuild plan lists; `openvtc-core`
   exports them as `context_probe::PERSONA_DID_METHODS`.
 
+### Changed
+
+- **Dependencies: `vta-sdk` 0.95, `vta-service` 0.88.** `did-git-sign` / `vgi-core` 0.38
+  (the same VGI on `vta-sdk` 0.95), and in tests `vta-test-support` 0.7, `vti-vetting-pcs`
+  0.28 and `vti-voting` 0.24. No source changes. This is the line the embedded VTA builds on.
+
 ### Documentation
 
 - **Linux runtime libraries** ([#633](https://github.com/OpenVTC/openvtc/issues/633)). The
