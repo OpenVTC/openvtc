@@ -111,15 +111,15 @@ libc = "0.2"
 keyring-core = "1"
 linux-keyutils-keyring-store = "1"
 multibase = "0.9"
-# Must be the `pgp` line `openpgp-card-rpgp` requires (0.8 -> `^0.20`): the
+# Must be the `pgp` line `openpgp-card-rpgp` requires (0.9 -> `^0.21`): the
 # card's `CardSlot` implements that line's key traits, so the two move in one
-# change (0.9 / 0.21 are both on rand 0.8 and x25519-dalek 2). In Dependabot's
+# change (both are on rand 0.8 and x25519-dalek 2). In Dependabot's
 # ignore list with `rand` and `x25519-dalek`.
-pgp = "0.20"
+pgp = "0.21"
 # Default features off: only the module matrix is needed (drawn with
 # half-blocks), not `image` output.
-qrcode = { version = "0.14", default-features = false }
-# Held at 0.8 by `pgp` 0.20, which takes an `R: CryptoRng + Rng` from the
+qrcode = { version = "0.15", default-features = false }
+# Held at 0.8 by `pgp` 0.21, which takes an `R: CryptoRng + Rng` from the
 # rand_core 0.6 traits; our `OsRng` is handed to it directly. Moves with `pgp`.
 rand = "0.8"
 ratatui = "0.30"
@@ -202,7 +202,7 @@ zeroize = "1.8"
 # OpenPGP card support (the default `openpgp-card` feature).
 openpgp-card = "0.7"
 card-backend-pcsc = "0.5"
-openpgp-card-rpgp = "0.8"
+openpgp-card-rpgp = "0.9"
 
 [profile.release]
 lto = true
